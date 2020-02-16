@@ -614,7 +614,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         postDbMaxMachineId = ClusterState.MaxMachineId;
                     }
 
-                    var updateResult = await GlobalStore.UpdateClusterStateAsync(context, ClusterState);
+                    var updateResult = await GlobalStore.UpdateClusterStateAsync(context, ClusterState, updateBinManager: CurrentRole == Role.Master);
                     postGlobalMaxMachineId = ClusterState.MaxMachineId;
 
                     // Update the local database with new machines if the cluster state was updated from the global store
@@ -665,7 +665,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             return BoolResult.SuccessTask;
 
-            bool pendingTaskIsNullOrCompleted(Task task)
+            static bool pendingTaskIsNullOrCompleted(Task task)
             {
                 return task == null || task.IsCompleted;
             }
@@ -1256,7 +1256,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             // Ideally, we want to remove content we know won't be used again for quite a while. We don't have that
             // information, so we use an evictability metric. Here we obtain and sort by that evictability metric.
 
-            var comparer = ContentEvictionInfo.AgeBucketingPrecedenceComparer.Instance;
+            var comparer = reverse
+                ? ContentEvictionInfo.AgeBucketingPrecedenceComparer.ReverseInstance
+                : ContentEvictionInfo.AgeBucketingPrecedenceComparer.Instance;
 
             IEnumerable<ContentEvictionInfo> getContentEvictionInfos(List<ContentHashWithLastAccessTimeAndReplicaCount> page) =>
                 GetEffectiveLastAccessTimes(

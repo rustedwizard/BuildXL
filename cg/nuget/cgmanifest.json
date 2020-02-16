@@ -294,7 +294,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.AspNetCore",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -303,7 +303,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.AspNetCore.Server",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -312,7 +312,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.AspNetCore.Server.ClientFactory",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -321,7 +321,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Core",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -330,7 +330,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Core.Api",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -339,7 +339,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Net.Client",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -348,7 +348,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Net.ClientFactory",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -357,7 +357,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Net.Common",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -366,7 +366,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Tools",
-          "Version": "2.24.0"
+          "Version": "2.26.0"
         }
       }
     },
@@ -2526,7 +2526,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "NLog",
-          "Version": "4.6.6"
+          "Version": "4.6.8"
         }
       }
     },
@@ -2626,6 +2626,15 @@
         "NuGet": {
           "Name": "Redis-64",
           "Version": "3.0.503"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Redis-osx-x64",
+          "Version": "1.0.0"
         }
       }
     },

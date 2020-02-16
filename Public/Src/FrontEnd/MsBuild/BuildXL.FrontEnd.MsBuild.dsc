@@ -37,6 +37,8 @@ namespace MsBuild {
             "Test.BuildXL.FrontEnd.MsBuild",
         ],
         runtimeContent: [
+            // CODESYNC: \Public\Src\IDE\VsCode\BuildXL.IDE.VsCode.dsc 
+            // We exclude the VbCsCompiler from the VsCode extension to save space.
             {
                 subfolder: r`tools/vbcslogger/net472`,
                 contents: [importFrom("BuildXL.Tools").VBCSCompilerLogger
@@ -46,6 +48,10 @@ namespace MsBuild {
                 subfolder: r`tools/vbcslogger/dotnetcore`,
                 contents: [importFrom("BuildXL.Tools").VBCSCompilerLogger
                     .withQualifier({ targetFramework: "netcoreapp3.1" }).dll]
+            },
+            {
+                subfolder: r`tools`,
+                contents: [importFrom("BuildXL.Tools").MsBuildGraphBuilder.deployment],
             }
         ]
     });

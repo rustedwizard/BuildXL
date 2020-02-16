@@ -33,7 +33,6 @@ namespace ContentStoreTest.Distributed.Sessions
     [Trait("Category", "Integration")]
     [Trait("Category", "LongRunningTest")]
     [Collection("Redis-based tests")]
-    [TestClassIfSupported(requiresWindowsBasedOperatingSystem: true)] // needs local redis-server.exe
     public class RedisDistributedContentTests : DistributedContentTests
     {
         private readonly LocalRedisFixture _redis;
@@ -69,14 +68,15 @@ namespace ContentStoreTest.Distributed.Sessions
             base.Dispose(disposing);
         }
 
-        protected override IContentStore CreateStore(
+        protected override (IContentStore store, IStartupShutdown server) CreateStore(
             Context context,
-            TestFileCopier fileCopier,
+            IAbsolutePathFileCopier fileCopier,
             DisposableDirectory testDirectory,
             int index,
             bool enableDistributedEviction,
             int? replicaCreditInMinutes,
             bool enableRepairHandling,
+            uint grpcPort,
             object additionalArgs)
         {
             var rootPath = testDirectory.Path / "Root";
@@ -132,7 +132,7 @@ namespace ContentStoreTest.Distributed.Sessions
                 fileCopier,
                 fileCopier,
                 pathTransformer,
-                fileCopier,
+                (IContentCommunicationManager)fileCopier,
                 tempPath,
                 FileSystem,
                 settings: new DistributedContentStoreSettings
@@ -153,7 +153,7 @@ namespace ContentStoreTest.Distributed.Sessions
                 });
 
             distributedContentStore.DisposeContentStoreFactory = false;
-            return distributedContentStore;
+            return (distributedContentStore, null);
         }
 
         [Fact]

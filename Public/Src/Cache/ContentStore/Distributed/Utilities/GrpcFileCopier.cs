@@ -22,7 +22,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
     /// <summary>
     /// File copier which operates over Grpc. <seealso cref="GrpcCopyClient"/>
     /// </summary>
-    public class GrpcFileCopier : ITraceableAbsolutePathFileCopier, IContentCommunicationManager
+    public class GrpcFileCopier : ITraceableAbsolutePathFileCopier, IContentCommunicationManager, IDisposable
     {
         private readonly Context _context;
         private readonly int _grpcPort;
@@ -43,6 +43,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
         }
 
         /// <inheritdoc />
+        public void Dispose()
+        {
+            _clientCache.Dispose();
+        }
+
+        /// <inheritdoc />
         public async Task<FileExistenceResult> CheckFileExistsAsync(AbsolutePath path, TimeSpan timeout, CancellationToken cancellationToken)
         {
             // Extract host and contentHash from sourcePath
@@ -59,7 +65,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
             var segments = sourcePath.GetSegments();
             Contract.Assert(segments.Count >= 4);
 
-            var host = segments.First();
+            var host = sourcePath.IsLocal ? "localhost" : segments.First();
             var hashLiteral = segments.Last();
             if (hashLiteral.EndsWith(GrpcDistributedPathTransformer.BlobFileExtension, StringComparison.OrdinalIgnoreCase))
             {

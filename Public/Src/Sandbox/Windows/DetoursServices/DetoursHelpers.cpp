@@ -542,6 +542,112 @@ wchar_t *CreateStringFromWriteChars(const byte *payloadBytes, size_t &offset, ui
     return pStr;
 }
 
+void AppendStringFromWriteChars(const byte* payloadBytes, size_t& offset, _Out_ std::wstring& result)
+{
+    uint32_t len = ParseUint32(payloadBytes, offset);
+    if (len == 0)
+    {
+        return;
+    }
+
+    result.append((wchar_t*)(&payloadBytes[offset]), len);
+    offset += sizeof(wchar_t) * len;
+}
+
+static inline void SkipWriteCharsString(const byte* payloadBytes, size_t& offset)
+{
+    uint32_t len = ParseUint32(payloadBytes, offset);
+    offset += sizeof(wchar_t) * len;
+}
+
+static SubstituteProcessExecutionPluginFunc GetSubstituteProcessExecutionPluginFunc()
+{
+    assert(g_SubstituteProcessExecutionPluginDllHandle != nullptr);
+
+    // Different compiler or different compiler settings can result in different function name variants.
+    //
+    // X64 version typically has:
+    //     ordinal hint RVA      name
+    //
+    //     1    0 00011069 CommandMatches = @ILT + 100(CommandMatches)
+    //
+    // X86 version can have:
+    //     ordinal hint RVA      name
+    //
+    //     1    0 00011276 _CommandMatches@24 = @ILT + 625(_CommandMatches@24)
+
+
+    // (1) Check for CommandMatches.
+    std::string winApiProcName("CommandMatches");
+
+    SubstituteProcessExecutionPluginFunc substituteProcessExecutionPluginFunc = reinterpret_cast<SubstituteProcessExecutionPluginFunc>(
+        reinterpret_cast<void*>(GetProcAddress(g_SubstituteProcessExecutionPluginDllHandle, winApiProcName.c_str())));
+
+    if (substituteProcessExecutionPluginFunc != nullptr)
+    {
+        return substituteProcessExecutionPluginFunc;
+    }
+
+    Dbg(L"Unable to find 'CommandMatches' function in SubstituteProcessExecutionPluginFunc '%s', lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
+
+    // (2) Check for CommandMatches@<param_size> based on platform.
+
+#if defined(_WIN64)
+    winApiProcName.append("@48"); // 6 64-bit parameters
+#elif defined(_WIN32)
+    winApiProcName.append("@24"); // 6 32-bit parameters
+#endif
+
+    substituteProcessExecutionPluginFunc = reinterpret_cast<SubstituteProcessExecutionPluginFunc>(
+        reinterpret_cast<void*>(GetProcAddress(g_SubstituteProcessExecutionPluginDllHandle, winApiProcName.c_str())));
+
+    if (substituteProcessExecutionPluginFunc != nullptr)
+    {
+        return substituteProcessExecutionPluginFunc;
+    }
+
+    Dbg(L"Unable to find 'CommandMatches@<param_size>' function in SubstituteProcessExecutionPluginFunc '%s', lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
+
+    // (2) Check for _CommandMatches@<param_size>.
+
+    winApiProcName.insert(0, 1, '_');
+
+    substituteProcessExecutionPluginFunc = reinterpret_cast<SubstituteProcessExecutionPluginFunc>(
+        reinterpret_cast<void*>(GetProcAddress(g_SubstituteProcessExecutionPluginDllHandle, winApiProcName.c_str())));
+
+    if (substituteProcessExecutionPluginFunc != nullptr)
+    {
+        return substituteProcessExecutionPluginFunc;
+    }
+
+    Dbg(L"Unable to find '_CommandMatches@<param_size>' function in SubstituteProcessExecutionPluginFunc '%s', lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
+
+    return nullptr;
+}
+
+static void LoadSubstituteProcessExecutionPluginDll()
+{
+    assert(g_SubstituteProcessExecutionPluginDllPath != nullptr);
+
+    Dbg(L"Loading substitute process plugin DLL at '%s'", g_SubstituteProcessExecutionPluginDllPath);
+    
+    g_SubstituteProcessExecutionPluginDllHandle = LoadLibraryW(g_SubstituteProcessExecutionPluginDllPath);
+
+    if (g_SubstituteProcessExecutionPluginDllHandle != nullptr)
+    {
+        g_SubstituteProcessExecutionPluginFunc = GetSubstituteProcessExecutionPluginFunc();
+
+        if (g_SubstituteProcessExecutionPluginFunc == nullptr) 
+        {
+            FreeLibrary(g_SubstituteProcessExecutionPluginDllHandle);
+        }
+    }
+    else
+    {
+        Dbg(L"Failed LoadLibrary for LoadSubstituteProcessExecutionPluginDll %s, lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
+    }
+}
+
 bool ParseFileAccessManifest(
     const void* payload,
     DWORD)
@@ -676,17 +782,11 @@ bool ParseFileAccessManifest(
 
     for (uint32_t i = 0; i < g_manifestChildProcessesToBreakAwayFromJob->Count; i++)
     {
-        uint32_t childProcessToBreakAwayFromJobSize = ParseUint32(payloadBytes, offset);
-        std::wstring* processName = nullptr;
-        if (childProcessToBreakAwayFromJobSize > 0)
+        std::wstring processNameToBrakeAway(L"");
+        AppendStringFromWriteChars(payloadBytes, offset, processNameToBrakeAway);
+        if (!processNameToBrakeAway.empty())
         {
-            processName = new std::wstring((wchar_t*)(&payloadBytes[offset]), childProcessToBreakAwayFromJobSize);
-            offset += sizeof(WCHAR) * childProcessToBreakAwayFromJobSize;
-        }
-
-        if (processName != nullptr && !processName->empty())
-        {
-            g_processNamesToBreakAwayFromJob->insert(*processName);
+            g_processNamesToBreakAwayFromJob->insert(processNameToBrakeAway);
         }
     }
 
@@ -696,30 +796,19 @@ bool ParseFileAccessManifest(
 
     for (uint32_t i = 0; i < g_manifestTranslatePathsStrings->Count; i++)
     {
-        uint32_t manifestTranslatePathsFromSize = ParseUint32(payloadBytes, offset);
-        std::wstring translateFrom;
-        translateFrom.assign(L"");
-        if (manifestTranslatePathsFromSize > 0)
-        {
-            translateFrom.append((wchar_t*)(&payloadBytes[offset]), manifestTranslatePathsFromSize);
+        std::wstring translateFrom(L"");
+        AppendStringFromWriteChars(payloadBytes, offset, translateFrom);
 
-            for (basic_string<wchar_t>::iterator p = translateFrom.begin();
-                p != translateFrom.end(); ++p) 
+        if (!translateFrom.empty())
+        {
+            for (basic_string<wchar_t>::iterator p = translateFrom.begin(); p != translateFrom.end(); ++p)
             {
                 *p = towlower(*p);
             }
-
-            offset += sizeof(WCHAR) * manifestTranslatePathsFromSize;
         }
-
-        uint32_t manifestTranslatePathsToSize = ParseUint32(payloadBytes, offset);
-        std::wstring translateTo;
-        translateTo.assign(L"");
-        if (manifestTranslatePathsToSize > 0)
-        {
-            translateTo.append((wchar_t*)(&payloadBytes[offset]), manifestTranslatePathsToSize);
-            offset += sizeof(WCHAR) * manifestTranslatePathsToSize;
-        }
+        
+        std::wstring translateTo(L"");
+        AppendStringFromWriteChars(payloadBytes, offset, translateTo);
 
         if (!translateFrom.empty() && !translateTo.empty())
         {
@@ -789,7 +878,6 @@ bool ParseFileAccessManifest(
     if (report->IsReportPresent()) {
         if (report->IsReportHandle()) {
             g_reportFileHandle = g_pDetouredProcessInjector->ReportPipe();
-            //g_reportFileHandle = (HANDLE)(intptr_t)(report->Report.ReportHandle32Bit);
 #ifdef _DEBUG
 #pragma warning( push )
 #pragma warning( disable: 4302 4310 4311 4826 )
@@ -845,10 +933,20 @@ bool ParseFileAccessManifest(
     PCManifestSubstituteProcessExecutionShim pShimInfo = reinterpret_cast<PCManifestSubstituteProcessExecutionShim>(&payloadBytes[offset]);
     pShimInfo->AssertValid();
     offset += pShimInfo->GetSize();
-    g_substituteProcessExecutionShimPath = CreateStringFromWriteChars(payloadBytes, offset);
-    if (g_substituteProcessExecutionShimPath != nullptr)
+    g_SubstituteProcessExecutionShimPath = CreateStringFromWriteChars(payloadBytes, offset);
+    if (g_SubstituteProcessExecutionShimPath != nullptr)
     {
         g_ProcessExecutionShimAllProcesses = pShimInfo->ShimAllProcesses != 0;
+
+        // Both _WIN32 and _WIN64 are defined when targeting 32-bit windows from 64-bit windows.
+        // See: https://docs.microsoft.com/en-us/cpp/preprocessor/predefined-macros?redirectedfrom=MSDN&view=vs-2019
+#if defined(_WIN64) // Defined as 1 when the compilation target is 64-bit ARM or x64. Otherwise, undefined.
+        SkipWriteCharsString(payloadBytes, offset);  // Skip 32-bit path.
+        g_SubstituteProcessExecutionPluginDllPath = CreateStringFromWriteChars(payloadBytes, offset);
+#elif defined(_WIN32) // Defined as 1 when the compilation target is 32-bit ARM, 64-bit ARM, x86, or x64
+        g_SubstituteProcessExecutionPluginDllPath = CreateStringFromWriteChars(payloadBytes, offset);
+        SkipWriteCharsString(payloadBytes, offset);  // Skip 64-bit path.
+#endif
         uint32_t numProcessMatches = ParseUint32(payloadBytes, offset);
         g_pShimProcessMatches = new vector<ShimProcessMatch*>();
         for (uint32_t i = 0; i < numProcessMatches; i++)
@@ -857,6 +955,11 @@ bool ParseFileAccessManifest(
             wchar_t *argumentMatch = CreateStringFromWriteChars(payloadBytes, offset);
             g_pShimProcessMatches->push_back(new ShimProcessMatch(processName, argumentMatch));
         }
+    }
+
+    if (g_SubstituteProcessExecutionPluginDllPath != nullptr)
+    {
+        LoadSubstituteProcessExecutionPluginDll();
     }
 
     g_manifestTreeRoot = reinterpret_cast<PCManifestRecord>(&payloadBytes[offset]);

@@ -182,13 +182,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             var registerResult = await RegisterPutAsync(context, UrgencyHint.Nominal, result);
 
             // Only perform proactive copy to other machines if we succeeded in registering our location.
-            if (registerResult && Settings.ProactiveCopyMode != ProactiveCopyMode.Disabled)
+            if (registerResult && Settings.ProactiveCopyOnPut && Settings.ProactiveCopyMode != ProactiveCopyMode.Disabled)
             {
                 // Since the rest of the operation is done asynchronously, create new context to stop cancelling operation prematurely.
                 var proactiveCopyTask = WithOperationContext(
                     context,
                     CancellationToken.None,
-                    operationContext => ProactiveCopyIfNeededAsync(operationContext, result.ContentHash, tryBuildRing: true, path)
+                    operationContext => ProactiveCopyIfNeededAsync(operationContext, result.ContentHash, tryBuildRing: true, ProactiveCopyReason.Put, path)
                 );
 
                 if (Settings.InlineProactiveCopies)

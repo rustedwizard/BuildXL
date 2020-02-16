@@ -269,20 +269,14 @@ if ($TestClass -ne "") {
     $AdditionalBuildXLArguments += "/p:[UnitTest]Filter.testClass=$TestClass";
 }
 
-if ($Vs) {
-    $AdditionalBuildXLArguments += "/p:[Sdk.BuildXL]GenerateVSSolution=true /q:DebugNet472 /vs";
-}
-
-if ($VsNew -or $VsNewNetCore -or $VsNewNet472 -or $VsNewAll) {
+if ($Vs -or $VsNew -or $VsNewNetCore -or $VsNewNet472 -or $VsNewAll) {
     $AdditionalBuildXLArguments += "/p:[Sdk.BuildXL]GenerateVSSolution=true /vs /vsnew";
-    if ($VsNewNetCore) {
-        $AdditionalBuildXLArguments += "/q:DebugDotNetCore /vsTargetFramework:netcoreapp3.0 /vsTargetFramework:netcoreapp3.1 /vsTargetFramework:netstandard2.0 /vsTargetFramework:netstandard2.1";
-    } elseif ($VsNewNet472) {
+    if ($VsNewNet472) {
         $AdditionalBuildXLArguments += "/q:DebugNet472 /vsTargetFramework:net472";
     } elseif ($VsNewAll) {
         $AdditionalBuildXLArguments += "/q:DebugNet472 /q:DebugDotNetCore";
     } else {
-        $AdditionalBuildXLArguments += "/q:DebugNet472"; # same as before, for compat reasons
+        $AdditionalBuildXLArguments += "/q:Debug /vsTargetFramework:netcoreapp3.0 /vsTargetFramework:netcoreapp3.1 /vsTargetFramework:netstandard2.0 /vsTargetFramework:netstandard2.1";
     }
 }
 
@@ -564,7 +558,7 @@ for($i = 0; $i -lt $DominoArguments.Count; $i++){
 
 if (!$skipFilter){
 
-    $AllCacheProjectsFilter = "(spec='Public\Src\Cache\ContentStore\*')or(spec='Public\Src\Cache\MemoizationStore\*')or(spec='Public\Src\Cache\DistributedCache.Host\*')or(spec='Public\Src\Cache\Monitor\*')or(spec='Public\Src\Deployment\cache.dsc')";
+    $AllCacheProjectsFilter = "(spec='Public\Src\Cache\ContentStore\*')or(spec='Public\Src\Cache\MemoizationStore\*')or(spec='Public\Src\Cache\DistributedCache.Host\*')or(spec='Public\Src\Cache\Monitor\*')or(spec='Public\Src\Cache\Logging\*')or(spec='Public\Src\Deployment\cache.dsc')";
     $CacheNugetFilter = "spec='Public\Src\Deployment\cache.nugetpackages.dsc'";
     $CacheOutputFilter = "output='out\bin\$DeployConfig\cache\*'";
     $CacheLongRunningFilter = "tag='LongRunningTest'";

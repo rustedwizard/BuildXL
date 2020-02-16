@@ -1224,17 +1224,26 @@ namespace BuildXL.Scheduler
             FileUtilities.CreateDirectoryWithRetry(configuration.Layout.SharedOpaqueSidebandDirectory.ToString(Context.PathTable));
 
             MasterSpecificExecutionLogTarget masterTarget = null;
+            WeakFingerprintAugmentationExecutionLogTarget fingerprintAugmentationTarget = null;
 
             if (!IsDistributedWorker)
             {
                 masterTarget = new MasterSpecificExecutionLogTarget(loggingContext, this);
+
+                // Fingerprint augmentation monitoring must be running only on the master (it's the only worker that will observe
+                // both ProcessFingerprintComputed events for the same pip).
+                if (configuration.Cache.MonitorAugmentedPathSets > 0)
+                {
+                    fingerprintAugmentationTarget = new WeakFingerprintAugmentationExecutionLogTarget(loggingContext, this, configuration.Cache.MonitorAugmentedPathSets);
+                }
             }
 
             m_multiExecutionLogTarget = MultiExecutionLogTarget.CombineTargets(
                 m_executionLogFileTarget,
                 m_fingerprintStoreTarget,
                 new ObservedInputAnomalyAnalyzer(graph),
-                masterTarget);
+                masterTarget,
+                fingerprintAugmentationTarget);
 
             // Things that use execution log targets
             m_directoryMembershipFingerprinter = new DirectoryMembershipFingerprinter(
@@ -2156,6 +2165,7 @@ namespace BuildXL.Scheduler
                     foreach (var disk in m_performanceAggregator.DiskStats)
                     {
                         if (m_writableDrives.Contains(disk.Drive)
+                            && disk.AvailableSpaceGb.Count != 0 // If we ever have a successful collection of the disk space
                             && disk.AvailableSpaceGb.Latest < (double)m_scheduleConfiguration.MinimumDiskSpaceForPipsGb)
                         {
                             Logger.Log.WorkerFailedDueToLowDiskSpace(
@@ -2440,7 +2450,10 @@ namespace BuildXL.Scheduler
                 return;
             }
 
-            m_pipRetryCounters[runnablePip.RetryCount]++;
+            if (runnablePip.RetryCount < m_pipRetryCounters.Length)
+            {
+                m_pipRetryCounters[runnablePip.RetryCount]++;
+            }
 
             using (runnablePip.OperationContext.StartOperation(PipExecutorCounter.OnPipCompletedDuration))
             {
@@ -3143,7 +3156,10 @@ namespace BuildXL.Scheduler
                 runnablePip.SetDispatcherKind(nextQueue);
                 m_chooseWorkerCpu?.UnpauseChooseWorkerQueueIfEnqueuingNewPip(runnablePip, nextQueue);
 
-                m_pipQueue.Enqueue(runnablePip);
+                using (PipExecutionCounters.StartStopwatch(PipExecutorCounter.PipQueueEnqueueDuration))
+                {
+                    m_pipQueue.Enqueue(runnablePip);
+                }
             }
         }
 
@@ -3302,13 +3318,13 @@ namespace BuildXL.Scheduler
                         case PipType.SpecFile:
                         case PipType.Module:
                         case PipType.Value:
-                        case PipType.SealDirectory:
                             // These are fast to execute. They are inlined when they are scheduled during draining.
                             // However, if the queue has not been started draining, we should add them to the queue.
                             // SchedulePip is called as a part of 'schedule' phase.
                             // That's why, we should not inline executions of fast pips when the queue is not draining.
                             return m_pipQueue.IsDraining ? DispatcherKind.None : DispatcherKind.CPU;
 
+                        case PipType.SealDirectory:
                         case PipType.WriteFile:
                         case PipType.CopyFile:
                         case PipType.Ipc:
@@ -3703,7 +3719,7 @@ namespace BuildXL.Scheduler
                     var cacheResult = tupleResult.Item1;
                     if (cacheResult == null)
                     {
-                        Contract.Assert(loggingContext.ErrorWasLogged, "Error should have been logged for dependency pip.");
+                        Contract.Assert(tupleResult.Item2 == PipResultStatus.Canceled || loggingContext.ErrorWasLogged, "Error should have been logged for dependency pip.");
                         return processRunnable.SetPipResult(tupleResult.Item2);
                     }
 

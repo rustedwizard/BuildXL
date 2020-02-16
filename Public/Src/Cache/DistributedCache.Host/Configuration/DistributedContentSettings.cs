@@ -242,6 +242,15 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public bool UseTieredDistributedEviction { get; set; } = false;
 
+        [DataMember]
+        public bool PrioritizeDesignatedLocationsOnCopies { get; set; } = false;
+
+        [DataMember]
+        public int CopyAttemptsWithRestrictedReplicas { get; set; } = 0;
+
+        [DataMember]
+        public int RestrictedCopyReplicaCount { get; set; } = 3;
+
         /// <summary>
         /// After the first raided redis instance completes, the second instance is given a window of time to complete before the retries are cancelled.
         /// Default to always wait for both instances to complete.
@@ -474,6 +483,12 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public int? FullRangeCompactionIntervalMinutes { get; set; }
 
+        [DataMember]
+        public string FullRangeCompactionVariant { get; set; }
+
+        [DataMember]
+        public byte? FullRangeCompactionByteIncrementStep { get; set; }
+
         // Key Vault Settings
         [DataMember]
         public string KeyVaultSettingsString { get; set; }
@@ -632,6 +647,9 @@ namespace BuildXL.Cache.Host.Configuration
         public bool PushProactiveCopies { get; set; } = false;
 
         [DataMember]
+        public bool ProactiveCopyOnPut { get; set; } = true;
+
+        [DataMember]
         public bool ProactiveCopyOnPin { get; set; } = false;
 
         [DataMember]
@@ -639,6 +657,9 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         public int ProactiveCopyLocationsThreshold { get; set; } = 3;
+
+        [DataMember]
+        public bool ProactiveCopyRejectOldContent { get; set; } = false;
 
         [DataMember]
         public int ProactiveReplicationCopyLimit { get; set; } = 5;

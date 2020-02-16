@@ -254,6 +254,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOptionWithValue(
                             "cacheMiss",
                             (opt, sign) => ParseCacheMissAnalysisOption(opt, sign, loggingConfiguration, pathTable)),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "cacheMissBatch",
+                            sign => loggingConfiguration.CacheMissBatch = sign),
                         OptionHandlerFactory.CreateOption(
                             "cacheMissDiffFormat",
                             opt => CommandLineUtilities.ParseEnumOption<CacheMissDiffFormat>(opt)),
@@ -754,6 +757,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "augmentingPathSetCommonalityFactor",
                             opt =>  cacheConfiguration.AugmentWeakFingerprintRequiredPathCommonalityFactor = CommandLineUtilities.ParseDoubleOption(opt, 0, 1)),
+                        OptionHandlerFactory.CreateOption(
+                            "pathSetAugmentationMonitoring",
+                            opt => cacheConfiguration.MonitorAugmentedPathSets = CommandLineUtilities.ParseInt32Option(opt, 0, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
                             "phase",
                             opt => engineConfiguration.Phase = CommandLineUtilities.ParseEnumOption<EnginePhases>(opt)),

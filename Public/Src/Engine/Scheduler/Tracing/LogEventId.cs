@@ -157,6 +157,8 @@ namespace BuildXL.Scheduler.Tracing
         CacheOnlyStatistics = 5073,
 
         PipMaterializeDependenciesFailureDueToVerifySourceFilesFailed = 5080,
+        SuspiciousPathsInAugmentedPathSet = 5081,
+        PipMaterializeDependenciesFromCacheFailureDueToFileDeletionFailure = 5082,
 
         // was DependencyViolationGenericWithRelatedPip_AsError = 25000,
         // was DependencyViolationGeneric_AsError = 25001,

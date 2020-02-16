@@ -12,7 +12,26 @@ See the [the BuildXL Release Management page for the Production environment](htt
 When a BuildXL developer implements a feature, fixes an important bug, solves an issue brought up by a customer, or makes any other notable change, they are encouraged to add an entry here.
 
 # Upcoming release
-- [VsCode] Add new CodeLens at the top of each spec showing which module it is a part of.
+
+# 0.1.0-20200207.4.1 (Release [55353](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=55353)).  Released 2/13/2020
+- Detours plugin for substitute process execution
+- Plumb ctrl-c through to PlaceFilesAsync
+- Add unsafe options detail to cache miss analysis result
+- Add batch cache miss analysis kusto query 
+- Track paths used for weak fingerprint augmentation
+- Add new Dscript Api to Path: Path.createFromAbsolutePathString
+
+# 0.1.0-20200131.5.1 (Release [54373](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=54373)).  Released 2/05/2020
+ - Re-enable `-TestMethod` and `-TestClass` in BuildXL selfhost
+ - Make MSBuild resolver more robust
+ - Runtime cache miss analysis fixes
+ - Make minimumDiskSpaceForPipsGb feature working with retryOnAnotherWorker feature
+ - Fix a crash when processing tool output streams
+ - Retry failed pip on different worker
+ - [VsCode] Implement CodeLens for module references
+ - [QTest] Enable QTest for all module cache test assemblies
+ - [QTest] Plumb 'acquireSemaphores' into QTest
+ - [QTest] Enable code coverage
 
 # 0.1.0-20200124.5 (Release [53523](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=53523)).  Released 1/29/2020
 -	Add session ID and session related ID to fingerprint store entry

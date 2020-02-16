@@ -358,6 +358,15 @@ namespace BuildXL.Scheduler.Tracing
         internal abstract void PipMaterializeDependenciesFromCacheFailure(LoggingContext loggingContext, string pipDescription, string errorMessage);
 
         [GeneratedEvent(
+            (ushort)LogEventId.PipMaterializeDependenciesFromCacheFailureDueToFileDeletionFailure,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "[{pipDescription}] Failed materialize pip dependencies from cache due to failure to delete file. Typically this happens when the file in question is whitelisted and another pip is concurrently accessing the file. Deletion failure: {errorMessage}")]
+        internal abstract void PipMaterializeDependenciesFromCacheFailureDueToFileDeletionFailure(LoggingContext loggingContext, string pipDescription, string errorMessage);
+
+        [GeneratedEvent(
             (ushort)EventId.DetailedPipMaterializeDependenciesFromCacheFailure,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
@@ -3508,6 +3517,15 @@ namespace BuildXL.Scheduler.Tracing
         public abstract void CacheMissAnalysis(LoggingContext loggingContext, string pipDescription, string reason, bool fromCacheLookup);
 
         [GeneratedEvent(
+            (ushort)EventId.CacheMissAnalysisBatchResults,
+            EventGenerators = EventGenerators.LocalAndTelemetry,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "{cacheMissAnalysisResults}")]
+        public abstract void CacheMissAnalysisBatchResults(LoggingContext loggingContext, string cacheMissAnalysisResults);
+
+        [GeneratedEvent(
             (ushort)EventId.CacheMissAnalysisException,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
@@ -3643,6 +3661,15 @@ namespace BuildXL.Scheduler.Tracing
             EventTask = (ushort)Tasks.PipExecutor,
             Message = EventConstants.PhasePrefix + "Skipped {processPipsSkippedDueToCacheOnly} processes due to /CacheOnly mode.")]
         internal abstract void CacheOnlyStatistics(LoggingContext loggingContext, long processPipsSkippedDueToCacheOnly);
+
+        [GeneratedEvent(
+           (ushort)LogEventId.SuspiciousPathsInAugmentedPathSet,
+           EventGenerators = EventGenerators.LocalOnly,
+           EventLevel = Level.Verbose,
+           Keywords = (int)Keywords.UserMessage,
+           EventTask = (ushort)Tasks.Storage,
+           Message = "[{pipDescription}] Some path(s) in the augmented path set were not entries not encountered during pip execution. If these paths keep changing, it might lead to artificial cache misses. The first {cntLoggedPaths} of {totalSuspiciousPaths} paths:{paths}")]
+        internal abstract void SuspiciousPathsInAugmentedPathSet(LoggingContext loggingContext, string pipDescription, int cntLoggedPaths, int totalSuspiciousPaths, string paths);
     }
 }
 #pragma warning restore CA1823 // Unused field

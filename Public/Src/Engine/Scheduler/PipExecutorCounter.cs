@@ -1061,6 +1061,14 @@ namespace BuildXL.Scheduler
         RemoteWorker_AwaitExecutionBlobCompletionDuration,
 
         /// <nodoc/>
+        [CounterType(CounterType.Stopwatch)]
+        RemoteWorker_ProcessExecutionLogDuration,
+
+        /// <nodoc/>
+        [CounterType(CounterType.Stopwatch)]
+        RemoteWorker_ProcessExecutionLogWaitDuration,
+
+        /// <nodoc/>
         RemoteWorker_EarlyReleaseDrainDurationMs,
 
         /// <nodoc/>
@@ -1154,6 +1162,10 @@ namespace BuildXL.Scheduler
         /// but they are not included in this counter because no cache lookup was performed.
         /// </summary>
         ProcessPipsSkippedExecutionDueToCacheOnly,
+
+        /// <nodoc/>
+        [CounterType(CounterType.Stopwatch)]
+        PipQueueEnqueueDuration,
     }
 
     /// <summary>
