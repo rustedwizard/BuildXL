@@ -45,7 +45,11 @@ namespace BuildXL.Utilities.Configuration.Mutable
             UseCustomPipDescriptionOnConsole = true;
             CacheMissAnalysisOption = CacheMissAnalysisOption.Disabled();
             CacheMissDiffFormat = CacheMissDiffFormat.CustomJsonDiff;
+            
+            // Temporarily disable it by default due to crash.
+            // TODO: Enable it by default once crash is fixed.
             CacheMissBatch = false;
+            
             RedirectedLogsDirectory = AbsolutePath.Invalid;
         }
 
@@ -95,6 +99,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             LogStats = template.LogStats;
             EnableAsyncLogging = template.EnableAsyncLogging;
             StatsLog = pathRemapper.Remap(template.StatsLog);
+            StatsPrfLog = pathRemapper.Remap(template.StatsPrfLog);
             EventSummaryLog = pathRemapper.Remap(template.EventSummaryLog);
             Environment = template.Environment;
             RemoteTelemetry = template.RemoteTelemetry;
@@ -247,6 +252,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public AbsolutePath StatsLog { get; set; }
+
+        /// <inheritdoc />
+        public AbsolutePath StatsPrfLog { get; set; }
 
         /// <inheritdoc />
         public AbsolutePath EventSummaryLog { get; set; }
