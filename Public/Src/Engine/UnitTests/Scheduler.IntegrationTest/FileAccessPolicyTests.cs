@@ -5,6 +5,7 @@ using System.IO;
 using BuildXL.Pips;
 using BuildXL.Pips.Builders;
 using BuildXL.Pips.Operations;
+using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Tracing;
 using Test.BuildXL.Executables.TestProcess;
@@ -13,6 +14,8 @@ using Test.BuildXL.TestUtilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
+using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
+using SchedulerLogEventId = BuildXL.Scheduler.Tracing.LogEventId;
 
 namespace IntegrationTest.BuildXL.Scheduler
 {
@@ -90,8 +93,8 @@ namespace IntegrationTest.BuildXL.Scheduler
             if (!declareDependency)
             {
                 runSchedulerResult.AssertPipResultStatus((pip.PipId, PipResultStatus.Failed));
-                AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
-                AssertErrorEventLogged(EventId.FileMonitoringError);
+                AssertWarningEventLogged(SchedulerLogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+                AssertErrorEventLogged(SchedulerLogEventId.FileMonitoringError);
             }
         }
 
@@ -191,7 +194,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             DirectoryArtifact undefinedDir = DirectoryArtifact.CreateWithZeroPartialSealId(CreateUniqueSourcePath(SourceRootPrefix, TemporaryDirectory));
 
             ValidateCachingBehaviorUntrackedMount(undefinedFile, undefinedDir, undefinedMount: true);
-            AssertWarningEventLogged(EventId.IgnoringUntrackedSourceFileNotUnderMount, 7);
+            AssertWarningEventLogged(SchedulerLogEventId.IgnoringUntrackedSourceFileNotUnderMount, 7);
         }
 
         public void ValidateCachingBehaviorUntrackedMount(FileArtifact file, DirectoryArtifact dir, bool undefinedMount)
@@ -352,8 +355,8 @@ namespace IntegrationTest.BuildXL.Scheduler
             else
             {
                 RunScheduler().AssertFailure();
-                AssertErrorEventLogged(EventId.FileMonitoringError);
-                AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+                AssertErrorEventLogged(LogEventId.FileMonitoringError);
+                AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
             }
         }
 
@@ -382,8 +385,8 @@ namespace IntegrationTest.BuildXL.Scheduler
                 Operation.WriteFile(CreateOutputFileArtifact())
             }).Process;
             RunScheduler().AssertFailure();
-            AssertErrorEventLogged(EventId.PipProcessError);
-            AssertErrorEventLogged(EventId.FileMonitoringError);
+            AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
         }
     }
 }

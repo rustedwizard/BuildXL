@@ -28,7 +28,12 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MonitorZwCreateOpenQueryFile = true;
             IgnoreDynamicWritesOnAbsentProbes = DynamicWriteOnAbsentProbePolicy.IgnoreDirectoryProbes; // TODO: eventually change this to IgnoreNothing
             IgnoreUndeclaredAccessesUnderSharedOpaques = false;
-            
+
+            if (EngineVersion.Version < 1)
+            {
+                IgnoreCreateProcessReport = true;
+            }
+
             // Make sure to update SafeOptions below if necessary when new flags are added
         }
 

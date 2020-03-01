@@ -46,7 +46,12 @@ namespace BuildXL.Cache.Host.Service.Internal
         private readonly DistributedCacheServiceArguments _arguments;
         private readonly DistributedContentCopier<AbsolutePath> _copier;
 
-        private readonly RedisMemoizationStoreFactory _redisMemoizationStoreFactory;
+        /// <summary>
+        /// This uses a Lazy because not having it breaks the local service use-case (i.e. running ContentStoreApp
+        /// with distributedservice)
+        /// </summary>
+        private readonly Lazy<RedisMemoizationStoreFactory> _redisMemoizationStoreFactory;
+
         private readonly DistributedContentStoreSettings _distributedContentStoreSettings;
 
         public IReadOnlyList<ResolvedNamedCacheSettings> OrderedResolvedCacheSettings => _orderedResolvedCacheSettings;
@@ -81,7 +86,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                 _arguments.Overrides.Clock
             );
 
-            _redisMemoizationStoreFactory = CreateRedisCacheFactory();
+            _redisMemoizationStoreFactory = new Lazy<RedisMemoizationStoreFactory>(() => CreateRedisCacheFactory());
         }
 
         private static List<ResolvedNamedCacheSettings> ResolveCacheSettingsInPrecedenceOrder(DistributedCacheServiceArguments arguments)
@@ -154,8 +159,10 @@ namespace BuildXL.Cache.Host.Service.Internal
                 BlobExpiryTimeMinutes = _distributedSettings.BlobExpiryTimeMinutes,
                 MaxBlobCapacity = _distributedSettings.MaxBlobCapacity,
                 MaxBlobSize = _distributedSettings.MaxBlobSize,
+                UseFullEvictionSort = _distributedSettings.UseFullEvictionSort,
                 EvictionWindowSize = _distributedSettings.EvictionWindowSize,
                 EvictionPoolSize = _distributedSettings.EvictionPoolSize,
+                UpdateStaleLocalLastAccessTimes = _distributedSettings.UpdateStaleLocalLastAccessTimes,
                 EvictionRemovalFraction = _distributedSettings.EvictionRemovalFraction,
                 EvictionDiscardFraction = _distributedSettings.EvictionDiscardFraction,
                 UseTieredDistributedEviction = _distributedSettings.UseTieredDistributedEviction,
@@ -276,7 +283,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                     (announcer, evictionSettings, checkLocal, trimBulk) =>
                         ContentStoreFactory.CreateContentStore(_fileSystem, resolvedSettings.ResolvedCacheRootPath, announcer, distributedEvictionSettings: evictionSettings,
                             contentStoreSettings: contentStoreSettings, trimBulkAsync: trimBulk, configurationModel: configurationModel),
-                    _redisMemoizationStoreFactory,
+                    _redisMemoizationStoreFactory.Value,
                     _distributedContentStoreSettings,
                     distributedCopier: _copier,
                     clock: _arguments.Overrides.Clock,
@@ -513,6 +520,8 @@ namespace BuildXL.Cache.Host.Service.Internal
                     PropagationIterations = _distributedSettings.CentralStoragePropagationIterations,
                     MaxSimultaneousCopies = _distributedSettings.CentralStorageMaxSimultaneousCopies
                 };
+
+                distributedCentralStoreConfiguration.TraceFileSystemContentStoreDiagnosticMessages = _distributedSettings.TraceFileSystemContentStoreDiagnosticMessages;
 
                 ApplyIfNotNull(_distributedSettings.DistributedCentralStoragePeerToPeerCopyTimeoutSeconds, v => distributedCentralStoreConfiguration.PeerToPeerCopyTimeout = TimeSpan.FromSeconds(v));
                 configuration.DistributedCentralStore = distributedCentralStoreConfiguration;

@@ -400,6 +400,25 @@ namespace BuildXL.Processes
         }
 
         /// <summary>
+        /// Whether this access represents a directory creation
+        /// </summary>
+        public bool IsDirectoryCreation() => 
+            Operation == ReportedFileOperation.CreateDirectory || 
+            Operation == ReportedFileOperation.KAuthCreateDir;
+
+        /// <summary>
+        /// Whether this access represents a directory removal
+        /// </summary>
+        public bool IsDirectoryRemoval() => 
+            Operation == ReportedFileOperation.RemoveDirectory || 
+            Operation == ReportedFileOperation.KAuthDeleteDir;
+
+        /// <summary>
+        /// Whether this access represents a directory creation or removal
+        /// </summary>
+        public bool IsDirectoryCreationOrRemoval() => IsDirectoryCreation() || IsDirectoryRemoval();
+
+        /// <summary>
         /// Checks if this is a special device type of path for which we should not report a warning.
         /// Make it a verbose message, so it appears in the log (for diagnosability if there are problems with such access).
         /// </summary>

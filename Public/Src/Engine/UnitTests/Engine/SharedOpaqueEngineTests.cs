@@ -4,10 +4,9 @@
 using System;
 using System.IO;
 using BuildXL.Engine;
-using BuildXL.Native.IO;
 using BuildXL.Processes;
+using BuildXL.Processes.Tracing;
 using BuildXL.Utilities;
-using BuildXL.Utilities.Tracing;
 using Test.BuildXL.EngineTestUtilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
@@ -195,7 +194,7 @@ namespace Test.BuildXL.Engine
 
             IgnoreWarnings();
             // Make sure this is a cache replay
-            AssertVerboseEventLogged(EventId.ProcessPipCacheHit);
+            AssertVerboseEventLogged(global::BuildXL.Scheduler.Tracing.LogEventId.ProcessPipCacheHit);
             // And check again that the file is still properly marked
             XAssert.IsTrue(SharedOpaqueOutputHelper.IsSharedOpaqueOutput(producedFile));
         }
@@ -240,7 +239,7 @@ namespace Test.BuildXL.Engine
 
             IgnoreWarnings();
             // Make sure this is a cache replay
-            AssertVerboseEventLogged(EventId.ProcessPipCacheHit);
+            AssertVerboseEventLogged(global::BuildXL.Scheduler.Tracing.LogEventId.ProcessPipCacheHit);
             // Check the timestamp is the right one now
             XAssert.IsTrue(SharedOpaqueOutputHelper.IsSharedOpaqueOutput(producedFile), "SOD file not marked on cache replay");
         }
@@ -258,7 +257,7 @@ namespace Test.BuildXL.Engine
             // Run the pip
             RunEngine(rememberAllChangedTrackedInputs: true, expectSuccess: false);
 
-            AssertErrorEventLogged(EventId.PipProcessError);
+            AssertErrorEventLogged(LogEventId.PipProcessError);
 
             // Check the timestamp is the right one
             XAssert.IsTrue(SharedOpaqueOutputHelper.IsSharedOpaqueOutput(producedFile), "SOD file not marked on pip failure");

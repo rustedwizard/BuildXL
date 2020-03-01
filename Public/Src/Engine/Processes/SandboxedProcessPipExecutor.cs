@@ -878,7 +878,7 @@ namespace BuildXL.Processes
                                 if (!s_isIsolationSupported)
                                 {
                                     Tracing.Logger.Log.PipSpecifiedToRunInContainerButIsolationIsNotSupported(m_loggingContext, m_pip.SemiStableHash, m_pipDescription);
-                                    return SandboxedProcessPipExecutionResult.PreparationFailure(processLaunchRetryCount, (int)EventId.PipSpecifiedToRunInContainerButIsolationIsNotSupported, maxDetoursHeapSize: maxDetoursHeapSize);
+                                    return SandboxedProcessPipExecutionResult.PreparationFailure(processLaunchRetryCount, (int)SharedLogEventId.PipSpecifiedToRunInContainerButIsolationIsNotSupported, maxDetoursHeapSize: maxDetoursHeapSize);
                                 }
 
                                 Tracing.Logger.Log.PipInContainerStarting(m_loggingContext, m_pip.SemiStableHash, m_pipDescription, m_containerConfiguration.ToDisplayString());
@@ -3388,16 +3388,16 @@ namespace BuildXL.Processes
                             }
 
                             // TODO: Remove this when WDG can grog this feature with no flag.
-                                if (m_sandboxConfig.UnsafeSandboxConfiguration.ExistingDirectoryProbesAsEnumerations ||
+                            if (m_sandboxConfig.UnsafeSandboxConfiguration.ExistingDirectoryProbesAsEnumerations ||
                                 access.RequestedAccess == RequestedAccess.Enumerate)
                             {
                                 hasEnumeration = true;
                             }
 
-                            // if the access is a write (and not a directory creation/removal), then the path is a candidate to be part of a shared opaque
-                            isPathCandidateToBeOwnedByASharedOpaque |= (access.RequestedAccess & RequestedAccess.Write) != RequestedAccess.None &&
-                                                                       access.Operation != ReportedFileOperation.CreateDirectory &&
-                                                                       access.Operation != ReportedFileOperation.RemoveDirectory;
+                            // if the access is a write (and not a directory creation), then the path is a candidate to be part of a shared opaque
+                            isPathCandidateToBeOwnedByASharedOpaque |= 
+                                access.RequestedAccess.HasFlag(RequestedAccess.Write) &&
+                                !access.IsDirectoryCreationOrRemoval();
                         }
 
                         // if the path is still a candidate to be part of a shared opaque, that means there was at least a write to that path. If the path is then
@@ -3467,13 +3467,7 @@ namespace BuildXL.Processes
                         }
                     }
 
-                    var filteredAccessesUnsorted = accessesUnsorted
-                        .Where(access =>
-                            // if it's an enumeration -> include always
-                            (access.ObservationFlags & ObservationFlags.Enumeration) == ObservationFlags.Enumeration
-                            // otherwise, check whether it's an excluded path
-                            || !excludedPaths.Contains(access.Path))
-                        .ToList();
+                    var filteredAccessesUnsorted = accessesUnsorted.Where(shouldIncludeAccess).ToList();
 
                     sharedDynamicDirectoryWriteAccesses = dynamicWriteAccesses.ToDictionary(
                         kvp => kvp.Key,
@@ -3482,6 +3476,22 @@ namespace BuildXL.Processes
                     return SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>.CloneAndSort(
                         filteredAccessesUnsorted,
                         new ObservedFileAccessExpandedPathComparer(m_context.PathTable.ExpandedPathComparer));
+
+                    bool shouldIncludeAccess(ObservedFileAccess access)
+                    {
+                        // if not in the excludedPaths set --> include
+                        if (!excludedPaths.Contains(access.Path))
+                        {
+                            return true;
+                        }
+
+                        // else, include IFF:
+                        //   (1) access is a directory enumeration, AND
+                        //   (2) the directory was not created by this pip
+                        return 
+                            access.ObservationFlags.HasFlag(ObservationFlags.Enumeration)
+                            && !access.Accesses.Any(rfa => rfa.IsDirectoryCreation());
+                    }
                 }
             }
         }

@@ -8,12 +8,12 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using BuildXL.Pips.Operations;
+using BuildXL.Processes.Tracing;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tracing;
 using BuildXL.ViewModel;
 using JetBrains.Annotations;
-using Newtonsoft.Json.Linq;
 
 namespace BuildXL
 {
@@ -30,7 +30,6 @@ namespace BuildXL
     /// </remarks>
     public sealed class AzureDevOpsListener : FormattingEventListener
     {
-        private static readonly char[] s_newLineCharArray = Environment.NewLine.ToCharArray();
         private readonly IConsole m_console;
 
         /// <summary>
@@ -50,8 +49,8 @@ namespace BuildXL
             [CanBeNull] WarningMapper warningMapper)
             : base(eventSource, baseTime, warningMapper: warningMapper, level: EventLevel.Verbose, captureAllDiagnosticMessages: false, timeDisplay: TimeDisplay.Seconds, useCustomPipDescription: useCustomPipDescription)
         {
-            Contract.Requires(console != null);
-            Contract.Requires(buildViewModel != null);
+            Contract.RequiresNotNull(console);
+            Contract.RequiresNotNull(buildViewModel);
 
             m_console = console;
             m_buildViewModel = buildViewModel;
@@ -71,7 +70,7 @@ namespace BuildXL
         {
             switch (eventData.EventId)
             {
-                case (int)EventId.PipStatus:
+                case (int)SharedLogEventId.PipStatus:
                 case (int)BuildXL.Scheduler.Tracing.LogEventId.PipStatusNonOverwriteable:
                     {
                         var payload = eventData.Payload;
@@ -110,7 +109,7 @@ namespace BuildXL
         {
             switch (eventData.EventId)
             {
-                case (int)EventId.CacheMissAnalysis:
+                case (int)SharedLogEventId.CacheMissAnalysis:
                     {
                         var payload = eventData.Payload;
 
@@ -124,7 +123,7 @@ namespace BuildXL
                         );
                     }
                     break;
-                case (int)EventId.CacheMissAnalysisBatchResults:
+                case (int)SharedLogEventId.CacheMissAnalysisBatchResults:
                 {
                     m_buildViewModel.BuildSummary.CacheSummary.BatchEntries.Add((string)eventData.Payload[0]);
                 }
@@ -145,7 +144,7 @@ namespace BuildXL
 
             switch (eventData.EventId)
             {
-                case (int)EventId.PipProcessError:
+                case (int)LogEventId.PipProcessError:
                     {
                         var payload = eventData.Payload;
 
@@ -207,7 +206,7 @@ namespace BuildXL
             }
            
             // construct a short message for ADO console
-            if (eventData.EventId == (int)EventId.PipProcessError)
+            if (eventData.EventId == (int)LogEventId.PipProcessError)
             {
                 args[0] = Pip.FormatSemiStableHash((long)args[0]);
                 message = "[{0}, {10}, {2}] - failed with exit code {8}, {9}\r\n{5}\r\n{6}\r\n{7}";

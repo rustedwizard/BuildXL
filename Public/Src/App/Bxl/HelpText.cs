@@ -601,6 +601,16 @@ namespace BuildXL
                 Strings.HelpText_DisplayHelp_LowPriority);
 
             hw.WriteOption(
+                "/enableHistoricCommitMemoryProjection[+|-]",
+                Strings.HelpText_DisplayHelp_EnableHistoricCommitMemoryProjection,
+                HelpLevel.Verbose);
+            
+            hw.WriteOption(
+                "/maxCommitUtilizationPercentage:<number>",
+                Strings.HelpText_DisplayHelp_MaxCommitUtilizationPercentage,
+                HelpLevel.Verbose);
+
+            hw.WriteOption(
                 "/maxRamUtilizationPercentage:<number>",
                 Strings.HelpText_DisplayHelp_MaxRamUtilizationPercentage,
                 HelpLevel.Verbose);
@@ -1169,6 +1179,9 @@ namespace BuildXL
 
             hw.WriteOption("/numRetryFailedPipsOnAnotherWorker:<int>",
                Strings.HelpText_DisplayHelp_NumberofFailedPipRetry);
+
+            hw.WriteOption("/engineVersion:<int>",
+               Strings.HelpText_DisplayHelp_EngineVersion);
 
             #endregion
 

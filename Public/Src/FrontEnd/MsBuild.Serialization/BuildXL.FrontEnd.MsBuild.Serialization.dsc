@@ -8,7 +8,8 @@ namespace MsBuild.Serialization {
         generateLogs: false,
         sources: globR(d`.`, "*.cs"),
         references: [
-            importFrom("Newtonsoft.Json").pkg
+            importFrom("Newtonsoft.Json").pkg,
+            SdkProjectGraph.dll
         ],
     });
 }

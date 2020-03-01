@@ -36,7 +36,6 @@ using BuildXL.Pips.Operations;
 using BuildXL.Processes;
 using BuildXL.Scheduler;
 using BuildXL.Scheduler.Artifacts;
-using BuildXL.Scheduler.Graph;
 using BuildXL.Storage;
 using BuildXL.Storage.Fingerprints;
 using BuildXL.Tracing;
@@ -50,7 +49,6 @@ using BuildXL.Utilities.Tracing;
 using BuildXL.ViewModel;
 using JetBrains.Annotations;
 using Microsoft.Win32.SafeHandles;
-using static BuildXL.Scheduler.ExecutionSampler;
 using static BuildXL.Utilities.BuildParameters;
 using static BuildXL.Utilities.FormattableStringEx;
 using IOneBuildModuleConfiguration = BuildXL.Utilities.Configuration.IModuleConfiguration;
@@ -1200,6 +1198,7 @@ namespace BuildXL.Engine
                             { "VSO0:6DBFE7BC9FA24D33A46A3A0732164BD5A4F5984E8FCE091D305FA635CD876AA700","DEDUPNODEORCHUNK:565B91A12F72B94139F6D7DB21C04986C06CC3AE56FB43E6EDA8E6B496198F0B02" },
                             { "VSO0:C6AB5808D30BFF857263BC467FE8D818F35486763F673F79CA5A758727CEF3A900","DEDUPNODEORCHUNK:1D9CED63701BC0F2E5D3063BA7889F8687537CB78B155858FCB7EE56A78A6C8102" },
                             { "VSO0:6BBAE77F9BA0231C90ABD9EA720FF886E8613CE8EF29D8B657AF201E2982829600","DEDUPNODEORCHUNK:1A350CECC53CAE31EE3699BDA53270E91951A81E6353EABC878BA8D8B16F8E9202" },
+                            { "VSO0:EE359BDFFFED53EF3C5E76C1716AADD1567447B12A37292C075D6A26F1138C0700","DEDUPNODEORCHUNK:EEA76D4D9582AF60528262048E03F957FA7A91D166DE37D2C983A31583D8FE9F02" },
                         };
 
                     foreach (var download in x.Downloads.Cast<DownloadFileSettings>())
@@ -2092,8 +2091,8 @@ namespace BuildXL.Engine
 
             if (ShouldUpgradeFileAccessWarningsToHighLevelError(Configuration) &&
                 m_trackingEventListener != null &&
-                ((m_trackingEventListener.CountsPerEventId(EventId.FileMonitoringWarning) != 0) ||
-                 (m_trackingEventListener.CountsPerEventId(EventId.PipProcessDisallowedNtCreateFileAccessWarning) != 0)))
+                ((m_trackingEventListener.CountsPerEventId((int)BuildXL.Scheduler.Tracing.LogEventId.FileMonitoringWarning) != 0) ||
+                 (m_trackingEventListener.CountsPerEventId((int)BuildXL.Processes.Tracing.LogEventId.PipProcessDisallowedNtCreateFileAccessWarning) != 0)))
             {
                 Logger.Log.FileAccessErrorsExist(loggingContext);
                 success = false;

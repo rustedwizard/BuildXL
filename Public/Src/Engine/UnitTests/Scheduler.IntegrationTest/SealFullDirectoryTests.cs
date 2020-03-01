@@ -9,10 +9,10 @@ using BuildXL.Utilities;
 using BuildXL.Utilities.Tracing;
 using Test.BuildXL.Executables.TestProcess;
 using Test.BuildXL.Scheduler;
-using Test.BuildXL.TestUtilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
+using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
 
 namespace IntegrationTest.BuildXL.Scheduler
 {
@@ -106,9 +106,9 @@ namespace IntegrationTest.BuildXL.Scheduler
             else
             {
                 RunScheduler().AssertFailure();
-                AssertErrorEventLogged(EventId.FileMonitoringError);
-                AssertVerboseEventLogged(EventId.PipProcessDisallowedFileAccess);
-                AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+                AssertErrorEventLogged(LogEventId.FileMonitoringError);
+                AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess);
+                AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
                 XAssert.IsTrue(Directory.Exists(nestedDir2Str), $"unseal directory was supposed to exist: {nestedDir2Str}");
                 XAssert.IsTrue(File.Exists(sealFile2Str), $"File not in the content list when seal was supposed to exist: {sealFile2Str}");
             }

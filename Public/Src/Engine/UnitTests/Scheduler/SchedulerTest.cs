@@ -33,7 +33,6 @@ using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Configuration.Mutable;
 using BuildXL.Utilities.Tasks;
-using BuildXL.Utilities.Tracing;
 using Test.BuildXL.Processes;
 using Test.BuildXL.Scheduler.Utils;
 using Test.BuildXL.TestUtilities;
@@ -346,12 +345,12 @@ namespace Test.BuildXL.Scheduler
             if (OperatingSystemHelper.IsUnixOS)
             {
                 // ignoring /bin/sh is being used as a source file
-                AssertWarningEventLogged(EventId.IgnoringUntrackedSourceFileNotUnderMount);
+                AssertWarningEventLogged(LogEventId.IgnoringUntrackedSourceFileNotUnderMount);
             }
 
             // Only 1 source file should have been hashed (file1.txt). Also the second pip that consumes file1.txt should not cause the file to be rehashed
             // in a sealed directory used as input twice
-            AssertVerboseEventLogged(EventId.HashedSourceFile);
+            AssertVerboseEventLogged(LogEventId.HashedSourceFile);
         }
 
         /// <summary>
@@ -487,8 +486,8 @@ namespace Test.BuildXL.Scheduler
 
             XAssert.IsFalse(scheduleSucceeded);
 
-            AssertVerboseEventLogged(EventId.CancelingPipSinceScheduleIsTerminating);
-            AssertErrorEventLogged(EventId.TerminatingDueToPipFailure);
+            AssertVerboseEventLogged(LogEventId.CancelingPipSinceScheduleIsTerminating);
+            AssertErrorEventLogged(LogEventId.TerminatingDueToPipFailure);
         }
 
         [Fact]
@@ -571,8 +570,8 @@ namespace Test.BuildXL.Scheduler
 
             // With the given constraints  2 or 3 pips may get cancelled depending on the actual schedule. Uncertainty is  due to the fact that
             // processSkippedInQueue may get cancelled or skipped.
-            AssertVerboseEventCountIsInInterval(EventId.CancelingPipSinceScheduleIsTerminating, minOccurrences: 2, maxOccurrences: 3);
-            AssertErrorEventLogged(EventId.TerminatingDueToPipFailure);
+            AssertVerboseEventCountIsInInterval((int)LogEventId.CancelingPipSinceScheduleIsTerminating, minOccurrences: 2, maxOccurrences: 3);
+            AssertErrorEventLogged(LogEventId.TerminatingDueToPipFailure);
 
             AssertLatestProcessPipCounts(succeeded: 0, failed: 0, skipped: 1);
         }
@@ -673,7 +672,7 @@ namespace Test.BuildXL.Scheduler
                 expectedFailedPips: new Pip[] { copyFileB1 },
                 expectedSkippedPips: new Pip[] { copyFileB2, process }));
 
-            AssertVerboseEventLogged(EventId.PipFailedDueToFailedPrerequisite, 2 /*copy_7,copy_8*/ + 3 /*value_5,Value_7,Value_8*/ + 3 /*spec_5,spec_7,spec_8*/ + 1 /*module_1*/);
+            AssertVerboseEventLogged(LogEventId.PipFailedDueToFailedPrerequisite, 2 /*copy_7,copy_8*/ + 3 /*value_5,Value_7,Value_8*/ + 3 /*spec_5,spec_7,spec_8*/ + 1 /*module_1*/);
         }
 
         /// <summary>
@@ -1254,7 +1253,7 @@ namespace Test.BuildXL.Scheduler
             };
 
             await RunScheduler(scheduleConfiguration: customConfiguration);
-            AssertWarningEventLogged(EventId.FailedToHashInputFileBecauseTheFileIsDirectory);
+            AssertWarningEventLogged(LogEventId.FailedToHashInputFileBecauseTheFileIsDirectory);
             AssertErrorEventLogged(LogEventId.PipSourceDependencyCannotBeHashed);
             AssertErrorEventLogged(LogEventId.PipFailedDueToSourceDependenciesCannotBeHashed);
         }
@@ -1569,7 +1568,7 @@ namespace Test.BuildXL.Scheduler
             return (first ?? Enumerable.Empty<TSource>()).Union(second ?? Enumerable.Empty<TSource>());
         }
 
-        private void AssertSchedulerErrorEventLogged(EventId eventId, int count = 1)
+        private void AssertSchedulerErrorEventLogged(LogEventId eventId, int count = 1)
         {
             Contract.Requires(count >= 0);
             AssertErrorEventLogged(eventId, count);
@@ -2111,7 +2110,7 @@ namespace Test.BuildXL.Scheduler
                 .WithServiceInfo(ServiceInfo.ServiceClient(new[] { copyPip.PipId }))
                 .Build();
             XAssert.IsFalse(PipGraphBuilder.AddProcess(clientPip));
-            AssertSchedulerErrorEventLogged(EventId.InvalidPipDueToInvalidServicePipDependency);
+            AssertSchedulerErrorEventLogged(PipLogEventId.InvalidPipDueToInvalidServicePipDependency);
         }
 
         [Fact]
@@ -2129,7 +2128,7 @@ namespace Test.BuildXL.Scheduler
                 .WithServiceInfo(ServiceInfo.ServiceClient(new[] { processPip.PipId }))
                 .Build();
             XAssert.IsFalse(PipGraphBuilder.AddProcess(clientPip));
-            AssertSchedulerErrorEventLogged(EventId.InvalidPipDueToInvalidServicePipDependency);
+            AssertSchedulerErrorEventLogged(PipLogEventId.InvalidPipDueToInvalidServicePipDependency);
         }
         #endregion
 
@@ -2265,7 +2264,7 @@ namespace Test.BuildXL.Scheduler
                 CreateProvenance(),
                 servicePipDependencies: new[] { copyPip.PipId });
             XAssert.IsFalse(PipGraphBuilder.AddIpcPip(ipcPip, PipId.Invalid));
-            AssertSchedulerErrorEventLogged(EventId.InvalidPipDueToInvalidServicePipDependency);
+            AssertSchedulerErrorEventLogged(PipLogEventId.InvalidPipDueToInvalidServicePipDependency);
         }
 
         [Fact]
@@ -2304,7 +2303,7 @@ namespace Test.BuildXL.Scheduler
                     ExpectPipsDone(LabelPip(ipcPip, nameof(ipcPip)));
 
                     // assert IpcClientFailed error was logged
-                    AssertWarningEventLogged(EventId.IpcClientFailed);
+                    AssertWarningEventLogged(LogEventId.IpcClientFailed);
                 });
         }
 
@@ -2337,7 +2336,7 @@ namespace Test.BuildXL.Scheduler
                     // assert error was logged
                     if (shouldFail)
                     {
-                        AssertSchedulerErrorEventLogged(EventId.PipIpcFailed);
+                        AssertSchedulerErrorEventLogged(LogEventId.PipIpcFailed);
                     }
                 });
         }
@@ -2475,7 +2474,7 @@ namespace Test.BuildXL.Scheduler
                 await RunScheduler();
             }
 
-            AssertWarningEventLogged(EventId.FailedToHashInputFile);
+            AssertWarningEventLogged(LogEventId.FailedToHashInputFile);
             AssertErrorEventLogged(LogEventId.PipSourceDependencyCannotBeHashed);
             AssertErrorEventLogged(LogEventId.PipFailedDueToSourceDependenciesCannotBeHashed);
         }
@@ -2799,7 +2798,7 @@ namespace Test.BuildXL.Scheduler
         /// <summary>
         /// Asserts that the given (verbose) event id occurs no less than <paramref name="minOccurrences"/> and no more than <paramref name="maxOccurrences"/> times in the event log.
         /// </summary>
-        private void AssertVerboseEventCountIsInInterval(EventId eventId, int minOccurrences = 1, int maxOccurrences = 1)
+        private void AssertVerboseEventCountIsInInterval(int eventId, int minOccurrences = 1, int maxOccurrences = 1)
         {
             Contract.Requires(minOccurrences >= 0);
             Contract.Requires(minOccurrences <= maxOccurrences);

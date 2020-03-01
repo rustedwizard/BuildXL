@@ -380,6 +380,9 @@ namespace BuildXL
                             "enableAsyncLogging",
                             sign => loggingConfiguration.EnableAsyncLogging = sign),
                         OptionHandlerFactory.CreateBoolOption(
+                            "enableHistoricCommitMemoryProjection",
+                            sign => schedulingConfiguration.EnableHistoricCommitMemoryProjection = sign),
+                        OptionHandlerFactory.CreateBoolOption(
                             "enableDedup",
                             sign =>
                             {
@@ -418,6 +421,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "engineCacheDirectory",
                             opt => layoutConfiguration.EngineCacheDirectory = CommandLineUtilities.ParsePathOption(opt, pathTable)),
+                        OptionHandlerFactory.CreateOption(
+                            "engineVersion",
+                            opt => EngineVersion.Version = CommandLineUtilities.ParseInt32Option(opt, 0, int.MaxValue)),
                         OptionHandlerFactory.CreateBoolOption(
                             "ensureTempDirectoriesExistenceBeforePipExecution",
                             sign => sandboxConfiguration.EnsureTempDirectoriesExistenceBeforePipExecution = sign),
@@ -688,6 +694,9 @@ namespace BuildXL
                             opt =>
                             schedulingConfiguration.MaxProcesses =
                             (int)Math.Max(1, Environment.ProcessorCount * CommandLineUtilities.ParseDoubleOption(opt, 0, int.MaxValue))),
+                        OptionHandlerFactory.CreateOption(
+                            "maxCommitUtilizationPercentage",
+                            opt => schedulingConfiguration.MaximumCommitUtilizationPercentage = CommandLineUtilities.ParseInt32Option(opt, 0, 100)),
                         OptionHandlerFactory.CreateOption(
                             "maxRamUtilizationPercentage",
                             opt => schedulingConfiguration.MaximumRamUtilizationPercentage = CommandLineUtilities.ParseInt32Option(opt, 0, 100)),
@@ -1520,7 +1529,7 @@ namespace BuildXL
         /// </remarks>
         private static void ValidateLoggingConfiguration(ILoggingConfiguration loggingConfiguration)
         {
-            Contract.Requires(loggingConfiguration != null);
+            Contract.RequiresNotNull(loggingConfiguration);
 
             if (!string.IsNullOrEmpty(loggingConfiguration.RelatedActivityId))
             {
@@ -1654,7 +1663,7 @@ namespace BuildXL
             PathTable pathTable,
             Dictionary<string, AbsolutePath> map)
         {
-            Contract.Requires(map != null);
+            Contract.RequiresNotNull(map);
 
             var keyValuePair = CommandLineUtilities.ParseKeyValuePair(opt);
             map[keyValuePair.Key] = CommandLineUtilities.GetFullPath(keyValuePair.Value, opt, pathTable);
@@ -1665,7 +1674,7 @@ namespace BuildXL
             PathTable pathTable,
             Dictionary<AbsolutePath, (IReadOnlyList<int>, EventLevel?)> map)
         {
-            Contract.Requires(map != null);
+            Contract.RequiresNotNull(map);
 
             var keyValuePair = CommandLineUtilities.ParseKeyValuePair(opt);
 

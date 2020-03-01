@@ -9,12 +9,13 @@ using BuildXL.Pips.Operations;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Tracing;
-using Test.BuildXL.Scheduler;
 using Test.BuildXL.Executables.TestProcess;
+using Test.BuildXL.Scheduler;
 using Test.BuildXL.TestUtilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
+using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
 
 namespace IntegrationTest.BuildXL.Scheduler
 {
@@ -504,10 +505,10 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             // pipB fails on consuming /symlinkFile since it does not declare /targetFile as a dependency
             XAssert.AreEqual(PipResultStatus.Failed, fail.PipResults[pipB.PipId]);
-            AssertVerboseEventLogged(EventId.PipProcessDisallowedFileAccess, ArtifactToString(targetFile));
+            AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess, ArtifactToString(targetFile));
             AssertVerboseEventLogged(LogEventId.DependencyViolationMissingSourceDependency);
-            AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
-            AssertErrorEventLogged(EventId.FileMonitoringError);
+            AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
         }
 
         [Fact]
@@ -709,10 +710,10 @@ namespace IntegrationTest.BuildXL.Scheduler
                 // Detours is only ignoring symlinks for APIs other than CreateFile and NtCreateFile/OpenFile
                 // Since ReadFile calls CreateFile, expect a disallowed file access on undeclared underlying /targetFile
                 RunScheduler().AssertFailure();
-                AssertVerboseEventLogged(EventId.PipProcessDisallowedFileAccess);
+                AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess);
                 AssertVerboseEventLogged(LogEventId.DependencyViolationMissingSourceDependency);
-                AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
-                AssertErrorEventLogged(EventId.FileMonitoringError);
+                AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+                AssertErrorEventLogged(LogEventId.FileMonitoringError);
             }
             else
             {
@@ -777,7 +778,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             FileArtifact output = CopyFile(symlinkFile1, CreateOutputFileArtifact());
 
             RunScheduler().AssertFailure();
-            AssertErrorEventLogged(EventId.PipCopyFileFailed);
+            AssertErrorEventLogged(LogEventId.PipCopyFileFailed);
         }
 
         [Fact]
@@ -803,7 +804,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             FileArtifact output = CopyFile(symlinkFile1, CreateOutputFileArtifact());
 
             RunScheduler().AssertFailure();
-            AssertErrorEventLogged(EventId.PipCopyFileFailed);
+            AssertErrorEventLogged(LogEventId.PipCopyFileFailed);
         }
 
         [Feature(Features.OpaqueDirectory)]
@@ -847,7 +848,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             // check that init pip finished without any errors
             XAssert.AreEqual(PipResultStatus.Succeeded, result.PipResults[pipA.Process.PipId]);
 
-            AssertErrorEventLogged(EventId.PipCopyFileFailed);
+            AssertErrorEventLogged(LogEventId.PipCopyFileFailed);
         }
 
         [Theory]
@@ -1064,11 +1065,11 @@ namespace IntegrationTest.BuildXL.Scheduler
             RunScheduler().AssertFailure();
 
             // Block creating symlink
-            AssertVerboseEventLogged(EventId.PipProcessDisallowedFileAccess, allowMore: true);
-            AssertErrorEventLogged(EventId.FileMonitoringError);
+            AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess, allowMore: true);
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
 
             // Test process fails when an operation cannot be completed
-            AssertErrorEventLogged(EventId.PipProcessError);
+            AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
 
             // Expected symlink as output
             AssertVerboseEventLogged(LogEventId.DependencyViolationUndeclaredOutput, allowMore: true);

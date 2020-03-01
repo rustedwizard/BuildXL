@@ -4,17 +4,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using BuildXL.Cache.ContentStore.Hashing;
-using BuildXL.Engine.Cache.Fingerprints;
+using System.Threading;
 using BuildXL.Pips;
 using BuildXL.Pips.Builders;
 using BuildXL.Pips.Operations;
 using BuildXL.Scheduler;
 using BuildXL.Scheduler.Fingerprints;
 using BuildXL.Scheduler.Tracing;
-using BuildXL.Storage;
-using BuildXL.Storage.Fingerprints;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Tracing;
 using Test.BuildXL.Executables.TestProcess;
@@ -23,6 +19,8 @@ using Test.BuildXL.TestUtilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
+using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
+using SchedulerLogEventId = BuildXL.Scheduler.Tracing.LogEventId;
 
 namespace IntegrationTest.BuildXL.Scheduler
 {
@@ -92,7 +90,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             });
 
             RunScheduler().AssertFailure();
-            AssertErrorEventLogged(EventId.PipProcessError);
+            AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
         }
 
         [Fact]
@@ -113,7 +111,7 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             RunScheduler(testHooks: new SchedulerTestHooks()
             {
-                SyntheticMachinePerfInfo = new PerformanceCollector.MachinePerfInfo()
+                GenerateSyntheticMachinePerfInfo = (lc, s) => new PerformanceCollector.MachinePerfInfo()
                 {
                     AvailableRamMb = 100,
                     RamUsagePercentage = 99,
@@ -122,11 +120,10 @@ namespace IntegrationTest.BuildXL.Scheduler
                     CommitUsagePercentage = 10,
                     CommitLimitMb = 100000,
                 }
-
             });
 
-            AssertVerboseEventLogged(EventId.LowRamMemory);
-            AssertVerboseEventLogged(LogEventId.StoppingProcessExecutionDueToResourceExhaustion);
+            AssertVerboseEventLogged(LogEventId.LowRamMemory);
+            AssertVerboseEventLogged(LogEventId.StoppingProcessExecutionDueToMemory);
         }
 
         [Fact]
@@ -147,7 +144,7 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             RunScheduler(testHooks: new SchedulerTestHooks()
             {
-                SyntheticMachinePerfInfo = new PerformanceCollector.MachinePerfInfo()
+                GenerateSyntheticMachinePerfInfo = (lc, s) => new PerformanceCollector.MachinePerfInfo()
                 {
                     AvailableRamMb = 9000,
                     RamUsagePercentage = 10,
@@ -159,8 +156,8 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             });
 
-            AssertVerboseEventLogged(EventId.LowCommitMemory);
-            AssertVerboseEventLogged(LogEventId.StoppingProcessExecutionDueToResourceExhaustion); 
+            AssertVerboseEventLogged(LogEventId.LowCommitMemory);
+            AssertVerboseEventLogged(LogEventId.StoppingProcessExecutionDueToMemory); 
         }
 
         [Theory]
@@ -190,10 +187,10 @@ namespace IntegrationTest.BuildXL.Scheduler
             SchedulePipBuilder(pipBuilder);
 
             RunScheduler().AssertFailure();
-            AssertErrorEventLogged(global::BuildXL.Scheduler.Tracing.LogEventId.AbortObservedInputProcessorBecauseFileUntracked);
+            AssertErrorEventLogged(SchedulerLogEventId.AbortObservedInputProcessorBecauseFileUntracked);
             if (!shouldPipSucceed)
             {
-                AssertErrorEventLogged(EventId.PipProcessError);
+                AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
             }
         }
 
@@ -223,10 +220,10 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             RunScheduler().AssertFailure();
             IgnoreWarnings();
-            AssertErrorEventLogged(EventId.FileMonitoringError);
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
             if (!shouldPipSucceed)
             {
-                AssertErrorEventLogged(EventId.PipProcessError);
+                AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
             }
         }
 
@@ -281,12 +278,12 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             if (partialSealDirectory)
             {
-                AssertVerboseEventLogged(EventId.DisallowedFileAccessInSealedDirectory);
+                AssertVerboseEventLogged(LogEventId.DisallowedFileAccessInSealedDirectory);
             }
-            AssertVerboseEventLogged(EventId.PipProcessDisallowedFileAccess);
+            AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess);
             AssertVerboseEventLogged(LogEventId.DependencyViolationMissingSourceDependency);
-            AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
-            AssertErrorEventLogged(EventId.FileMonitoringError);
+            AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
         }
 
         [Theory]
@@ -320,7 +317,7 @@ namespace IntegrationTest.BuildXL.Scheduler
                 if (shouldPipFail)
                 {
                     RunScheduler(tempCleaner: tempCleaner).AssertFailure();
-                    AssertErrorEventLogged(EventId.PipProcessError);
+                    AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
                     tempCleaner.WaitPendingTasksForCompletion();
                     XAssert.IsTrue(Directory.Exists(tempdirStr), $"TEMP directory deleted but wasn't supposed to: {tempdirStr}");
                     XAssert.IsTrue(File.Exists(fileStr), $"Temp file deleted but wasn't supposed to: {fileStr}");
@@ -349,10 +346,10 @@ namespace IntegrationTest.BuildXL.Scheduler
             RunScheduler().AssertFailure();
 
             // Fail on unspecified output
-            AssertVerboseEventLogged(EventId.PipProcessDisallowedFileAccess, count: 1, allowMore: OperatingSystemHelper.IsUnixOS);
+            AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess, count: 1, allowMore: OperatingSystemHelper.IsUnixOS);
             AssertVerboseEventLogged(LogEventId.DependencyViolationUndeclaredOutput);
-            AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
-            AssertErrorEventLogged(EventId.FileMonitoringError);
+            AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
         }
 
         [Fact]
@@ -372,9 +369,9 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             // Fail on missing output
             RunScheduler().AssertFailure();
-            AssertVerboseEventLogged(EventId.PipProcessMissingExpectedOutputOnCleanExit);
+            AssertVerboseEventLogged(ProcessesLogEventId.PipProcessMissingExpectedOutputOnCleanExit);
             AssertErrorEventLogged(global::BuildXL.Processes.Tracing.LogEventId.PipProcessExpectedMissingOutputs);
-            AssertErrorEventLogged(EventId.PipProcessError);
+            AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
         }
 
         [Fact]
@@ -1133,8 +1130,8 @@ namespace IntegrationTest.BuildXL.Scheduler
 
             var result = RunScheduler().AssertSuccess();
 
-            AssertWarningEventLogged(EventId.ProcessNotStoredToCacheDueToFileMonitoringViolations, count: 2);
-            AssertWarningEventLogged(EventId.FileMonitoringWarning, count: 1);
+            AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations, count: 2);
+            AssertWarningEventLogged(LogEventId.FileMonitoringWarning, count: 1);
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)] // WriteFile operation failed on MacOS; need further investigation.
@@ -1390,6 +1387,72 @@ namespace IntegrationTest.BuildXL.Scheduler
             XAssert.AreEqual(PipResultStatus.Skipped, cacheOnlyRun.PipResults[pipB.Process.PipId]);
             // PipB should also be skipped because its upstream dependency was skipped
             XAssert.AreEqual(PipResultStatus.Skipped, cacheOnlyRun.PipResults[pipC.Process.PipId]);
+        }
+
+        [Fact]
+        public void RetryPipSuccessOnHighMemoryUsage()
+        {
+            Configuration.Schedule.MinimumTotalAvailableRamMb = 10000;
+            Configuration.Schedule.MaximumRamUtilizationPercentage = 95;
+            Configuration.Distribution.NumRetryFailedPipsOnAnotherWorker = 5;
+
+            var processA = CreateAndSchedulePipBuilder(new Operation[]
+            {
+                Operation.Block(),
+                Operation.WriteFile(CreateOutputFileArtifact(CreateOutputFileArtifact())),
+            });
+
+            var processB = CreateAndSchedulePipBuilder(new Operation[]
+            {
+                Operation.Block(),
+                Operation.WriteFile(CreateOutputFileArtifact(CreateOutputFileArtifact())),
+            });
+
+            bool triggeredCancellation = false;
+            CancellationTokenSource tokenSource = new CancellationTokenSource();
+            var testHook = new SchedulerTestHooks()
+            {
+                SimulateHighMemoryPressure = true,
+                GenerateSyntheticMachinePerfInfo = (loggingContext, scheduler) =>
+                {
+                    if (triggeredCancellation)
+                    {
+                        global::BuildXL.App.Tracing.Logger.Log.CancellationRequested(loggingContext);
+                        tokenSource.Cancel();
+                    }
+
+                    if (scheduler.MaxExternalProcessesRan == 2)
+                    {
+                        triggeredCancellation = true;
+                        return new PerformanceCollector.MachinePerfInfo()
+                        {
+                            AvailableRamMb = 100,
+                            RamUsagePercentage = 99,
+                            TotalRamMb = 10000,
+                            CommitUsedMb = 5000,
+                            CommitUsagePercentage = 50,
+                            CommitLimitMb = 10000,
+                        };
+                    }
+
+                    return new PerformanceCollector.MachinePerfInfo()
+                    {
+                        AvailableRamMb = 9000,
+                        RamUsagePercentage = 10,
+                        TotalRamMb = 10000,
+                        CommitUsedMb = 5000,
+                        CommitUsagePercentage = 50,
+                        CommitLimitMb = 10000,
+                    };
+                }
+            };
+
+            RunScheduler(testHooks: testHook, updateStatusTimerEnabled: true, cancellationToken: tokenSource.Token).AssertFailure();
+
+            AssertErrorEventLogged(global::BuildXL.App.Tracing.LogEventId.CancellationRequested);
+            AssertVerboseEventLogged(LogEventId.StoppingProcessExecutionDueToMemory);
+            AssertWarningEventLogged(LogEventId.CancellingProcessPipExecutionDueToResourceExhaustion);
+            AssertWarningEventLogged(LogEventId.StartCancellingProcessPipExecutionDueToResourceExhaustion);
         }
 
         private Operation ProbeOp(string root, string relativePath = "")
