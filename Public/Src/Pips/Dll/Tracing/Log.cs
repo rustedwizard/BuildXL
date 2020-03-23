@@ -1,15 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics.Tracing;
-using System.Linq;
 using BuildXL.Tracing;
 using BuildXL.Utilities.Instrumentation.Common;
 
 #pragma warning disable 1591
 #pragma warning disable CA1823 // Unused field
+#nullable enable
 
 namespace BuildXL.Pips.Tracing
 {
@@ -18,6 +16,7 @@ namespace BuildXL.Pips.Tracing
     /// </summary>
     [EventKeywordsType(typeof(Keywords))]
     [EventTasksType(typeof(Tasks))]
+    [LoggingDetails("PipsLogger")]
     public abstract partial class Logger : LoggerBase
     {
         internal Logger()
@@ -1049,6 +1048,15 @@ namespace BuildXL.Pips.Tracing
             EventTask = (int)Tasks.Scheduler,
             Message = "No pips match this filter: {0}")]
         public abstract void NoPipsMatchedFilter(LoggingContext context, string pipFilter);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.MultiplePipsUsingSameTemporaryDirectory,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
+            EventTask = (ushort)Tasks.Storage,
+            Message = "Duplicate temporary directory at path: {duplicatePath} detected between pip {pipId1} and {pipId2}. If you would like to disable the duplicate temporary directory validation feature, please pass bxl arg /unsafe_AllowDuplicateTemporaryDirectory+")]
+        public abstract void MultiplePipsUsingSameTemporaryDirectory(LoggingContext loggingContext, string duplicatePath, string pipId1, string pipId2);
     }
 }
 #pragma warning restore CA1823 // Unused field

@@ -82,7 +82,8 @@ namespace Test.BuildXL.Processes.Detours
             bool ignoreNonCreateFileReparsePoints = true,
             bool isQuickBuildIntegrated = false,
             bool ignorePreloadedDlls = true,
-            bool enforceAccessPoliciesOnDirectoryCreation = false)
+            bool enforceAccessPoliciesOnDirectoryCreation = false,
+            bool probeDirectorySymlinkAsDirectory = false)
         {
             errorString = null;
 
@@ -122,7 +123,7 @@ namespace Test.BuildXL.Processes.Detours
                     IgnoreGetFinalPathNameByHandle = ignoreGetFinalPathNameByHandle,
                     MonitorZwCreateOpenQueryFile = monitorZwCreateOpenQueryFile,
                     IgnorePreloadedDlls = ignorePreloadedDlls,
-                    IgnoreCreateProcessReport = false
+                    ProbeDirectorySymlinkAsDirectory = probeDirectorySymlinkAsDirectory,
                 },
                 EnforceAccessPoliciesOnDirectoryCreation = enforceAccessPoliciesOnDirectoryCreation,
                 FailUnexpectedFileAccesses = unexpectedFileAccessesAreErrors
@@ -145,7 +146,7 @@ namespace Test.BuildXL.Processes.Detours
                 SemanticPathExpander.Default,
                 false,
                 isLazySharedOpaqueOutputDeletionEnabled: false,
-                pipEnvironment: new PipEnvironment(),
+                pipEnvironment: new PipEnvironment(loggingContext),
                 validateDistribution: false,
                 directoryArtifactContext: TestDirectoryArtifactContext.Empty,
                 buildEngineDirectory: binDirectory,
@@ -1595,7 +1596,7 @@ namespace Test.BuildXL.Processes.Detours
                         IgnoreNonCreateFileReparsePoints = false,
                         MonitorZwCreateOpenQueryFile = false,
                         MonitorNtCreateFile = true,
-                        IgnoreCreateProcessReport = false
+                        ProbeDirectorySymlinkAsDirectory = false,
                     }
                 };
 
@@ -4686,6 +4687,9 @@ namespace Test.BuildXL.Processes.Detours
                     ignoreRepPoints: false,
                     context: context,
                     pip: pip,
+                    // Use unsafe probe by default because this test probes parent directories that can be directory symlinks or junctions.
+                    // E.g., 'd:\dbs\el\bxlint\Out' with [C:\Windows\system32\cmd.exe:52040](Probe) FindFirstFileEx(...)
+                    probeDirectorySymlinkAsDirectory: true,
                     errorString: out errorString);
 
                 SetExpectedFailures(1, 0);
@@ -6151,6 +6155,187 @@ namespace Test.BuildXL.Processes.Detours
                         // 1. junction\subdir\symlink.link -- covered by manifest
                         // 2. junction\target\hello.txt -- covered by manifest
                     });
+            }
+        }
+
+        [TheoryIfSupported(requiresSymlinkPermission: true)]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ProbeDirectorySymlink(bool probeDirectorySymlinkAsDirectory)
+        {
+            var context = BuildXLContext.CreateInstanceForTesting();
+            var pathTable = context.PathTable;
+
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
+            {
+                var targetDirectory = tempFiles.GetDirectory(pathTable, @"target");
+                var directoryLink = tempFiles.GetFileName("directory.lnk");
+                XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(directoryLink, targetDirectory.ToString(pathTable), isTargetFile: false));
+
+                var process = CreateDetourProcess(
+                    context,
+                    pathTable,
+                    tempFiles,
+                    argumentStr: "CallProbeDirectorySymlink",
+                    inputFiles: ReadOnlyArray<FileArtifact>.Empty,
+                    inputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    outputFiles: ReadOnlyArray<FileArtifactWithAttributes>.Empty,
+                    outputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    untrackedScopes: ReadOnlyArray<AbsolutePath>.Empty);
+
+                string errorString;
+
+                SandboxedProcessPipExecutionResult result = await RunProcessAsync(
+                    pathTable: pathTable,
+                    ignoreSetFileInformationByHandle: false,
+                    ignoreZwRenameFileInformation: false,
+                    monitorNtCreate: true,
+                    ignoreRepPoints: false,
+                    context: context,
+                    pip: process,
+                    probeDirectorySymlinkAsDirectory: probeDirectorySymlinkAsDirectory,
+                    errorString: out errorString);
+
+                if (probeDirectorySymlinkAsDirectory)
+                {
+                    VerifyNormalSuccess(context, result);
+                    VerifyFileAccesses(
+                        context,
+                        result.AllReportedFileAccesses,
+                        new[]
+                        {
+                            (AbsolutePath.Create(pathTable, directoryLink), RequestedAccess.Probe, FileAccessStatus.Allowed)
+                        });
+                }
+                else
+                {
+                    SetExpectedFailures(1, 0);
+                    AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess);
+
+                    VerifyAccessDenied(context, result);
+                    VerifyFileAccessViolations(result, 1);
+                    VerifyFileAccesses(
+                        context,
+                        result.AllReportedFileAccesses,
+                        new[]
+                        {
+                            (AbsolutePath.Create(pathTable, directoryLink), RequestedAccess.Probe, FileAccessStatus.Denied)
+                        });
+                }
+            }
+        }
+
+        [TheoryIfSupported(requiresSymlinkPermission: true)]
+        [MemberData(nameof(TruthTable.GetTable), 3, MemberType = typeof(TruthTable))]
+        public async Task ProbeDirectorySymlinkTarget(bool targetExists, bool withReparsePointFlag, bool probeDirectorySymlinkAsDirectory)
+        {
+            var context = BuildXLContext.CreateInstanceForTesting();
+            var pathTable = context.PathTable;
+
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
+            {
+                var targetDirectory = tempFiles.GetDirectory(pathTable, @"target");
+                if (!targetExists)
+                {
+                    FileUtilities.DeleteDirectoryContents(targetDirectory.ToString(pathTable), deleteRootDirectory: true);
+                }
+
+                var directoryLink = tempFiles.GetFileName("directory.lnk");
+                XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(directoryLink, targetDirectory.ToString(pathTable), isTargetFile: false));
+
+                var process = CreateDetourProcess(
+                    context,
+                    pathTable,
+                    tempFiles,
+                    argumentStr: withReparsePointFlag 
+                    ? "CallProbeDirectorySymlinkTargetWithReparsePointFlag" 
+                    : "CallProbeDirectorySymlinkTargetWithoutReparsePointFlag",
+                    inputFiles: ReadOnlyArray<FileArtifact>.Empty,
+                    inputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    outputFiles: ReadOnlyArray<FileArtifactWithAttributes>.Empty,
+                    outputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    untrackedScopes: ReadOnlyArray<AbsolutePath>.Empty);
+
+                string errorString;
+
+                SandboxedProcessPipExecutionResult result = await RunProcessAsync(
+                    pathTable: pathTable,
+                    ignoreSetFileInformationByHandle: false,
+                    ignoreZwRenameFileInformation: false,
+                    monitorNtCreate: true,
+                    ignoreRepPoints: false,
+                    context: context,
+                    pip: process,
+                    probeDirectorySymlinkAsDirectory: probeDirectorySymlinkAsDirectory,
+                    errorString: out errorString);
+
+                if (withReparsePointFlag)
+                {
+                    if (probeDirectorySymlinkAsDirectory)
+                    {
+                        // Probe should succeed because the directory symlink exists, regardless the existence of its target.
+                        VerifyNormalSuccess(context, result);
+                        VerifyFileAccesses(
+                            context,
+                            result.AllReportedFileAccesses,
+                            new[]
+                            {
+                                // Access allowed on probing directory symlink because the symlink is treated as directory.
+                                (AbsolutePath.Create(pathTable, directoryLink), RequestedAccess.Probe, FileAccessStatus.Allowed)
+                            },
+                            new[]
+                            {
+                                // Due to reparse point flag, the target directory is not followed.
+                                targetDirectory
+                            });
+                    }
+                    else
+                    {
+                        // Probe should succeed because the directory symlink exists, regardless the existence of its target.
+                        // However, since the probe is treated a existing file probe, we should get access denied.
+                        VerifyAccessDenied(context, result);
+                        VerifyFileAccesses(
+                            context,
+                            result.AllReportedFileAccesses,
+                            new[]
+                            {
+                                // Access denied on probing directory symlink.
+                                (AbsolutePath.Create(pathTable, directoryLink), RequestedAccess.Probe, FileAccessStatus.Denied)
+                            },
+                            new[]
+                            {
+                                // Due to reparse point flag, the target directory is not followed.
+                                targetDirectory
+                            });
+                        SetExpectedFailures(1, 0);
+                    }
+                }
+                else
+                {
+                    // No reparse point flag, i.e., we are trying to access the target directory.
+                    if (targetExists)
+                    {
+                        VerifyNormalSuccess(context, result);
+                    }
+                    else
+                    {
+                        // Target doesn't exist, so failed with ERROR_FILE_NOT_FOUND. In some scenario, this can be ERROR_PATH_NOT_FOUND.
+                        VerifyExitCode(context, result, NativeIOConstants.ErrorFileNotFound);
+                        SetExpectedFailures(1, 0);
+                    }
+
+                    VerifyNoFileAccessViolation(result);
+                    VerifyFileAccesses(
+                        context,
+                        result.AllReportedFileAccesses,
+                        new[]
+                        {
+                            // Without reparse point, regardless of the target's existence, both the directory symlinks
+                            // and the target are assumed to be probed.
+                            (AbsolutePath.Create(pathTable, directoryLink), RequestedAccess.Probe, FileAccessStatus.Allowed),
+                            (targetDirectory, RequestedAccess.Probe, FileAccessStatus.Allowed)
+                        });
+                }
             }
         }
 

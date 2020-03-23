@@ -7,6 +7,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
+using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using Newtonsoft.Json;
 
 namespace BuildXL.Cache.Host.Configuration
@@ -89,9 +90,19 @@ namespace BuildXL.Cache.Host.Configuration
         public string KeySpacePrefix { get; set; } = "CBPrefix";
 
         /// <summary>
+        /// Adds suffix to resource names to allow instances in different ring to
+        /// share the same resource without conflicts. In particular this will add the
+        /// ring suffix to Azure blob container name and Redis keyspace (which is included
+        /// in event hub epoch). 
+        /// </summary>
+        [DataMember]
+        public bool UseRingIsolation { get; set; } = false;
+
+        /// <summary>
         /// Bump content expiry times when adding replicas
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int ContentHashBumpTimeMinutes { get; set; } = 2880;
 
         private int _redisMemoizationExpiryTimeMinutes;
@@ -128,9 +139,11 @@ namespace BuildXL.Cache.Host.Configuration
         public string ContentAvailabilityGuarantee { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int RedisBatchPageSize { get; set; } = 500;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? RedisConnectionErrorLimit { get; set; }
 
         // TODO: file a work item to remove the flag!
@@ -138,6 +151,7 @@ namespace BuildXL.Cache.Host.Configuration
         public bool CheckLocalFiles { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaxShutdownDurationInMinutes { get; set; } = 30;
 
         /// <summary>
@@ -150,15 +164,19 @@ namespace BuildXL.Cache.Host.Configuration
         /// An interval between self checks performed by a content store to make sure that all the data on disk matches it's hashes.
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int SelfCheckFrequencyInMinutes { get; set; } = (int)TimeSpan.FromDays(1).TotalMinutes;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? SelfCheckProgressReportingIntervalInMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? SelfCheckDelayInMilliseconds { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? SelfCheckDefaultHddDelayInMilliseconds { get; set; }
 
         /// <summary>
@@ -182,22 +200,31 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public bool UseMdmCounters { get; set; } = true;
 
+        [DataMember]
+        public bool UseContextualEntryDatabaseOperationLogging { get; set; } = false;
+
+        [DataMember]
+        public bool LogReconciliationHashes { get; set; } = false;
+
         /// <summary>
         /// The TTL of blobs in Redis. Setting to 0 will disable blobs.
         /// </summary>
         [DataMember]
+        [Validation.Range(0, int.MaxValue)]
         public int BlobExpiryTimeMinutes { get; set; } = 0;
 
         /// <summary>
-        /// TMax size of blobs in Redis. Setting to 0 will disable blobs.
+        /// Max size of blobs in Redis. Setting to 0 will disable blobs.
         /// </summary>
         [DataMember]
+        [Validation.Range(0, long.MaxValue)]
         public long MaxBlobSize { get; set; } = 1024 * 4;
 
         /// <summary>
         /// Max capacity that blobs can occupy in Redis. Setting to 0 will disable blobs.
         /// </summary>
         [DataMember]
+        [Validation.Range(0, long.MaxValue)]
         public long MaxBlobCapacity { get; set; } = 1024 * 1024 * 1024;
 
         /// <summary>
@@ -206,6 +233,7 @@ namespace BuildXL.Cache.Host.Configuration
         /// to produce candidates.
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int EvictionWindowSize { get; set; } = 500;
 
         /// <summary>
@@ -216,24 +244,28 @@ namespace BuildXL.Cache.Host.Configuration
         /// Two pools are kept in memory at the same time, so we effectively keep double the amount of data in memory.
         /// </remarks>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int EvictionPoolSize { get; set; } = 5000;
 
         /// <summary>
         /// A candidate must have an age older than this amount, or else it won't be evicted.
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? EvictionMinAgeMinutes { get; set; }
 
         /// <summary>
         /// Fraction of the pool considered trusted to be in the accurate order.
         /// </summary>
         [DataMember]
+        [Validation.Range(0, 1, maxInclusive: false)]
         public float EvictionRemovalFraction { get; set; } = 0.015355f;
 
         /// <summary>
         /// Fraction of the pool that can be trusted to be spurious at each iteration
         /// </summary>
         [DataMember]
+        [Validation.Range(0, 1)]
         public float EvictionDiscardFraction { get; set; } = 0;
 
         /// <summary>
@@ -258,9 +290,11 @@ namespace BuildXL.Cache.Host.Configuration
         public bool PrioritizeDesignatedLocationsOnCopies { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(0, int.MaxValue)]
         public int CopyAttemptsWithRestrictedReplicas { get; set; } = 0;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int RestrictedCopyReplicaCount { get; set; } = 3;
 
         /// <summary>
@@ -268,7 +302,16 @@ namespace BuildXL.Cache.Host.Configuration
         /// Default to always wait for both instances to complete.
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? RetryWindowSeconds { get; set; }
+
+        /// <summary>
+        /// If this variable is set we perform periodic logging to a file, indicating CaSaaS is still running and accepting operations.
+        /// We then print the duration CaSaaS was just down, in the log message stating service has started.
+        /// Default with the variable being null, no periodic logging will occur, and CaSaaS start log message does not include duration of last down time.
+        /// </summary>
+        [DataMember]
+        public int? ServiceRunningLogInSeconds { get; set; }
 
         private int[] _retryIntervalForCopiesMs =
             new int[]
@@ -304,7 +347,9 @@ namespace BuildXL.Cache.Host.Configuration
         /// Controls the maximum total number of copy retry attempts
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaxRetryCount { get; set; } = 32;
+
         #region Grpc Copier
         /// <summary>
         /// Use GRPC for file copies between CASaaS.
@@ -322,12 +367,14 @@ namespace BuildXL.Cache.Host.Configuration
         /// Upper bound on number of cached GRPC clients.
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaxGrpcClientCount { get; set; } = DefaultMaxConcurrentCopyOperations;
 
         /// <summary>
         /// Maximum cached age for GRPC clients.
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaxGrpcClientAgeMinutes { get; set; } = 55;
         #endregion
 
@@ -336,12 +383,15 @@ namespace BuildXL.Cache.Host.Configuration
         public bool IsDistributedEvictionEnabled { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? ReplicaCreditInMinutes { get; set; } = 180;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? MinReplicaCountToSafeEvict { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? MinReplicaCountToImmediateEvict { get; set; }
         #endregion
 
@@ -350,18 +400,23 @@ namespace BuildXL.Cache.Host.Configuration
         public bool IsBandwidthCheckEnabled { get; set; } = true;
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? MinimumSpeedInMbPerSec { get; set; } = null;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int BandwidthCheckIntervalSeconds { get; set; } = 60;
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double MaxBandwidthLimit { get; set; } = double.MaxValue;
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double BandwidthLimitMultiplier { get; set; } = 1;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int HistoricalBandwidthRecordsStored { get; set; } = 64;
         #endregion
 
@@ -370,15 +425,23 @@ namespace BuildXL.Cache.Host.Configuration
         public bool IsPinBetterEnabled { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(0, 1, minInclusive: false, maxInclusive: false)]
         public double? PinRisk { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
+        public int? PinMinUnverifiedCount { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, 1, minInclusive: false, maxInclusive: false)]
         public double? MachineRisk { get; set; }
 
         [DataMember]
+        [Validation.Range(0, 1, minInclusive: false, maxInclusive: false)]
         public double? FileRisk { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? MaxIOOperations { get; set; }
         #endregion
 
@@ -390,6 +453,7 @@ namespace BuildXL.Cache.Host.Configuration
         /// Gets or sets the starting retention time for content hash entries in the pin cache.
         /// </summary>
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? PinCacheReplicaCreditRetentionMinutes { get; set; }
 
         /// <summary>
@@ -398,6 +462,7 @@ namespace BuildXL.Cache.Host.Configuration
         /// based on the replica).
         /// </summary>
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? PinCacheReplicaCreditRetentionDecay { get; set; }
         #endregion
 
@@ -409,18 +474,23 @@ namespace BuildXL.Cache.Host.Configuration
         public bool UseDistributedCentralStorage { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaxCentralStorageRetentionGb { get; set; } = 25;
 
         [DataMember]
+        [Validation.Range(0, int.MaxValue)]
         public int CentralStoragePropagationDelaySeconds { get; set; } = 5;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int CentralStoragePropagationIterations { get; set; } = 3;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int CentralStorageMaxSimultaneousCopies { get; set; } = 10;
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? DistributedCentralStoragePeerToPeerCopyTimeoutSeconds { get; set; } = null;
 
         #endregion
@@ -439,9 +509,11 @@ namespace BuildXL.Cache.Host.Configuration
         public bool Unsafe_DisableReconciliation { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int ReconciliationCycleFrequencyMinutes { get; set; } = 30;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int ReconciliationMaxCycleSize { get; set; } = 100000;
 
         [DataMember]
@@ -457,30 +529,37 @@ namespace BuildXL.Cache.Host.Configuration
         public bool? UseIncrementalCheckpointing { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? IncrementalCheckpointDegreeOfParallelism { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseGcIntervalMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseEntryTimeToLiveMinutes { get; set; }
 
         [DataMember]
         public bool? ContentLocationDatabaseCacheEnabled { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseFlushDegreeOfParallelism { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseFlushTransactionSize { get; set; }
 
         [DataMember]
         public bool? ContentLocationDatabaseFlushSingleTransaction { get; set; }
 
         [DataMember]
+        [Validation.Range(0, 1)]
         public double? ContentLocationDatabaseFlushPreservePercentInMemory { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseCacheMaximumUpdatesPerFlush { get; set; }
 
         [DataMember]
@@ -490,43 +569,61 @@ namespace BuildXL.Cache.Host.Configuration
         public bool ContentLocationDatabaseLogsBackupEnabled { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseLogsBackupRetentionMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? FullRangeCompactionIntervalMinutes { get; set; }
 
         [DataMember]
         public string FullRangeCompactionVariant { get; set; }
 
         [DataMember]
+        [Validation.Range(1, byte.MaxValue)]
         public byte? FullRangeCompactionByteIncrementStep { get; set; }
+
+        [DataMember]
+        [Validation.Range(1, long.MaxValue)]
+        public long? ContentLocationDatabaseEnumerateSortedKeysFromStorageBufferSize { get; set; }
+
+        [DataMember]
+        [Validation.Range(1, long.MaxValue)]
+        public long? ContentLocationDatabaseEnumerateEntriesWithSortedKeysFromStorageBufferSize { get; set; }
 
         // Key Vault Settings
         [DataMember]
         public string KeyVaultSettingsString { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int SecretsRetrievalRetryCount { get; set; } = 5;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int SecretsRetrievalMinBackoffSeconds { get; set; } = 10;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int SecretsRetrievalMaxBackoffSeconds { get; set; } = 60;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int SecretsRetrievalDeltaBackoffSeconds { get; set; } = 10;
 
         [DataMember]
         public string EventHubSecretName { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? MaxEventProcessingConcurrency { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? EventBatchSize { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? EventProcessingMaxQueueSize { get; set; }
 
         [DataMember]
@@ -551,62 +648,77 @@ namespace BuildXL.Cache.Host.Configuration
         public bool? MirrorClusterState { get; set; }
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? HeartbeatIntervalMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? CreateCheckpointIntervalMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? RestoreCheckpointIntervalMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? SafeToLazilyUpdateMachineCountThreshold { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? CentralStorageOperationTimeoutInMinutes { get; set; }
 
         /// <summary>
         /// Valid values: LocalLocationStore, Redis, Both (see ContentStore.Distributed.ContentLocationMode)
         /// </summary>
         [DataMember]
-        public string ContentLocationReadMode { get; set; }
+        [Validation.Enum(typeof(ContentLocationMode))]
+        public string ContentLocationReadMode { get; set; } = nameof(ContentLocationMode.Redis);
 
         /// <summary>
         /// Valid values: LocalLocationStore, Redis, Both (see ContentStore.Distributed.ContentLocationMode)
         /// </summary>
         [DataMember]
-        public string ContentLocationWriteMode { get; set; }
+        [Validation.Enum(typeof(ContentLocationMode))]
+        public string ContentLocationWriteMode { get; set; } = nameof(ContentLocationMode.Redis);
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? LocationEntryExpiryMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? RestoreCheckpointAgeThresholdMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? TouchFrequencyMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? MachineExpiryMinutes { get; set; }
 
         // Files smaller than this will use the untrusted hash
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int TrustedHashFileSizeBoundary = 100000;
 
         [DataMember]
+        [Validation.Range(-1, long.MaxValue)]
         public long ParallelHashingFileSizeBoundary { get; set; } = -1;
 
         [DataMember]
+        [Validation.Range(-1, long.MaxValue)]
         public long CacheFileExistenceTimeoutInCopySec { get; set; } = -1;
 
         [DataMember]
+        [Validation.Range(-1, long.MaxValue)]
         public long CacheFileExistenceSizeBytes { get; set; } = -1;
-
 
         [DataMember]
         public bool UseRedundantPutFileShortcut { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaxConcurrentCopyOperations { get; set; } = DefaultMaxConcurrentCopyOperations;
 
         /// <summary>
@@ -619,13 +731,18 @@ namespace BuildXL.Cache.Host.Configuration
         public bool TraceFileSystemContentStoreDiagnosticMessages { get; set; } = false;
 
         [DataMember]
+        public bool TraceProactiveCopy { get; set; } = false;
+
+        [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int? SilentOperationDurationThreshold { get; set; }
 
         [DataMember]
         public bool UseFastHibernationPin { get; set; } = false;
 
         [DataMember]
-        public int MaximumConcurrentPutFileOperations { get; set; } = 512;
+        [Validation.Range(1, int.MaxValue)]
+        public int? MaximumConcurrentPutAndPlaceFileOperations { get; set; } 
 
         [DataMember]
         public bool EnableMetadataStore { get; set; } = false;
@@ -634,22 +751,37 @@ namespace BuildXL.Cache.Host.Configuration
         public bool EnableDistributedCache { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaximumNumberOfMetadataEntriesToStore { get; set; } = 500_000;
 
         [DataMember]
         public bool UseRedisMetadataStore { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets the time period between logging incremental stats
+        /// </summary>
+        [DataMember]
+        public TimeSpan? LogIncrementalStatsInterval { get; set; }
+
+        /// <summary>
+        /// Gets or sets the time period between logging machine-specific performance statistics.
+        /// </summary>
+        [DataMember]
+        public TimeSpan? LogMachineStatsInterval { get; set; }
 
         #endregion
 
         #region Proactive Copy / Replication
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int MaxConcurrentProactiveCopyOperations { get; set; } = DefaultMaxConcurrentCopyOperations;
 
         /// <summary>
         /// Valid values: Disabled, InsideRing, OutsideRing, Both (See ProactiveCopyMode enum)
         /// </summary>
         [DataMember]
+        [Validation.Enum(typeof(ProactiveCopyMode))]
         public string ProactiveCopyMode { get; set; } = "Disabled";
 
         [DataMember]
@@ -665,28 +797,33 @@ namespace BuildXL.Cache.Host.Configuration
         public bool ProactiveCopyUsePreferredLocations { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int ProactiveCopyLocationsThreshold { get; set; } = 3;
 
         [DataMember]
         public bool ProactiveCopyRejectOldContent { get; set; } = false;
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
         public int ProactiveReplicationCopyLimit { get; set; } = 5;
 
         [DataMember]
         public bool EnableProactiveReplication { get; set; } = false;
 
         [DataMember]
-        public int ProactiveReplicationDelaySeconds { get; set; } = 30;
+        [Validation.Range(0, double.MaxValue)]
+        public double ProactiveReplicationDelaySeconds { get; set; } = 30;
 
         [DataMember]
+        [Validation.Range(0, int.MaxValue)]
         public int PreferredLocationsExpiryTimeMinutes { get; set; } = 30;
 
         [DataMember]
         public bool UseBinManager { get; set; } = false;
 
         [DataMember]
-        public int TimeoutForProactiveCopiesMinutes { get; set; } = 15;
+        [Validation.Range(1, int.MaxValue)]
+        public double TimeoutForProactiveCopiesMinutes { get; set; } = 15;
 
         #endregion
 

@@ -3,11 +3,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.ContractsLight;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Exceptions;
 using BuildXL.Cache.ContentStore.FileSystem;
+using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
@@ -37,6 +40,7 @@ namespace BuildXL.Cache.Host.Service
             await Task.Yield();
 
             var host = arguments.Host;
+            var startUpTime = Stopwatch.StartNew();
 
             // NOTE(jubayard): this is the entry point for running CASaaS. At this point, the Logger inside the
             // arguments holds the client's implementation of our logging interface ILogger. Here, we may override the
@@ -56,7 +60,6 @@ namespace BuildXL.Cache.Host.Service
             }
 
             var logger = arguments.Logger;
-
             var factory = new CacheServerFactory(arguments);
 
             await host.OnStartingServiceAsync();
@@ -67,6 +70,7 @@ namespace BuildXL.Cache.Host.Service
             using (var server = factory.Create())
             {
                 var context = new Context(logger);
+                var ctx = new OperationContext(context);
 
                 try
                 {
@@ -78,11 +82,16 @@ namespace BuildXL.Cache.Host.Service
 
                     host.OnStartedService();
 
-                    logger.Info("Service started");
+                    using var serviceRunningTracker = DistributedCacheServiceRunningTracker.Create(
+                        ctx,
+                        SystemClock.Instance,
+                        new PassThroughFileSystem(),
+                        arguments.Configuration,
+                        startUpTime.Elapsed).GetValueOrDefault();
 
                     await arguments.Cancellation.WaitForCancellationAsync();
 
-                    logger.Always("Exit event set");
+                    context.Always("Exit event set");
                 }
                 finally
                 {
@@ -90,7 +99,7 @@ namespace BuildXL.Cache.Host.Service
                     BoolResult result = await ShutdownWithTimeoutAsync(context, server, TimeSpan.FromMinutes(timeoutInMinutes));
                     if (!result)
                     {
-                        logger.Warning("Failed to shutdown local content server: {0}", result);
+                        context.Warning($"Failed to shutdown local content server: {result}");
                     }
 
                     host.OnTeardownCompleted();
@@ -163,7 +172,7 @@ namespace BuildXL.Cache.Host.Service
             }
         }
 
-        private static ILogger CreateNLogAdapter(OperationContext operationContext, DistributedCacheServiceArguments arguments)
+        private static IStructuredLogger CreateNLogAdapter(OperationContext operationContext, DistributedCacheServiceArguments arguments)
         {
             Contract.RequiresNotNull(arguments.Configuration.LoggingSettings);
 
@@ -173,17 +182,13 @@ namespace BuildXL.Cache.Host.Service
             // This is needed for dependency ingestion. See: https://github.com/NLog/NLog/wiki/Dependency-injection-with-NLog
             // The issue is that we need to construct a log, which requires access to both our config and the host. It
             // seems too much to put it into the AzureBlobStorageLogTarget itself, so we do it here.
-            var numBlobStorageTargets = 0;
             var defaultConstructor = NLog.Config.ConfigurationItemFactory.Default.CreateInstance;
             NLog.Config.ConfigurationItemFactory.Default.CreateInstance = type =>
             {
                 if (type == typeof(AzureBlobStorageLogTarget))
                 {
-                    // There shouldn't be more than one per instantiation, just a smoke test.
-                    Contract.Assert(numBlobStorageTargets == 0);
                     var log = CreateAzureBlobStorageLogAsync(operationContext, arguments, arguments.Configuration.LoggingSettings.Configuration).Result;
                     var target = new AzureBlobStorageLogTarget(log);
-                    numBlobStorageTargets++;
                     return target;
                 }
 
@@ -195,6 +200,7 @@ namespace BuildXL.Cache.Host.Service
             // This is done in order to allow our logging configuration to access key telemetry information.
             var telemetryFieldsProvider = arguments.TelemetryFieldsProvider;
             NLog.LayoutRenderers.LayoutRenderer.Register("BuildId", _ => telemetryFieldsProvider.BuildId);
+            NLog.LayoutRenderers.LayoutRenderer.Register("APEnvironment", _ => telemetryFieldsProvider.APEnvironment);
             NLog.LayoutRenderers.LayoutRenderer.Register("APCluster", _ => telemetryFieldsProvider.APCluster);
             NLog.LayoutRenderers.LayoutRenderer.Register("APMachineFunction", _ => telemetryFieldsProvider.APMachineFunction);
             NLog.LayoutRenderers.LayoutRenderer.Register("MachineName", _ => telemetryFieldsProvider.MachineName);

@@ -1,21 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Diagnostics.Tracing;
-using System.Globalization;
-using BuildXL.Pips;
 using BuildXL.Tracing;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
-using BuildXL.Utilities.Tracing;
 using static BuildXL.Utilities.FormattableStringEx;
 
 #pragma warning disable 1591
+#nullable enable
 
 namespace BuildXL.Engine.Tracing
 {
@@ -24,6 +21,7 @@ namespace BuildXL.Engine.Tracing
     /// </summary>
     [EventKeywordsType(typeof(Keywords))]
     [EventTasksType(typeof(Tasks))]
+    [LoggingDetails("EngineLogger")]
     public abstract partial class Logger
     {
         /// <summary>
@@ -481,68 +479,6 @@ namespace BuildXL.Engine.Tracing
             string ipAddress,
             int port,
             string caller);
-
-        public void DistributionSendBondCallFormat(
-            LoggingContext context,
-            RpcMachineData receiverData,
-            string function,
-            Guid callId,
-            string formatMessage,
-            params object[] messageArgs)
-        {
-            DistributionBondCall(
-                context: context,
-                receiverName: receiverData.ToString(),
-                senderName: "SELF",
-                function: function,
-                callId: callId.ToString(),
-                message: string.Format(CultureInfo.InvariantCulture, formatMessage, messageArgs));
-        }
-
-        public void DistributionReceiveBondCallFormat(
-            LoggingContext context,
-            RpcMachineData senderData,
-            string function,
-            Guid callId,
-            string formatMessage,
-            params object[] messageArgs)
-        {
-            DistributionBondCall(
-                context: context,
-                receiverName: "SELF",
-                senderName: senderData.ToString(),
-                function: function,
-                callId: callId.ToString(),
-                message: string.Format(CultureInfo.InvariantCulture, formatMessage, messageArgs));
-        }
-
-        [GeneratedEvent(
-            (ushort)LogEventId.DistributionBondCall,
-            EventGenerators = EventGenerators.LocalOnly,
-            EventLevel = Level.Verbose,
-            Keywords = (int)Keywords.UserMessage,
-            EventTask = (ushort)Tasks.Distribution,
-            Message = "[{senderName} -> {receiverName}] BONDCALL:{function}#{callId}: {message}.")]
-        public abstract void DistributionBondCall(
-            LoggingContext context,
-            string receiverName,
-            string senderName,
-            string function,
-            string callId,
-            string message);
-
-        [GeneratedEvent(
-            (ushort)LogEventId.DistributionFailedToCallWorker,
-            EventGenerators = EventGenerators.LocalOnly,
-            EventLevel = Level.Warning,
-            Keywords = (int)Keywords.UserMessage,
-            EventTask = (ushort)Tasks.Distribution,
-            Message = "Failed call to worker {name}: Function='{function}' Failure='{errorMessage}'")]
-        public abstract void DistributionFailedToCallWorker(
-            LoggingContext context,
-            string name,
-            string function,
-            string errorMessage);
 
         [GeneratedEvent(
             (ushort)LogEventId.DistributionCallWorkerCodeException,
@@ -1124,6 +1060,15 @@ namespace BuildXL.Engine.Tracing
             EventTask = (int)Tasks.Engine,
             Message = "/unsafe_IgnoreCreateProcessReport enabled: {ShortProductName} is configured to not report file access due to CreateProcess API. This can lead to incorrect builds.")]
         public abstract void ConfigIgnoreCreateProcessReport(LoggingContext context);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.ConfigProbeDirectorySymlinkAsDirectory,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "/unsafe_ProbeDirectorySymlinkAsDirectory enabled: {ShortProductName} is configured to treat directory symlink probe as directory probe. This makes {ShortProductName} not track the target directory path. This can lead to incorrect builds.")]
+        public abstract void ConfigProbeDirectorySymlinkAsDirectory(LoggingContext context);
 
         [GeneratedEvent(
             (ushort)LogEventId.ConfigPreserveOutputs,
@@ -1772,12 +1717,6 @@ If you can't update and need this feature after July 2018 please reach out to th
             Keywords = (int)Keywords.UserMessage,
             Message = "{ShortProductName} failed to run because only 'case-insensitive' file-systems are currently supported on non-windows hosts.")]
         public abstract void ErrorCaseSensitiveFileSystemDetected(LoggingContext context);
-
-        public void BusyOrUnavailableOutputDirectories(LoggingContext context, string objectDirectoryPath, string exception)
-        {
-            BusyOrUnavailableOutputDirectories(context, objectDirectoryPath);
-            BusyOrUnavailableOutputDirectoriesException(context, objectDirectoryPath, exception);
-        }
 
         [GeneratedEvent(
             (int)LogEventId.BusyOrUnavailableOutputDirectories,
@@ -2816,6 +2755,15 @@ If you can't update and need this feature after July 2018 please reach out to th
             EventTask = (ushort)Tasks.Engine,
             Message = "Initializing VM: {message}")]
         internal abstract void InitializingVm(LoggingContext context, string message);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.ConfigUnsafeAllowDuplicateTemporaryDirectory,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "/unsafe_AllowDuplicateTemporaryDirectory enabled: Duplicate temporary directory detection between pips is disabled.")]
+        public abstract void ConfigUnsafeAllowDuplicateTemporaryDirectory(LoggingContext context);
     }
 
     /// <summary>

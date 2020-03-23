@@ -5,8 +5,6 @@ using System;
 using System.Diagnostics.ContractsLight;
 using BuildXL.Cache.ContentStore.Hashing;
 
-#nullable enable
-
 namespace BuildXL.Cache.ContentStore.Interfaces.Results
 {
     /// <summary>
@@ -125,12 +123,6 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
                 : GetErrorString();
         }
 
-        internal class ExtraMetadata
-        {
-            public TimeSpan GateWaitTime;
-            public int GateOccupiedCount;
-        }
-
-        internal ExtraMetadata? Metadata { get; set; }
+        internal ResultMetaData? MetaData { get; set; }
     }
 }

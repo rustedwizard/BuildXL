@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using BuildXL.Cache.ContentStore.Distributed.Sessions;
+using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 
 namespace BuildXL.Cache.ContentStore.Distributed.Stores
 {
@@ -159,6 +160,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public int MaxRetryCount { get; set; } = 32;
 
         /// <summary>
+        /// Indicates whether proactive copies will trace successful results
+        /// </summary>
+        public bool TraceProactiveCopy { get; set; } = false;
+
+        /// <summary>
         /// The mode in which proactive copy should run
         /// </summary>
         public ProactiveCopyMode ProactiveCopyMode { get; set; } = ProactiveCopyMode.Disabled;
@@ -252,9 +258,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public static DistributedContentStoreSettings DefaultSettings { get; } = new DistributedContentStoreSettings();
 
         /// <summary>
-        /// Maximum number of PutFile operations that can happen concurrently.
+        /// Maximum number of PutFile and PlaceFile operations that can happen concurrently.
         /// </summary>
-        public int MaximumConcurrentPutFileOperations { get; set; } = 512;
+        public int MaximumConcurrentPutAndPlaceFileOperations { get; set; } = 512;
 
         /// <summary>
         /// Name of the blob with the snapshot of the content placement predictions.

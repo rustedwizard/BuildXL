@@ -1,21 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
-using System.Diagnostics.Tracing;
-using System.Linq;
-using System.Threading;
-using BuildXL.FrontEnd.Factory;
-using BuildXL.FrontEnd.Sdk.Tracing;
 using BuildXL.Tracing;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tracing;
 
 #pragma warning disable 1591
 #pragma warning disable CA1823 // Unused field
+#nullable enable
 
 namespace BuildXL.FrontEnd.Script.Analyzer.Tracing
 {
@@ -24,6 +16,7 @@ namespace BuildXL.FrontEnd.Script.Analyzer.Tracing
     /// </summary>
     [EventKeywordsType(typeof(Keywords))]
     [EventTasksType(typeof(Tasks))]
+    [LoggingDetails("BxlScriptAnalayzerLogger")]
     public abstract partial class Logger : LoggerBase
     {
         private const int DefaultKeywords = (int)(Keywords.UserMessage | Keywords.Diagnostics);
@@ -33,47 +26,7 @@ namespace BuildXL.FrontEnd.Script.Analyzer.Tracing
         {
         }
 
-        /// <summary>
-        /// Set up console event listener for BuildXL's ETW event sources.
-        /// </summary>
-        /// <param name="level">The level of data to be sent to the listener.</param>
-        /// <returns>An <see cref="EventListener"/> with the appropriate event sources registered.</returns>
-        [SuppressMessage("Microsoft.Reliability", "CA2000:DisposeObjectsBeforeLosingScope")]
-        public static IDisposable SetupEventListener(EventLevel level)
-        {
-            var eventListener = new ConsoleEventListener(Events.Log, DateTime.UtcNow, true, true, true, false, level: level);
-
-            var primarySource = bxlScriptAnalyzer.ETWLogger.Log;
-            if (primarySource.ConstructionException != null)
-            {
-                throw primarySource.ConstructionException;
-            }
-
-            eventListener.RegisterEventSource(primarySource);
-
-            eventListener.EnableTaskDiagnostics(BuildXL.Tracing.ETWLogger.Tasks.CommonInfrastructure);
-
-            var eventSources = new EventSource[]
-                               {
-                                   bxlScriptAnalyzer.ETWLogger.Log,
-                                   BuildXL.Engine.Cache.ETWLogger.Log,
-                                   BuildXL.Engine.ETWLogger.Log,
-                                   BuildXL.Scheduler.ETWLogger.Log,
-                                   BuildXL.Pips.ETWLogger.Log,
-                                   BuildXL.Tracing.ETWLogger.Log,
-                                   BuildXL.Storage.ETWLogger.Log,
-                               }.Concat(FrontEndControllerFactory.GeneratedEventSources);
-
-            using (var dummy = new TrackingEventListener(Events.Log))
-            {
-                foreach (var eventSource in eventSources)
-                {
-                    Events.Log.RegisterMergedEventSource(eventSource);
-                }
-            }
-
-            return eventListener;
-        }
+       
         
         [GeneratedEvent(
             (ushort)LogEventId.ErrorParsingFile,

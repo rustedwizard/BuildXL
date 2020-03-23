@@ -5,7 +5,7 @@ import * as Deployment from "Sdk.Deployment";
 
 export declare const qualifier : {
     targetFramework: "netcoreapp3.1" | "netstandard2.0" | "net472" ,
-    targetRuntime: "osx-x64" | "win-x64"
+    targetRuntime: "osx-x64" | "win-x64" | "linux-x64"
 };
 
 // Any qualifier will do here - we only want to directly access the contents.

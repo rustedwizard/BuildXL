@@ -162,6 +162,8 @@ namespace BuildXL.Pips.Graph
 
             private readonly PipStaticFingerprinter m_pipStaticFingerprinter;
 
+            private readonly ConcurrentDictionary<AbsolutePath, PipId> m_uniqueTempDirPaths = new ConcurrentDictionary<AbsolutePath, PipId>();
+
             /// <summary>
             /// Class constructor
             /// </summary>
@@ -1211,7 +1213,6 @@ namespace BuildXL.Pips.Graph
                 outputsByPath = new Dictionary<AbsolutePath, FileArtifact>(process.FileOutputs.Length);
                 var outputDirectorySet = new HashSet<AbsolutePath>();
 
-
                 // Process dependencies.
                 foreach (FileArtifact dependency in process.Dependencies)
                 {
@@ -2030,6 +2031,25 @@ namespace BuildXL.Pips.Graph
                         {
                             TemporaryPaths.TryAdd(tempDirectory, process.PipId);
                         }
+
+                        if (m_configuration.Engine.AllowDuplicateTemporaryDirectory == false) // The default is currently 'null' but we explicitly require the option to be turned off to validate duplicates
+                        {
+                            // Check if temp directories are unique between pips
+                            var tempDirs = process
+                                .AdditionalTempDirectories
+                                .Concat(process.TempDirectory.IsValid ? new[] { process.TempDirectory } : new AbsolutePath[] { })
+                                .Where(dir => dir.IsValid);
+
+                            foreach (var tempDir in tempDirs)
+                            {
+                                var existingPipId = m_uniqueTempDirPaths.GetOrAdd(tempDir, process.PipId);
+                                if (process.PipId != existingPipId)
+                                {
+                                    Logger.Log.MultiplePipsUsingSameTemporaryDirectory(LoggingContext, tempDir.ToString(Context.PathTable), process.PipId.ToString(), existingPipId.ToString());
+                                    return false;
+                                }
+                            }
+                        }
                     }
 
                     foreach (var directory in process.DirectoryOutputs)
@@ -2103,50 +2123,12 @@ namespace BuildXL.Pips.Graph
                                 .Select(directoryArtifact => directoryArtifact.Path)
                                 .ToReadOnlySet();
 
-                        // Validate that shared directories coming from the same pip are not pairwise nested
-                        foreach (var sharedOpaqueDirectory in sharedOpaqueDirectories)
-                        {
-                            if (!IsValidSharedOpaqueDirectory(sharedOpaqueDirectory, process, sharedOpaqueDirectories))
-                            {
-                                return false;
-                            }
-                        }
-
                         if (sharedOpaqueDirectories.Count > 0 && m_configuration.Sandbox.UnsafeSandboxConfiguration.PreserveOutputs != PreserveOutputsMode.Disabled)
                         {
                             LogEventWithPipProvenance(
                                 Logger.PreserveOutputsDoNotApplyToSharedOpaques,
                                 process);
                         }
-                    }
-                }
-
-                return true;
-            }
-
-            /// <summary>
-            /// Validates that there are no pair of shared opaque directories declared in the same pip that are nested within in each other.
-            /// </summary>
-            private bool IsValidSharedOpaqueDirectory(AbsolutePath sharedOpaqueDirectory, Process processPip, IReadOnlySet<AbsolutePath> sharedOpaqueDirectories)
-            {
-                // We start the search from the parent of the shared opaque directory, if that exists
-                var parentSharedOpaqueDirectory = sharedOpaqueDirectory.GetParent(Context.PathTable);
-                if (!parentSharedOpaqueDirectory.IsValid)
-                {
-                    return true;
-                }
-
-                foreach (var current in Context.PathTable.EnumerateHierarchyBottomUp(parentSharedOpaqueDirectory.Value))
-                {
-                    var parentAsPath = new AbsolutePath(current);
-                    if (sharedOpaqueDirectories.Contains(parentAsPath))
-                    {
-                        LogEventWithPipProvenance(
-                            Logger.ScheduleFailAddPipInvalidSharedOpaqueDirectoryDueToOverlap,
-                            processPip,
-                            sharedOpaqueDirectory,
-                            parentAsPath);
-                        return false;
                     }
                 }
 

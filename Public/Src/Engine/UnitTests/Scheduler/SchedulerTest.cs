@@ -93,7 +93,7 @@ namespace Test.BuildXL.Scheduler
             bool enableJournal = false,
             bool enableIncrementalScheduling = false)
         {
-            m_fileContentTable = FileContentTable.CreateNew();
+            m_fileContentTable = FileContentTable.CreateNew(LoggingContext);
 
             // Used for later construction of a scheduler (after pips added).
             m_schedulerShouldStopOnFirstFailure = stopOnFirstFailure;
@@ -124,7 +124,7 @@ namespace Test.BuildXL.Scheduler
             }
 
             BaseSetup(m_configuration, disablePipSerialization: disablePipSerialization);
-            m_pipQueue = new PipQueue(m_configuration.Schedule);
+            m_pipQueue = new PipQueue(LoggingContext, m_configuration.Schedule);
             m_testQueue = new TestPipQueue(m_pipQueue, LoggingContext, initiallyPaused: pauseQueue);
 
             if (enableJournal)
@@ -312,7 +312,7 @@ namespace Test.BuildXL.Scheduler
             const string File1 = @"file1";
             const string File2 = @"file2";
 
-            using (TestEnv env = new TestEnv("TestLazyHashingSealDirectory", TemporaryDirectory, enableLazyOutputMaterialization: true))
+            using (TestEnv env = new TestEnv("TestLazyHashingSealDirectory", TemporaryDirectory, customizeConfig: config => config.Schedule.EnableLazyOutputMaterialization = true))
             {
                 AbsolutePath dirPath = env.SourceRoot.Combine(env.PathTable, "myDir");
                 AbsolutePath file1Path = dirPath.Combine(env.PathTable, "file1.txt");
@@ -368,10 +368,11 @@ namespace Test.BuildXL.Scheduler
 
             try
             {
-                pipQueue = new PipQueue(env.Configuration.Schedule);
+                pipQueue = new PipQueue(LoggingContext, env.Configuration.Schedule);
 
                 var schedulerAndContentCache = TestSchedulerFactory.CreateWithCaching(
                     env.Context,
+                    env.LoggingContext,
                     env.Configuration,
                     (PipGraph.Builder)env.PipGraph,
                     pipQueue);
@@ -2751,7 +2752,7 @@ namespace Test.BuildXL.Scheduler
             configuration.Schedule.StopOnFirstError = false;
             configuration.Schedule.EnableLazyOutputMaterialization = !disableLazyOutputMaterialization;
 
-            PipQueue queue = new PipQueue(configuration.Schedule);
+            PipQueue queue = new PipQueue(LoggingContext, configuration.Schedule);
             var testQueue = new TestPipQueue(queue, LoggingContext, true);
             var context = Task.FromResult<PipExecutionContext>(new SchedulerContext(Context));
             DeserializedDirectedGraph directedGraph = await DeserializedDirectedGraph.DeserializeAsync(reader);

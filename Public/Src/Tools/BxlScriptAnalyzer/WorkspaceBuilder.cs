@@ -185,9 +185,10 @@ namespace BuildXL.FrontEnd.Script.Analyzer
                             InputTracker.CreateDisabledTracker(loggingContext),
                             null,
                             null,
-                            () => FileContentTable.CreateStub(),
+                            () => FileContentTable.CreateStub(loggingContext),
                             5000,
-                            false);
+                            false,
+                            controller.RegisteredFrontEnds);
 
                         var searchPathToolsHash = new DirectoryMembershipFingerprinterRuleSet(config, engineContext.StringTable).ComputeSearchPathToolsHash();
                         pipGraphBuilder = new PipGraph.Builder(
@@ -539,7 +540,7 @@ namespace BuildXL.FrontEnd.Script.Analyzer
             IFrontEndConfiguration configuration,
             PathTable pathTable)
         {
-            var logger = BuildXL.FrontEnd.Script.Tracing.Logger.CreateLogger(preserveLogEvents: true);
+            var logger = BuildXL.FrontEnd.Script.Tracing.Logger.CreateLoggerWithTracking(preserveLogEvents: true);
 
             var linter = DiagnosticAnalyzer.Create(
                 logger,

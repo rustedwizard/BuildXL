@@ -8,6 +8,7 @@ using System.Linq;
 using System.Threading;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL;
+using BuildXL.App.Tracing;
 using BuildXL.Engine.Cache;
 using BuildXL.Engine.Cache.Artifacts;
 using BuildXL.Engine;
@@ -110,7 +111,7 @@ namespace Test.BuildXL.Scheduler
 
             Cache = InMemoryCacheFactory.Create();
 
-            FileContentTable = FileContentTable.CreateNew();
+            FileContentTable = FileContentTable.CreateNew(LoggingContext);
 
             // Disable defaults that write disk IO but are not critical to correctness or performance
             Configuration.Logging.StoreFingerprints = false;
@@ -428,7 +429,7 @@ namespace Test.BuildXL.Scheduler
             // This is a new logging context to be used just for this instantiation of the scheduler. That way it can
             // be validated against the LoggingContext to make sure the scheduler's return result and error logging
             // are in agreement.
-            var localLoggingContext = BuildXLTestBase.CreateLoggingContextForTest();
+            var localLoggingContext = BuildXLTestBase.CreateLoggingContextForTest(new AppLogger());
             var config = new CommandLineConfiguration(Configuration);
 
             // Populating the configuration may modify the configuration, so it should occur first.
@@ -478,7 +479,7 @@ namespace Test.BuildXL.Scheduler
             testHooks.FingerprintStoreTestHooks ??= new FingerprintStoreTestHooks();
             Contract.Assert(!(config.Engine.CleanTempDirectories && tempCleaner == null));
 
-            using (var queue = new PipQueue(config.Schedule))
+            using (var queue = new PipQueue(LoggingContext, config.Schedule))
             using (var testQueue = new TestPipQueue(queue, localLoggingContext, initiallyPaused: constraintExecutionOrder != null))
             using (var testScheduler = new TestScheduler(
                 graph: graph,
@@ -726,6 +727,25 @@ namespace Test.BuildXL.Scheduler
                 builder.AddInputDirectory(directory);
             }
             return SchedulePipBuilder(builder);
+        }
+
+        protected ProcessBuilder CreateOpaqueDirectoryConsumer(
+            FileArtifact outputFile,
+            FileArtifact? staticallyConsumedFile,
+            DirectoryArtifact opaqueDirectory,
+            params FileArtifact[] dynamicallyConsumedFiles)
+        {
+            var operations = dynamicallyConsumedFiles.Select(file => Operation.ReadFile(file, doNotInfer: true)).ToList();
+            if (staticallyConsumedFile.HasValue)
+            {
+                operations.Add(Operation.ReadFile(staticallyConsumedFile.Value));
+            }
+            operations.Add(Operation.WriteFile(outputFile));
+
+            var builder = CreatePipBuilder(operations);
+            builder.AddInputDirectory(opaqueDirectory);
+
+            return builder;
         }
 
         protected void AssertWritesJournaled(ScheduleRunResult result, ProcessWithOutputs pip, AbsolutePath outputInSharedOpaque)

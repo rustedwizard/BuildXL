@@ -430,34 +430,6 @@ namespace Test.Tool.Analyzers
         }
 
         /// <summary>
-        /// If pip can have a fingerprint cache hit, but still need to be executed due to failures in the previous build (or any
-        /// other settings that might prevent caching the pip's outputs). There will be no difference in fingerprint content,
-        /// but the cache miss analyzer should still print something for the miss analysis.
-        /// </summary>
-        [Fact]
-        public void MissDueToFailedPipInPreviousBuildHasAnalysisOutput()
-        {
-            // Failed pips still report their full fingerprint content and observed inputs to the fingerprint store (and XLG in general)
-            var failPip = CreateAndSchedulePipBuilder(new Operation[]
-            {
-                Operation.WriteFile(CreateOutputFileArtifact()),
-                Operation.Fail(),
-            }).Process;
-
-            // Both builds will fail to cache any output to the cache due to the pip failure
-            var buildA = RunScheduler().AssertFailure();
-            var buildB = RunScheduler().AssertFailure();
-            AssertErrorEventLogged(ProcessesLogEventId.PipProcessError, 2);
-
-            // buildB has a cache miss for failPip due to no content being stored in buildA,
-            // however their fingerprints match since they are the same pip and fail after the same set of filesystem operations in both runs
-            RunAnalyzer(buildA, buildB).AssertPipMiss(
-                failPip,
-                PipCacheMissType.MissForDescriptorsDueToWeakFingerprints,
-                CacheMissAnalysisUtilities.RepeatedStrings.DisallowedFileAccessesOrPipFailuresPreventCaching);
-        }
-
-        /// <summary>
         /// The fingerprint store uniquely identifies pips by a hash of their first declared output (pip unique output hash).
         /// The pip unique output hash is more stable the the pip semi stable hash, so the pip unique output hash is used for look up first
         /// before falling back on the pip semi stable hash.
@@ -868,11 +840,11 @@ namespace Test.Tool.Analyzers
             RunAnalyzer(cacheHitBuild, cacheMissBuild).AssertPipMiss(pip.Process, PipCacheMissType.MissForDescriptorsDueToWeakFingerprints, messages);
         }
 
-    /// <summary>
-    /// Matches the string representation of <see cref="FileOrDirectoryArtifact"/> used by the fingerprint store
-    /// when serializing to JSON.
-    /// </summary>
-    private string ArtifactToPrint(FileOrDirectoryArtifact artifact)
+        /// <summary>
+        /// Matches the string representation of <see cref="FileOrDirectoryArtifact"/> used by the fingerprint store
+        /// when serializing to JSON.
+        /// </summary>
+        private string ArtifactToPrint(FileOrDirectoryArtifact artifact)
         {
             return Expander.ExpandPath(Context.PathTable, artifact.Path).ToLowerInvariant().Replace(@"\", @"\\");
         }

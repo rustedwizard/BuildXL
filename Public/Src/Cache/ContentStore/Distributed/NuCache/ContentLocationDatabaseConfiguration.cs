@@ -101,6 +101,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// Should be false for Content, true for Metadata.
         /// </remarks>
         public bool OnFailureDeleteExistingStoreAndRetry { get; set; } = false;
+
+        /// <summary>
+        /// Specifies whether the context operation guid is used when logging entry operations
+        /// </summary>
+        public bool UseContextualEntryOperationLogging { get; set; } = false;
     }
 
     /// <summary>
@@ -192,5 +197,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// When logs backup is enabled, the maximum time logs are kept since their creation date.
         /// </summary>
         public TimeSpan LogsRetention { get; set; } = TimeSpan.FromDays(7);
+
+        /// <summary>
+        /// Number of keys to buffer on <see cref="RocksDbContentLocationDatabase.EnumerateSortedKeysFromStorage(ContentStore.Tracing.Internal.OperationContext)"/>
+        /// </summary>
+        public long EnumerateSortedKeysFromStorageBufferSize { get; set; } = 100_000;
+
+        /// <summary>
+        /// Number of keys to buffer on <see cref="RocksDbContentLocationDatabase.EnumerateEntriesWithSortedKeysFromStorage(ContentStore.Tracing.Internal.OperationContext, ContentLocationDatabase.EnumerationFilter, bool)"/>
+        /// </summary>
+        public long EnumerateEntriesWithSortedKeysFromStorageBufferSize { get; set; } = 100_000;
     }
 }

@@ -6,8 +6,6 @@ using System.Runtime.CompilerServices;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 
-#nullable enable
-
 namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
 {
     /// <summary>
@@ -16,15 +14,19 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
     public class Context
     {
         /// <summary>
+        ///     Cached string representation of <see cref="Id"/> property for performance reasons
+        /// </summary>
+        private readonly string _idAsString;
+
+        /// <summary>
         ///     Initializes a new instance of the <see cref="Context"/> class.
         /// </summary>
         /// <param name="logger">
         ///     Caller's logger to be invoked as processing occurs.
         /// </param>
         public Context(ILogger logger)
+            : this(Guid.NewGuid(), logger)
         {
-            Id = Guid.NewGuid();
-            Logger = logger;
         }
 
         /// <summary>
@@ -34,13 +36,14 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         {
             Id = id;
             Logger = logger;
+            _idAsString = id.ToString();
         }
 
         /// <summary>
         ///     Initializes a new instance of the <see cref="Context"/> class.
         /// </summary>
-        public Context(Context other, [CallerMemberName]string? caller = null)
-            : this(other, Guid.NewGuid(), caller)
+        public Context(Context other, string? componentName = null, [CallerMemberName]string? caller = null)
+            : this(other, Guid.NewGuid(), componentName, caller)
         {
         }
 
@@ -48,22 +51,36 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         ///     Initializes a new instance of the <see cref="Context"/> class.
         /// </summary>
         public Context(Context other, Guid id, [CallerMemberName]string? caller = null)
+            : this(id, other.Logger)
         {
-            Id = id;
-            Logger = other.Logger;
-            Debug($"{caller}: {other.Id} parent to {Id}");
+            Debug($"{caller}: {other._idAsString} parent to {_idAsString}");
+        }
+
+        /// <summary>
+        ///     Initializes a new instance of the <see cref="Context"/> class.
+        /// </summary>
+        public Context(Context other, Guid id, string? componentName, [CallerMemberName]string? caller = null)
+            : this(id, other.Logger)
+        {
+            string prefix = caller!;
+            if (!string.IsNullOrEmpty(componentName))
+            {
+                prefix = string.Concat(componentName, ".", prefix);
+            }
+
+            Debug($"{prefix}: {other._idAsString} parent to {_idAsString}");
         }
 
         /// <nodoc />
-        public Context CreateNested([CallerMemberName]string? caller = null)
+        public Context CreateNested(string? componentName = null, [CallerMemberName]string? caller = null)
         {
-            return new Context(this, caller);
+            return new Context(this, componentName, caller);
         }
 
         /// <nodoc />
-        public Context CreateNested(Guid id, [CallerMemberName]string? caller = null)
+        public Context CreateNested(Guid id, string? componentName = null, [CallerMemberName]string? caller = null)
         {
-            return new Context(this, id, caller);
+            return new Context(this, id, componentName, caller);
         }
 
         /// <summary>
@@ -94,7 +111,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// </summary>
         public void Always(string message)
         {
-            Logger?.Log(Severity.Always, message);
+            TraceMessage(Severity.Always, message);
         }
 
         /// <summary>
@@ -102,7 +119,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// </summary>
         public void Error(string message)
         {
-            Logger?.Log(Severity.Error, message);
+            TraceMessage(Severity.Error, message);
         }
 
         /// <summary>
@@ -110,7 +127,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// </summary>
         public void Warning(string message)
         {
-            Logger?.Log(Severity.Warning, message);
+            TraceMessage(Severity.Warning, message);
         }
 
         /// <summary>
@@ -118,7 +135,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// </summary>
         public void Info(string message)
         {
-            Logger?.Log(Severity.Info, message);
+            TraceMessage(Severity.Info, message);
         }
 
         /// <summary>
@@ -126,7 +143,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// </summary>
         public void Debug(string message)
         {
-            Logger?.Log(Severity.Debug, message);
+            TraceMessage(Severity.Debug, message);
         }
 
         /// <summary>
@@ -134,7 +151,19 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// </summary>
         public void TraceMessage(Severity severity, string message)
         {
-            Logger?.Log(severity, $"{Id} {message}");
+            if (Logger == null)
+            {
+                return;
+            }
+
+            if (Logger is IStructuredLogger structuredLogger)
+            {
+                structuredLogger.Log(severity, _idAsString, message);
+            }
+            else
+            {
+                Logger.Log(severity, $"{_idAsString} {message}");
+            }
         }
 
         /// <summary>

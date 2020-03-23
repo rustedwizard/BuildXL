@@ -107,7 +107,7 @@ config({
 
                 { id: "AsyncFixer", version: "1.1.5" },
                 { id: "ErrorProne.NET.CoreAnalyzers", version: "0.1.2" },
-                { id: "RuntimeContracts.Analyzer", version: "0.1.9.4" },
+                { id: "RuntimeContracts.Analyzer", version: "0.1.10" },
                 { id: "StyleCop.Analyzers", version: "1.1.0-beta004" },
                 { id: "Text.Analyzers", version: "2.3.0-beta1" },
 
@@ -148,9 +148,9 @@ config({
                 { id: "Microsoft.Windows.ProjFS", version: "1.0.19079.1" },
 
                 // RocksDb
-                { id: "RocksDbSharp", version: "5.8.0-b20191119.3", alias: "RocksDbSharpSigned" },
-                { id: "RocksDbNative", version: "6.0.1-b20191119.3" },
-
+                { id: "RocksDbSharp", version: "5.8.0-b20200303.4", alias: "RocksDbSharpSigned" },
+                { id: "RocksDbNative", version: "6.0.1-b20200303.4" },
+                
                 { id: "JsonDiffPatch.Net", version: "2.1.0" },
 
                 // Event hubs
@@ -440,7 +440,11 @@ config({
                 targetFramework: "netcoreapp3.1",
                 targetRuntime: "osx-x64",
             },
-
+            DebugLinux: {
+                configuration: "debug",
+                targetFramework: "netcoreapp3.1",
+                targetRuntime: "linux-x64",
+            },
             // Release
             Release: {
                 configuration: "release",
@@ -462,6 +466,11 @@ config({
                 configuration: "release",
                 targetFramework: "netcoreapp3.1",
                 targetRuntime: "osx-x64",
+            },
+            ReleaseLinux: {
+                configuration: "release",
+                targetFramework: "netcoreapp3.1",
+                targetRuntime: "linux-x64",
             },
         }
     },

@@ -530,7 +530,7 @@ namespace BuildXL.Scheduler
         private bool TryGetAccessedAndProcessPaths(Process pip, ReportedFileAccess reportedAccess, out AbsolutePath accessedPath, out AbsolutePath processPath)
         {
             accessedPath = processPath = AbsolutePath.Invalid;
-            return reportedAccess.TryParseAbsolutePath(Context, pip, out accessedPath)
+            return reportedAccess.TryParseAbsolutePath(Context, LoggingContext, pip, out accessedPath)
                    && AbsolutePath.TryCreate(Context.PathTable, reportedAccess.Process.Path, out processPath);
         }
 
@@ -920,6 +920,8 @@ namespace BuildXL.Scheduler
                         break;
                     // There was an absent file probe, so this is a write on an absent file probe
                     case DynamicFileAccessType.AbsentPathProbe:
+                        // WriteOnAbsentPathProbe message literaly says "declare an explicit dependency between these pips",
+                        // so don't complain if a dependency already exists (i.e., 'pip' must run after 'related').
                         if (m_dynamicWritesOnAbsentProbePolicy.HasFlag(DynamicWriteOnAbsentProbePolicy.IgnoreFileProbes) ||
                             IsDependencyDeclared(absentProbePipId: related.PipId, writerPipId: pip.PipId))
                         {
@@ -947,8 +949,6 @@ namespace BuildXL.Scheduler
 
         private bool IsDependencyDeclared(PipId writerPipId, PipId absentProbePipId)
         {
-            // WriteOnAbsentPathProbe message literaly says "declare an explicit dependency between these pips",
-            // so don't complain if a dependency already exists (i.e., 'pip' must run after 'related').
             return m_graph.IsReachableFrom(from: absentProbePipId, to: writerPipId);
         }
 
@@ -1112,7 +1112,7 @@ namespace BuildXL.Scheduler
                 }
 
                 AbsolutePath path;
-                if (!violation.TryParseAbsolutePath(Context, pip, out path))
+                if (!violation.TryParseAbsolutePath(Context, LoggingContext, pip, out path))
                 {
                     continue;
                 }

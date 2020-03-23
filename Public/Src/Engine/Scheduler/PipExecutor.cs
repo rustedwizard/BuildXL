@@ -305,7 +305,7 @@ namespace BuildXL.Scheduler
                 }
                 catch (BuildXLException ex)
                 {
-                    Logger.Log.PipCopyFileFailed(operationContext, pipDescription, source, destination, ex);
+                    Logger.Log.PipCopyFileFailed(operationContext, pipDescription, source, destination, ex.LogEventErrorCode, ex.LogEventMessage);
                     return PipResult.Create(PipResultStatus.Failed, startTime);
                 }
             }
@@ -843,14 +843,19 @@ namespace BuildXL.Scheduler
             {
                 if (logErrors)
                 {
-                    Logger.Log.PipWriteFileFailed(operationContext, pipDescription, destinationAsString, ex);
+                    Logger.Log.PipWriteFileFailed(operationContext, pipDescription, destinationAsString, ex.LogEventErrorCode, ex.LogEventMessage);
                     return PipResultStatus.Failed;
                 }
                 else
                 {
-                    return new Failure<string>(Logger.PipWriteFileFailedMessage(pipDescription, destinationAsString, ex));
+                    return new Failure<string>(PipWriteFileFailedMessage(pipDescription, destinationAsString, ex));
                 }
             }
+        }
+
+        private static string PipWriteFileFailedMessage(string pipDescription, string path, BuildXLException ex)
+        {
+            return I($"[{pipDescription}] Write file '{path}' failed with error code {ex.LogEventErrorCode:X8}: {ex.LogEventMessage}");
         }
 
         /// <summary>
@@ -1433,7 +1438,7 @@ namespace BuildXL.Scheduler
                                 {
                                     start = DateTime.UtcNow;
                                     result = await executor.RunAsync(innerResourceLimitCancellationTokenSource.Token, sandboxConnection: environment.SandboxConnection, sidebandWriter: sidebandWriter);
-                                    Processes.Tracing.Logger.Log.LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseRunningPip, DateTime.UtcNow.Subtract(start));
+                                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseRunningPip, DateTime.UtcNow.Subtract(start));
                                 }
 
                                 ++retryCount;
@@ -1583,6 +1588,8 @@ namespace BuildXL.Scheduler
 
                             counters.DecrementCounter(PipExecutorCounter.ExternalProcessCount);
 
+                            result.IsCancelledDueToResourceExhaustion = resourceLimitCancellationToken.IsCancellationRequested;
+
                             if (result.Status == SandboxedProcessPipExecutionStatus.Canceled)
                             {
                                 if (resourceLimitCancellationToken.IsCancellationRequested)
@@ -1619,7 +1626,7 @@ namespace BuildXL.Scheduler
 
             start = DateTime.UtcNow;
             processExecutionResult.ReportSandboxedExecutionResult(executionResult);
-            Processes.Tracing.Logger.Log.LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseReportingExeResult, DateTime.UtcNow.Subtract(start));
+            LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseReportingExeResult, DateTime.UtcNow.Subtract(start));
 
             counters.AddToCounter(PipExecutorCounter.SandboxedProcessPrepDurationMs, executionResult.SandboxPrepMs);
             counters.AddToCounter(
@@ -1708,7 +1715,7 @@ namespace BuildXL.Scheduler
                             fileAccessReportingContext,
                             executionResult.ObservedFileAccesses,
                             trackFileChanges: succeeded);
-                    Processes.Tracing.Logger.Log.LogSubPhaseDuration(
+                    LogSubPhaseDuration(
                         operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseValidateObservedFileAccesses, DateTime.UtcNow.Subtract(start),
                         $"(AbsPrb: {observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories.Count}, DynFiles: {observedInputValidationResult.DynamicallyObservedFiles.Length})");
                 }
@@ -1739,7 +1746,7 @@ namespace BuildXL.Scheduler
                             break;
                         }
                     }
-                    Processes.Tracing.Logger.Log.LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingIsDirty, DateTime.UtcNow.Subtract(start));
+                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingIsDirty, DateTime.UtcNow.Subtract(start));
                     processExecutionResult.MustBeConsideredPerpetuallyDirty = isDirty;
                 }
 
@@ -1827,7 +1834,7 @@ namespace BuildXL.Scheduler
                             enableCaching: !skipCaching,
                             fingerprintComputation: fingerprintComputation,
                             executionResult.ContainerConfiguration);
-                        Processes.Tracing.Logger.Log.LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringCacheContent, DateTime.UtcNow.Subtract(start));
+                        LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringCacheContent, DateTime.UtcNow.Subtract(start));
                     }
 
                     if (outputHashSuccess)
@@ -1870,13 +1877,17 @@ namespace BuildXL.Scheduler
                             observedInputValidationResult.ObservedInputs,
                             strongFingerprint),
                     };
-                    Processes.Tracing.Logger.Log.LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingStrongFingerprint, DateTime.UtcNow.Subtract(start), $"(ps: {pathSet.Paths.Length})");
+                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingStrongFingerprint, DateTime.UtcNow.Subtract(start), $"(ps: {pathSet.Paths.Length})");
                 }
 
                 // Log the fingerprint computation
                 start = DateTime.UtcNow;
-                environment.State.ExecutionLog?.ProcessFingerprintComputation(fingerprintComputation.Value);
-                Processes.Tracing.Logger.Log.LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringStrongFingerprintToXlg, DateTime.UtcNow.Subtract(start));
+                if (succeeded)
+                {
+                    environment.State.ExecutionLog?.ProcessFingerprintComputation(fingerprintComputation.Value);
+                }
+
+                LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringStrongFingerprintToXlg, DateTime.UtcNow.Subtract(start));
 
                 if (!outputHashSuccess)
                 {

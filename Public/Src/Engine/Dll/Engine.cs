@@ -1069,6 +1069,11 @@ namespace BuildXL.Engine
                     mutableConfig.Schedule.MinimumDiskSpaceForPipsGb = 5;
                 }
 
+                if (mutableConfig.Distribution.NumRetryFailedPipsOnAnotherWorker == null)
+                {
+                    mutableConfig.Distribution.NumRetryFailedPipsOnAnotherWorker = 3;
+                }
+
                 // Enable fail fast for null reference exceptions caught by
                 // ExceptionUtilities.IsUnexpectedException
                 EngineEnvironmentSettings.FailFastOnNullReferenceException.Value = true;
@@ -1376,6 +1381,8 @@ namespace BuildXL.Engine
             }
             catch (Exception e)
             {
+                // If we successfully create a directory and the junction creation fails, we need to delete that directory.
+                FileUtilities.TryRemoveDirectory(redirectedProfile, out var _);
                 Logger.Log.FailedToRedirectUserProfile(loggingContext, I($"Failed to create a junction from '{redirectedProfile}' to '{currentUserProfile}': {e.ToString()}"));
                 return false;
             }
@@ -1672,52 +1679,53 @@ namespace BuildXL.Engine
                 Logger.Log.StartEngineRun,
                 Logger.Log.EndEngineRun))
             {
+                var engineLoggingContext = pm.LoggingContext;
                 bool directoryDeletionLockSuccess;
-                using (CreateOutputDirectories(Context.PathTable, pm.LoggingContext, out directoryDeletionLockSuccess))
+                using (CreateOutputDirectories(Context.PathTable, engineLoggingContext, out directoryDeletionLockSuccess))
                 {
                     if (!directoryDeletionLockSuccess)
                     {
-                        Contract.Assume(pm.LoggingContext.ErrorWasLogged, "An error should have been logged during output directory creation.");
+                        Contract.Assume(engineLoggingContext.ErrorWasLogged, "An error should have been logged during output directory creation.");
                         return BuildXLEngineResult.Failed(engineState);
                     }
 
                     // Once output directories including MoveDeleteTempDirectory have been created,
                     // create a TempCleaner for cleaning all temp directories
-                    m_tempCleaner = new TempCleaner(tempDirectory: m_moveDeleteTempDirectory);
+                    m_tempCleaner = new TempCleaner(engineLoggingContext, tempDirectory: m_moveDeleteTempDirectory);
 
                     using (
                         var objFolderLock = FolderLock.Take(
-                            pm.LoggingContext,
+                            engineLoggingContext,
                             Configuration.Layout.ObjectDirectory.ToString(Context.PathTable),
                             Configuration.Engine.BuildLockPollingIntervalSec,
                             Configuration.Engine.BuildLockWaitTimeoutMins))
                     {
                         if (!objFolderLock.SuccessfullyCreatedLock)
                         {
-                            Contract.Assume(pm.LoggingContext.ErrorWasLogged, "An error should have been logged during folder lock acquisition.");
+                            Contract.Assume(engineLoggingContext.ErrorWasLogged, "An error should have been logged during folder lock acquisition.");
                             return BuildXLEngineResult.Failed(engineState);
                         }
 
                         using (
                             var engineCacheLock = FolderLock.Take(
-                                pm.LoggingContext,
+                                engineLoggingContext,
                                 Configuration.Layout.EngineCacheDirectory.ToString(Context.PathTable),
                                 Configuration.Engine.BuildLockPollingIntervalSec,
                                 Configuration.Engine.BuildLockWaitTimeoutMins))
                         {
                             if (!engineCacheLock.SuccessfullyCreatedLock)
                             {
-                                Contract.Assume(pm.LoggingContext.ErrorWasLogged, "An error should have been logged during folder lock acquisition.");
+                                Contract.Assume(engineLoggingContext.ErrorWasLogged, "An error should have been logged during folder lock acquisition.");
                                 return BuildXLEngineResult.Failed(engineState);
                             }
 
-                            if (!LogAndValidateConfiguration(pm.LoggingContext))
+                            if (!LogAndValidateConfiguration(engineLoggingContext))
                             {
-                                Contract.Assume(pm.LoggingContext.ErrorWasLogged, "An error should have been logged during configuration validation.");
+                                Contract.Assume(engineLoggingContext.ErrorWasLogged, "An error should have been logged during configuration validation.");
                                 return BuildXLEngineResult.Failed(engineState);
                             }
 
-                            var recovery = FailureRecoveryFactory.Create(pm.LoggingContext, Context.PathTable, Configuration);
+                            var recovery = FailureRecoveryFactory.Create(engineLoggingContext, Context.PathTable, Configuration);
                             bool recoveryStatus = recovery.TryRecoverIfNeeded();
 
                             var volumeMap = TryGetVolumeMapOfAllLocalVolumes(pm, loggingContext);
@@ -1733,8 +1741,9 @@ namespace BuildXL.Engine
 
                             // Returns stub if explicitly not use file content table.
                             m_fileContentTask = Configuration.Engine.UseFileContentTable == false
-                                ? Task.FromResult(FileContentTable.CreateStub())
+                                ? Task.FromResult(FileContentTable.CreateStub(engineLoggingContext))
                                 : FileContentTable.LoadOrCreateAsync(
+                                    engineLoggingContext,
                                     Configuration.Layout.FileContentTableFile.ToString(Context.PathTable),
                                     Configuration.Cache.FileContentTableEntryTimeToLive ?? FileContentTable.DefaultTimeToLive);
 
@@ -1790,7 +1799,7 @@ namespace BuildXL.Engine
                                         // Worker timeout logs a warning but no error. It is not considered a failure wrt the worker
                                         engineState?.Dispose();
                                         Contract.Assert(
-                                            pm.LoggingContext.ErrorWasLogged,
+                                            engineLoggingContext.ErrorWasLogged,
                                             "An error should have been logged during waiting for attaching to the master.");
                                         return BuildXLEngineResult.Create(success: false, perfInfo: null, previousState: engineState, newState: null);
                                     }
@@ -1818,7 +1827,7 @@ namespace BuildXL.Engine
                                     if (!possibleCacheInitializerForDistribution.Succeeded)
                                     {
                                         // StorageCacheStartupError has been logged by CacheInitializer
-                                        Logger.Log.ErrorCacheDisabledDistributedBuild(pm.LoggingContext);
+                                        Logger.Log.ErrorCacheDisabledDistributedBuild(engineLoggingContext);
                                         return BuildXLEngineResult.Failed(engineState);
                                     }
                                 }
@@ -1833,7 +1842,7 @@ namespace BuildXL.Engine
                                     out engineSchedule,
                                     out rootFilter);
                                 success &= constructScheduleResult != ConstructScheduleResult.Failure;
-                                ValidateSuccessMatches(success, pm.LoggingContext);
+                                ValidateSuccessMatches(success, engineLoggingContext);
 
                                 var phase = Configuration.Engine.Phase;
 
@@ -1886,20 +1895,20 @@ namespace BuildXL.Engine
                                     };
 
                                     success &= OutputCleaner.DeleteOutputs(
-                                        pm.LoggingContext,
+                                        engineLoggingContext,
                                         isOutputDir,
                                         engineSchedule.Scheduler.PipGraph.FilterOutputsForClean(
                                             rootFilter).ToArray(),
                                         Context.PathTable,
                                         m_tempCleaner);
-                                    ValidateSuccessMatches(success, pm.LoggingContext);
+                                    ValidateSuccessMatches(success, engineLoggingContext);
                                 }
 
                                 // Keep this as close to the Execute phase as possible
                                 if (phase.HasFlag(EnginePhases.Schedule) && Configuration.Engine.LogStatistics)
                                 {
                                     BuildXL.Tracing.Logger.Log.Statistic(
-                                        pm.LoggingContext,
+                                        engineLoggingContext,
                                         new Statistic
                                         {
                                             Name = Statistics.TimeToFirstPipSyntheticMs,
@@ -1944,13 +1953,13 @@ namespace BuildXL.Engine
                                             executePhaseLoggingContext.GetRootContext() == loggingContext.GetRootContext(),
                                             "PhaseLoggingContext's root context doesn't match AppLoggingContext's root.");
                                         Contract.Assert(
-                                            executePhaseLoggingContext.GetRootContext() == pm.LoggingContext.GetRootContext(),
+                                            executePhaseLoggingContext.GetRootContext() == engineLoggingContext.GetRootContext(),
                                             "PhaseLoggingContext's root context doesn't match pm's root.");
                                         success &= engineSchedule.ExecuteScheduledPips(
                                             executePhaseLoggingContext,
                                             workerservice,
                                             Configuration.Logging);
-                                        ValidateSuccessMatches(success, pm.LoggingContext);
+                                        ValidateSuccessMatches(success, engineLoggingContext);
                                     }
                                 }
 
@@ -1979,12 +1988,12 @@ namespace BuildXL.Engine
 
                                 // Saving file content table and post execution tasks are happening in parallel.
                                 success &= postExecutionTasks.GetAwaiter().GetResult();
-                                ValidateSuccessMatches(success, pm.LoggingContext);
+                                ValidateSuccessMatches(success, engineLoggingContext);
 
                                 if (!savingFileContentTableTask.GetAwaiter().GetResult())
                                 {
                                     Contract.Assert(
-                                        pm.LoggingContext.ErrorWasLogged,
+                                        engineLoggingContext.ErrorWasLogged,
                                         "An error should have been logged during saving file content table.");
                                     return BuildXLEngineResult.Failed(engineState);
                                 }
@@ -1998,7 +2007,7 @@ namespace BuildXL.Engine
                                 }
                                 catch (Exception e)
                                 {
-                                    BuildXL.Tracing.Logger.Log.UnexpectedCondition(loggingContext, e.ToString());
+                                    BuildXL.Tracing.UnexpectedCondition.Log(loggingContext, e.ToString());
                                 }
 
                                 // Ensure the execution log supporting graph files have finished copying to the logs directory
@@ -2075,7 +2084,7 @@ namespace BuildXL.Engine
                                     using (Context.EngineCounters.StartStopwatch(EngineCounter.SnapshotCollectorPersistDuration))
                                     {
                                         success &= m_snapshotCollector.Persist(Configuration, Context.PathTable, Context.CancellationToken);
-                                        ValidateSuccessMatches(success, pm.LoggingContext);
+                                        ValidateSuccessMatches(success, engineLoggingContext);
                                     }
                                 }
 
@@ -2300,10 +2309,12 @@ namespace BuildXL.Engine
                 { "unsafe_MonitorFileAccesses", Logger.Log.ConfigUnsafeDisabledFileAccessMonitoring },
                 { "unsafe_PreserveOutputs", Logger.Log.ConfigPreserveOutputs },
                 { "unsafe_PreserveOutputsTrustLevel", loggingContext => { } /* Special case: unsafe option we do not want logged */ },
+                { "unsafe_ProbeDirectorySymlinkAsDirectory", Logger.Log.ConfigProbeDirectorySymlinkAsDirectory },
                 { "unsafe_SourceFileCanBeInsideOutputDirectory", loggingContext => { } /* Special case: unsafe option we do not want logged */ },
                 { "unsafe_UnexpectedFileAccessesAreErrors", Logger.Log.ConfigUnsafeUnexpectedFileAccessesAsWarnings },
                 { "unsafe_IgnoreUndeclaredAccessesUnderSharedOpaques", Logger.Log.ConfigUnsafeIgnoreUndeclaredAccessesUnderSharedOpaques },
                 { "unsafe_OptimizedAstConversion", Logger.Log.ConfigUnsafeOptimizedAstConversion },
+                { "unsafe_AllowDuplicateTemporaryDirectory", Logger.Log.ConfigUnsafeAllowDuplicateTemporaryDirectory },
             };
         }
 
@@ -2781,7 +2792,8 @@ namespace BuildXL.Engine
                         m_directoryTranslator,
                         () => FileContentTable,
                         Configuration.Logging.GetTimerUpdatePeriodInMs(),
-                        reuseResult?.IsPartialReuse == true))
+                        reuseResult?.IsPartialReuse == true,
+                        FrontEndController.RegisteredFrontEnds))
                     {
                         PipGraph newlyEvaluatedGraph;
                         if (TestHooks?.FrontEndEngineAbstraction != null)

@@ -519,6 +519,10 @@ namespace BuildXL
 
             #region ExecutionControl
             hw.WriteOption(
+                "/unsafe_AllowDuplicateTemporaryDirectory[+|-]",
+                Strings.HelpText_DisplayHelp_AllowDuplicateTemporaryDirectory);
+
+            hw.WriteOption(
                 "/incremental[+|-]",
                 Strings.HelpText_DisplayHelp_Incremental);
 
@@ -1179,9 +1183,6 @@ namespace BuildXL
 
             hw.WriteOption("/numRetryFailedPipsOnAnotherWorker:<int>",
                Strings.HelpText_DisplayHelp_NumberofFailedPipRetry);
-
-            hw.WriteOption("/engineVersion:<int>",
-               Strings.HelpText_DisplayHelp_EngineVersion);
 
             #endregion
 

@@ -31,6 +31,7 @@ using BuildXL.Cache.MemoizationStore.Distributed.Stores;
 using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
 using Microsoft.Practices.TransientFaultHandling;
 using Microsoft.WindowsAzure.Storage.Auth;
+using static BuildXL.Cache.Host.Service.Internal.ConfigurationHelper;
 
 namespace BuildXL.Cache.Host.Service.Internal
 {
@@ -155,6 +156,7 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             var redisContentLocationStoreConfiguration = new RedisMemoizationStoreConfiguration
             {
+                LogReconciliationHashes = _distributedSettings.LogReconciliationHashes,
                 RedisBatchPageSize = _distributedSettings.RedisBatchPageSize,
                 BlobExpiryTimeMinutes = _distributedSettings.BlobExpiryTimeMinutes,
                 MaxBlobCapacity = _distributedSettings.MaxBlobCapacity,
@@ -192,6 +194,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                 {
                     StoreClusterState = _distributedSettings.StoreClusterStateInDatabase,
                     LogsKeepLongTerm = true,
+                    UseContextualEntryOperationLogging = _distributedSettings.UseContextualEntryDatabaseOperationLogging
                 };
 
                 if (_distributedSettings.ContentLocationDatabaseGcIntervalMinutes != null)
@@ -237,6 +240,9 @@ namespace BuildXL.Cache.Host.Service.Internal
                     dbConfig.LogsBackupPath = primaryCacheRoot / "LocationDbLogs";
                 }
                 ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseLogsBackupRetentionMinutes, v => dbConfig.LogsRetention = TimeSpan.FromMinutes(v));
+
+                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseEnumerateSortedKeysFromStorageBufferSize, v => dbConfig.EnumerateSortedKeysFromStorageBufferSize = v);
+                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseEnumerateEntriesWithSortedKeysFromStorageBufferSize, v => dbConfig.EnumerateEntriesWithSortedKeysFromStorageBufferSize = v);
 
                 redisContentLocationStoreConfiguration.Database = dbConfig;
                 ApplySecretSettingsForLlsAsync(redisContentLocationStoreConfiguration, primaryCacheRoot, dbConfig).GetAwaiter().GetResult();
@@ -314,6 +320,7 @@ namespace BuildXL.Cache.Host.Service.Internal
             {
                 pinConfiguration = new PinConfiguration();
                 ApplyIfNotNull(distributedSettings.PinRisk, v => pinConfiguration.PinRisk = v);
+                ApplyIfNotNull(distributedSettings.PinMinUnverifiedCount, v => pinConfiguration.PinMinUnverifiedCount = v);
                 ApplyIfNotNull(distributedSettings.MachineRisk, v => pinConfiguration.MachineRisk = v);
                 ApplyIfNotNull(distributedSettings.FileRisk, v => pinConfiguration.FileRisk = v);
                 ApplyIfNotNull(distributedSettings.MaxIOOperations, v => pinConfiguration.MaxIOOperations = v);
@@ -350,7 +357,6 @@ namespace BuildXL.Cache.Host.Service.Internal
                 MaxConcurrentProactiveCopyOperations = distributedSettings.MaxConcurrentProactiveCopyOperations,
                 ProactiveCopyLocationsThreshold = distributedSettings.ProactiveCopyLocationsThreshold,
                 ProactiveCopyRejectOldContent = distributedSettings.ProactiveCopyRejectOldContent,
-                MaximumConcurrentPutFileOperations = distributedSettings.MaximumConcurrentPutFileOperations,
                 ReplicaCreditInMinutes = distributedSettings.IsDistributedEvictionEnabled ? distributedSettings.ReplicaCreditInMinutes : null,
                 EnableRepairHandling = distributedSettings.IsRepairHandlingEnabled,
                 ContentHashBumpTime = lazyTouchContentHashBumpTime,
@@ -364,12 +370,15 @@ namespace BuildXL.Cache.Host.Service.Internal
                 DelayForProactiveReplication = TimeSpan.FromSeconds(distributedSettings.ProactiveReplicationDelaySeconds),
                 ProactiveReplicationCopyLimit = distributedSettings.ProactiveReplicationCopyLimit,
                 EnableProactiveReplication = distributedSettings.EnableProactiveReplication,
+                TraceProactiveCopy = distributedSettings.TraceProactiveCopy,
             };
 
             if (distributedSettings.EnableProactiveReplication && redisContentLocationStoreConfiguration.Checkpoint != null)
             {
                 distributedContentStoreSettings.ProactiveReplicationInterval = redisContentLocationStoreConfiguration.Checkpoint.RestoreCheckpointInterval;
             }
+
+            ApplyIfNotNull(distributedSettings.MaximumConcurrentPutAndPlaceFileOperations, v => distributedContentStoreSettings.MaximumConcurrentPutAndPlaceFileOperations = v);
 
             arguments.Overrides.Override(distributedContentStoreSettings);
 
@@ -502,7 +511,7 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             var blobStoreConfiguration = new BlobCentralStoreConfiguration(
                 credentials: storageCredentials,
-                containerName: "checkpoints",
+                containerName: _arguments.HostInfo.AppendRingSpecifierIfNeeded("checkpoints", _distributedSettings.UseRingIsolation),
                 checkpointsKey: "checkpoints-eventhub");
 
             ApplyIfNotNull(
@@ -515,8 +524,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                 var distributedCentralStoreConfiguration = new DistributedCentralStoreConfiguration(localCacheRoot)
                 {
                     MaxRetentionGb = _distributedSettings.MaxCentralStorageRetentionGb,
-                    PropagationDelay = TimeSpan.FromSeconds(
-                                                                _distributedSettings.CentralStoragePropagationDelaySeconds),
+                    PropagationDelay = TimeSpan.FromSeconds(_distributedSettings.CentralStoragePropagationDelaySeconds),
                     PropagationIterations = _distributedSettings.CentralStoragePropagationIterations,
                     MaxSimultaneousCopies = _distributedSettings.CentralStorageMaxSimultaneousCopies
                 };
@@ -599,22 +607,6 @@ namespace BuildXL.Cache.Host.Service.Internal
                 $"Unable to configure Azure Storage. {nameof(DistributedContentSettings.AzureStorageSecretName)} or {nameof(DistributedContentSettings.AzureStorageSecretNames)} configuration options should be provided. ");
             return null;
 
-        }
-
-        private static void ApplyIfNotNull<T>(T value, Action<T> apply) where T : class
-        {
-            if (value != null)
-            {
-                apply(value);
-            }
-        }
-
-        private static void ApplyIfNotNull<T>(T? value, Action<T> apply) where T : struct
-        {
-            if (value != null)
-            {
-                apply(value.Value);
-            }
         }
 
         private static Secret GetRequiredSecret(Dictionary<string, Secret> secrets, string secretName)

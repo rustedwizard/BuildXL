@@ -9,7 +9,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using BuildXL.Interop.MacOS;
+using BuildXL.Interop.Unix;
 using BuildXL.Processes;
 using BuildXL.ToolSupport;
 using BuildXL.Utilities;
@@ -375,7 +375,12 @@ namespace BuildXL.SandboxExec
         public static SandboxedProcessInfo CreateSandboxedProcessInfo(string processFileName, SandboxExecRunner instance)
         {
             var sandboxProcessInfo = new SandboxedProcessInfo(
-                new PathTable(), fileStorage: instance, fileName: processFileName, disableConHostSharing: true, sandboxConnection: instance.m_sandboxConnection);
+                new PathTable(), 
+                fileStorage: instance, 
+                fileName: processFileName, 
+                disableConHostSharing: true, 
+                sandboxConnection: instance.m_sandboxConnection,
+                loggingContext: s_loggingContext);
             sandboxProcessInfo.PipDescription = processFileName;
 
             sandboxProcessInfo.StandardOutputEncoding = Encoding.UTF8;

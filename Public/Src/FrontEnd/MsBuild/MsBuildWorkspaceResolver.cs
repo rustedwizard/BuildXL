@@ -191,7 +191,7 @@ namespace BuildXL.FrontEnd.MsBuild
         private async Task<Possible<ProjectGraphResult>> TryComputeBuildGraphAsync(IEnumerable<AbsolutePath> msBuildSearchLocations, IEnumerable<AbsolutePath> dotnetSearchLocations, IEnumerable<AbsolutePath> parsingEntryPoints, BuildParameters.IBuildParameters buildParameters)
         {
             // We create a unique output file on the obj folder associated with the current front end, and using a GUID as the file name
-            AbsolutePath outputDirectory = m_host.GetFolderForFrontEnd(MsBuildFrontEnd.Name);
+            AbsolutePath outputDirectory = m_host.GetFolderForFrontEnd(Name);
             AbsolutePath outputFile = outputDirectory.Combine(m_context.PathTable, Guid.NewGuid().ToString());
             // We create a unique response file that will contain the tool arguments
             AbsolutePath responseFile = outputDirectory.Combine(m_context.PathTable, Guid.NewGuid().ToString());
@@ -282,7 +282,7 @@ namespace BuildXL.FrontEnd.MsBuild
         private bool TryRetrieveMsBuildSearchLocations(out IEnumerable<AbsolutePath> searchLocations)
         {
             return FrontEndUtilities.TryRetrieveExecutableSearchLocations(
-                MsBuildFrontEnd.Name,
+                Name,
                 m_context,
                 m_host.Engine,
                 m_resolverSettings.MsBuildSearchLocations?.SelectList(directoryLocation => directoryLocation.Path),
@@ -301,7 +301,7 @@ namespace BuildXL.FrontEnd.MsBuild
         private bool TryRetrieveDotNetSearchLocations(out IEnumerable<AbsolutePath> searchLocations)
         {
             return FrontEndUtilities.TryRetrieveExecutableSearchLocations(
-                MsBuildFrontEnd.Name,
+                Name,
                 m_context,
                 m_host.Engine,
                 m_resolverSettings.DotNetSearchLocations?.SelectList(directoryLocation => directoryLocation.Path),
@@ -360,7 +360,7 @@ namespace BuildXL.FrontEnd.MsBuild
             }
 
             TrackFilesAndEnvironment(result.AllUnexpectedFileAccesses, outputFile.GetParent(m_context.PathTable));
-            JsonSerializer serializer = ConstructProjectGraphSerializer();
+            JsonSerializer serializer = ConstructProjectGraphSerializer(ProjectGraphSerializationSettings.Settings);
 
             using (var sr = new StreamReader(outputFile.ToString(m_context.PathTable)))
             using (var reader = new JsonTextReader(sr))
@@ -382,41 +382,6 @@ namespace BuildXL.FrontEnd.MsBuild
 
                 return m_resolverSettings.ShouldRunDotNetCoreMSBuild() ? projectGraphWithPredictionsResult.WithPathToDotNetExe(dotnetExeLocation) : projectGraphWithPredictionsResult;
             }
-        }
-
-        private JsonSerializer ConstructProjectGraphSerializer()
-        {
-            var serializer = JsonSerializer.Create(ProjectGraphSerializationSettings.Settings);
-
-            // If the user profile has been redirected, we need to catch any path reported by MSBuild that falls under it
-            // and relocate it to the redirected user profile.
-            // This allows for cache hits across machines where the user profile is not uniformly located, and MSBuild
-            // happens to read a spec under it (the typical case is a props/target file under the nuget cache)
-            // Observe that the env variable UserProfile is already redirected in this case, and the engine abstraction exposes it.
-            // However, MSBuild very often manages to find the user profile by some other means
-            AbsolutePathJsonConverter absolutePathConverter;
-            if (m_configuration.Layout.RedirectedUserProfileJunctionRoot.IsValid)
-            {
-                // Let's get the redirected and original user profile folder
-                string redirectedUserProfile = SpecialFolderUtilities.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                string originalUserProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-                absolutePathConverter = new AbsolutePathJsonConverter(
-                    m_context.PathTable,
-                    new[] { 
-                        (AbsolutePath.Create(m_context.PathTable, originalUserProfile), 
-                        AbsolutePath.Create(m_context.PathTable, redirectedUserProfile)) });
-            }
-            else
-            {
-                absolutePathConverter = new AbsolutePathJsonConverter(m_context.PathTable);
-            }
-
-            serializer.Converters.Add(absolutePathConverter);
-            // Let's not add invalid absolute paths to any collection
-            serializer.Converters.Add(ValidAbsolutePathEnumerationJsonConverter.Instance);
-
-            return serializer;
         }
 
         private bool TryFindDotNetExe(IEnumerable<AbsolutePath> dotnetSearchLocations, out AbsolutePath dotnetExeLocation, out string failure)

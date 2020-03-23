@@ -5,7 +5,7 @@ using System;
 using System.Diagnostics;
 using System.Diagnostics.ContractsLight;
 using System.Threading;
-#if PLATFORM_OSX
+#if !PLATFORM_WIN
 using System.Collections.Concurrent;
 #endif
 
@@ -115,7 +115,7 @@ namespace BuildXL.Utilities
         /// </remarks>
         public ObjectPool(Func<T> creator, Func<T, T> cleanup, int size)
         {
-            Contract.Requires(creator != null);
+            Contract.RequiresNotNull(creator);
             Contract.Requires(size >= 1);
 
             m_creator = creator;

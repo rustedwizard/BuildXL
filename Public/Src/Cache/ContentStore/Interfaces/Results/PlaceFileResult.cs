@@ -4,8 +4,6 @@
 using System;
 using System.Diagnostics.ContractsLight;
 
-#nullable enable
-
 namespace BuildXL.Cache.ContentStore.Interfaces.Results
 {
     /// <summary>
@@ -169,5 +167,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
                     return $"{Code} Size={FileSize}{this.GetDiagnosticsMessageForTracing()}";
             }
         }
+
+        internal ResultMetaData? Metadata { get; set; }
     }
 }

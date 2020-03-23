@@ -22,6 +22,7 @@ using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
 using BuildXL.Cache.MemoizationStore.Service;
 using BuildXL.Cache.MemoizationStore.Sessions;
 using BuildXL.Cache.MemoizationStore.Stores;
+using static BuildXL.Cache.Host.Service.Internal.ConfigurationHelper;
 
 namespace BuildXL.Cache.Host.Service.Internal
 {
@@ -53,7 +54,13 @@ namespace BuildXL.Cache.Host.Service.Internal
             var distributedSettings = cacheConfig.DistributedContentSettings;
             var isLocal = distributedSettings == null || !distributedSettings.IsDistributedContentEnabled;
 
-            var serviceConfiguration = CreateServiceConfiguration(_logger, _fileSystem, cacheConfig.LocalCasSettings, new AbsolutePath(_arguments.DataRootPath), isDistributed: !isLocal);
+            var serviceConfiguration = CreateServiceConfiguration(
+                _logger,
+                _fileSystem,
+                cacheConfig.LocalCasSettings,
+                distributedSettings,
+                new AbsolutePath(_arguments.DataRootPath),
+                isDistributed: !isLocal);
             var localServerConfiguration = CreateLocalServerConfiguration(cacheConfig.LocalCasSettings.ServiceSettings, serviceConfiguration);
 
             if (isLocal)
@@ -176,7 +183,7 @@ namespace BuildXL.Cache.Host.Service.Internal
             }
         }
 
-        private IMemoizationStore CreateServerSideLocalMemoizationStore(AbsolutePath path, DistributedContentStoreFactory factory = null)
+        private IMemoizationStore CreateServerSideLocalMemoizationStore(AbsolutePath path, DistributedContentStoreFactory factory)
         {
             var distributedSettings = _arguments.Configuration.DistributedContentSettings;
 
@@ -196,10 +203,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                     },
                 };
 
-                if (distributedSettings != null)
-                {
-                    config.Database.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep = distributedSettings.MaximumNumberOfMetadataEntriesToStore;
-                }
+                config.Database.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep = distributedSettings.MaximumNumberOfMetadataEntriesToStore;
 
                 return new RocksDbMemoizationStore(_logger, SystemClock.Instance, config);
             }
@@ -210,28 +214,23 @@ namespace BuildXL.Cache.Host.Service.Internal
             serviceConfiguration.GrpcPort = localCasServiceSettings.GrpcPort;
             serviceConfiguration.BufferSizeForGrpcCopies = localCasServiceSettings.BufferSizeForGrpcCopies;
             serviceConfiguration.GzipBarrierSizeForGrpcCopies = localCasServiceSettings.GzipBarrierSizeForGrpcCopies;
+            serviceConfiguration.ProactivePushCountLimit = localCasServiceSettings.MaxProactivePushRequestHandlers;
 
             var localContentServerConfiguration = new LocalServerConfiguration(serviceConfiguration);
-
-            if (localCasServiceSettings.UnusedSessionTimeoutMinutes.HasValue)
-            {
-                localContentServerConfiguration.UnusedSessionTimeout = TimeSpan.FromMinutes(localCasServiceSettings.UnusedSessionTimeoutMinutes.Value);
-            }
-
-            if (localCasServiceSettings.UnusedSessionHeartbeatTimeoutMinutes.HasValue)
-            {
-                localContentServerConfiguration.UnusedSessionHeartbeatTimeout = TimeSpan.FromMinutes(localCasServiceSettings.UnusedSessionHeartbeatTimeoutMinutes.Value);
-            }
-
-            if (localCasServiceSettings.GrpcThreadPoolSize.HasValue)
-            {
-                localContentServerConfiguration.GrpcThreadPoolSize = localCasServiceSettings.GrpcThreadPoolSize.Value;
-            }
+            ApplyIfNotNull(localCasServiceSettings.UnusedSessionTimeoutMinutes, value => localContentServerConfiguration.UnusedSessionTimeout = TimeSpan.FromMinutes(value));
+            ApplyIfNotNull(localCasServiceSettings.UnusedSessionHeartbeatTimeoutMinutes, value => localContentServerConfiguration.UnusedSessionHeartbeatTimeout = TimeSpan.FromMinutes(value));
+            ApplyIfNotNull(localCasServiceSettings.GrpcThreadPoolSize, value => localContentServerConfiguration.GrpcThreadPoolSize = value);
 
             return localContentServerConfiguration;
         }
 
-        private static ServiceConfiguration CreateServiceConfiguration(ILogger logger, IAbsFileSystem fileSystem, LocalCasSettings localCasSettings, AbsolutePath dataRootPath, bool isDistributed)
+        private static ServiceConfiguration CreateServiceConfiguration(
+            ILogger logger,
+            IAbsFileSystem fileSystem,
+            LocalCasSettings localCasSettings,
+            DistributedContentSettings distributedSettings,
+            AbsolutePath dataRootPath,
+            bool isDistributed)
         {
             var namedCacheRoots = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
             foreach (KeyValuePair<string, NamedCacheSettings> settings in localCasSettings.CacheSettingsByCacheName)
@@ -266,7 +265,10 @@ namespace BuildXL.Cache.Host.Service.Internal
                 (int)localCasSettings.ServiceSettings.GrpcPort,
                 grpcPortFileName: localCasSettings.ServiceSettings.GrpcPortFileName,
                 bufferSizeForGrpcCopies: localCasSettings.ServiceSettings.BufferSizeForGrpcCopies,
-                gzipBarrierSizeForGrpcCopies: localCasSettings.ServiceSettings.GzipBarrierSizeForGrpcCopies);
+                gzipBarrierSizeForGrpcCopies: localCasSettings.ServiceSettings.GzipBarrierSizeForGrpcCopies,
+                proactivePushCountLimit: localCasSettings.ServiceSettings.MaxProactivePushRequestHandlers,
+                logIncrementalStatsInterval: distributedSettings?.LogIncrementalStatsInterval,
+                logMachineStatsInterval: distributedSettings?.LogMachineStatsInterval);
         }
 
         private static void WriteContentStoreConfigFile(string cacheSizeQuotaString, AbsolutePath rootPath, IAbsFileSystem fileSystem)

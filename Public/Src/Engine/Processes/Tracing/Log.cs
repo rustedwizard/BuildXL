@@ -1,13 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System;
-using BuildXL.Pips.Operations;
 using BuildXL.Tracing;
 using BuildXL.Utilities.Instrumentation.Common;
-using BuildXL.Utilities.Tracing;
 
 #pragma warning disable 1591
+#nullable enable
 
 namespace BuildXL.Processes.Tracing
 {
@@ -16,6 +14,7 @@ namespace BuildXL.Processes.Tracing
     /// </summary>
     [EventKeywordsType(typeof(Keywords))]
     [EventTasksType(typeof(Tasks))]
+    [LoggingDetails("ProcessesLogger")]
     public abstract partial class Logger
     {
         /// <summary>
@@ -1027,12 +1026,6 @@ namespace BuildXL.Processes.Tracing
             EventTask = (ushort)Tasks.PipExecutor,
             Message = "[{pipSemiStableHash}] Done with phase '{phaseName}' in {duration}.  {extraInfo}")]
         public abstract void LogPhaseDuration(LoggingContext context, string pipSemiStableHash, string phaseName, string duration, string extraInfo);
-
-        public void LogSubPhaseDuration(LoggingContext context, Pip pip, SandboxedProcessFactory.SandboxedProcessCounters counter, TimeSpan duration, string extraInfo = "")
-        {
-            SandboxedProcessFactory.Counters.AddToCounter(counter, duration);
-            LogPhaseDuration(context, pip.FormattedSemiStableHash, counter.ToString(), duration.ToString(), extraInfo);
-        }
 
         [GeneratedEvent(
             (ushort)LogEventId.CannotDeleteSharedOpaqueOutputFile,

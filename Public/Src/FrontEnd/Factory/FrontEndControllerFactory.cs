@@ -9,10 +9,11 @@ using System.Threading.Tasks;
 using BuildXL.FrontEnd.Core;
 using BuildXL.FrontEnd.Download;
 using BuildXL.FrontEnd.Factory.Tracing;
-#if !PLATFORM_OSX
+#if PLATFORM_WIN
 using BuildXL.FrontEnd.CMake;
 using BuildXL.FrontEnd.MsBuild;
 using BuildXL.FrontEnd.Ninja;
+using BuildXL.FrontEnd.Rush;
 #endif
 using BuildXL.FrontEnd.Nuget;
 using BuildXL.FrontEnd.Script;
@@ -64,10 +65,11 @@ namespace BuildXL.FrontEnd.Factory
                 global::BuildXL.FrontEnd.Script.ETWLogger.Log,
                 global::BuildXL.FrontEnd.Script.Debugger.ETWLogger.Log,
                 global::BuildXL.FrontEnd.Nuget.ETWLogger.Log,
-#if !PLATFORM_OSX
+#if PLATFORM_WIN
                 global::BuildXL.FrontEnd.MsBuild.ETWLogger.Log,
                 global::BuildXL.FrontEnd.Ninja.ETWLogger.Log,
                 global::BuildXL.FrontEnd.CMake.ETWLogger.Log,
+                global::BuildXL.FrontEnd.Rush.ETWLogger.Log,
 #endif
             };
 
@@ -273,10 +275,11 @@ namespace BuildXL.FrontEnd.Factory
 
             frontEndFactory.AddFrontEnd(new DownloadFrontEnd());
 
-#if !PLATFORM_OSX
+#if PLATFORM_WIN
             frontEndFactory.AddFrontEnd(new MsBuildFrontEnd());
             frontEndFactory.AddFrontEnd(new NinjaFrontEnd());
             frontEndFactory.AddFrontEnd(new CMakeFrontEnd());
+            frontEndFactory.AddFrontEnd(new RushFrontEnd());
 #endif
 
             if (!frontEndFactory.TrySeal(loggingContext))

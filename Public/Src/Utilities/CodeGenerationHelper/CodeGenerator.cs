@@ -8,6 +8,7 @@ using System.Diagnostics.ContractsLight;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Xml.Linq;
 
 namespace BuildXL.Utilities.CodeGenerationHelper
 {
@@ -80,10 +81,13 @@ namespace BuildXL.Utilities.CodeGenerationHelper
         /// <summary>
         /// Generates the attributes for generated
         /// </summary>
-        public void WriteGeneratedAttribute()
+        public void WriteGeneratedAttribute(bool includeCodeCoverageExclusion = true)
         {
             Ln(@"[System.CodeDom.Compiler.GeneratedCode(""{0}"", ""{1}"")]", s_applicationName, s_applicationVersion);
-            Ln(@"[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]");
+            if (includeCodeCoverageExclusion)
+            {
+                Ln(@"[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]");
+            }
         }
 
         /// <summary>
@@ -167,7 +171,7 @@ namespace BuildXL.Utilities.CodeGenerationHelper
         /// <param name="xmlComment">The XML comment needs to be written.</param>
         public void NormalizeAndWriteXmlComment(string xmlComment)
         {
-            NormalizeAndWriteComment(xmlComment, "///");
+            NormalizeAndWriteComment(new XText(xmlComment).ToString(), "///");
         }
 
         /// <summary>

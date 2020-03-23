@@ -12,7 +12,6 @@ using BuildXL.Scheduler;
 using BuildXL.Scheduler.Fingerprints;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
-using BuildXL.Utilities.Tracing;
 using Test.BuildXL.Executables.TestProcess;
 using Test.BuildXL.Scheduler;
 using Test.BuildXL.TestUtilities;
@@ -312,7 +311,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             builder.SetTempDirectory(tempdir);
             SchedulePipBuilder(builder);
 
-            using (var tempCleaner = new TempCleaner())
+            using (var tempCleaner = new TempCleaner(LoggingContext))
             {
                 if (shouldPipFail)
                 {

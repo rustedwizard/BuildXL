@@ -24,7 +24,6 @@ using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
-using BuildXL.Utilities.Tracing;
 using BuildXL.Utilities.VmCommandProxy;
 using static BuildXL.Processes.SandboxedProcessFactory;
 using static BuildXL.Utilities.BuildParameters;
@@ -289,6 +288,7 @@ namespace BuildXL.Processes
                     PipId = m_pip.SemiStableHash != 0 ? m_pip.SemiStableHash : m_pip.PipId.Value,
                     QBuildIntegrated = isQbuildIntegrated,
                     IgnoreCreateProcessReport = sandBoxConfig.UnsafeSandboxConfiguration.IgnoreCreateProcessReport,
+                    ProbeDirectorySymlinkAsDirectory = sandBoxConfig.UnsafeSandboxConfiguration.ProbeDirectorySymlinkAsDirectory,
                     SubstituteProcessExecutionInfo = shimInfo,
                 };
 
@@ -744,8 +744,8 @@ namespace BuildXL.Processes
                         m_fileAccessManifest,
                         m_disableConHostSharing,
                         m_containerConfiguration,
-                        m_pip.TestRetries,
                         m_loggingContext,
+                        m_pip.TestRetries,
                         sandboxConnection: sandboxConnection,
                         sidebandWriter: sidebandWriter,
                         detoursEventListener: m_detoursListener)
@@ -1138,7 +1138,7 @@ namespace BuildXL.Processes
                             cancellationTokenSource.Token,
                             process.GetDetoursMaxHeapSize() + result.DetoursMaxHeapSize,
                             allInputPathsUnderSharedOpaques);
-                Tracing.Logger.Log.LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseProcessingSandboxProcessResult, DateTime.UtcNow.Subtract(start));
+                LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseProcessingSandboxProcessResult, DateTime.UtcNow.Subtract(start));
 
                 return ValidateDetoursCommunication(
                     executionResult,
@@ -1633,7 +1633,7 @@ namespace BuildXL.Processes
                 }
             }
 
-            Tracing.Logger.Log.LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseProcessingStandardOutputs, DateTime.UtcNow.Subtract(start));
+            LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseProcessingStandardOutputs, DateTime.UtcNow.Subtract(start));
 
             start = DateTime.UtcNow;
             SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> observed =
@@ -1642,7 +1642,7 @@ namespace BuildXL.Processes
                     allInputPathsUnderSharedOpaques,
                     out var unobservedOutputs,
                     out var sharedDynamicDirectoryWriteAccesses);
-            Tracing.Logger.Log.LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseGettingObservedFileAccesses, DateTime.UtcNow.Subtract(start), $"(count: {observed.Length})");
+            LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseGettingObservedFileAccesses, DateTime.UtcNow.Subtract(start), $"(count: {observed.Length})");
 
             start = DateTime.UtcNow;
 
@@ -1690,7 +1690,7 @@ namespace BuildXL.Processes
                 }
             }
 
-            Tracing.Logger.Log.LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseLoggingOutputs, DateTime.UtcNow.Subtract(start));
+            LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseLoggingOutputs, DateTime.UtcNow.Subtract(start));
 
             // N.B. here 'observed' means 'all', not observed in the terminology of SandboxedProcessPipExecutor.
             List<ReportedFileAccess> allFileAccesses = null;
@@ -1925,6 +1925,23 @@ namespace BuildXL.Processes
                 }
             }
 
+            // Directories specified in the directory translator can be directory symlinks or junctions that are meant to be directories in normal circumstances.
+            if (m_fileAccessManifest.DirectoryTranslator != null) 
+            {
+                foreach (var translation in m_fileAccessManifest.DirectoryTranslator.Translations)
+                {
+                    var sourcePath = AbsolutePath.Create(m_pathTable, translation.SourcePath);
+                    var targetPath = AbsolutePath.Create(m_pathTable, translation.TargetPath);
+                    m_fileAccessManifest.AddPath(
+                        sourcePath,
+                        mask: FileAccessPolicy.MaskNothing,
+                        values: FileAccessPolicy.TreatDirectorySymlinkAsDirectory);
+                    m_fileAccessManifest.AddPath(
+                        targetPath,
+                        mask: FileAccessPolicy.MaskNothing,
+                        values: FileAccessPolicy.TreatDirectorySymlinkAsDirectory);
+                }
+            }
 
             if (!OperatingSystemHelper.IsUnixOS)
             {
@@ -2726,7 +2743,7 @@ namespace BuildXL.Processes
                     .Where(FileUtilities.FileExistsNoFollow)
                     .Select(path => FileUtilities.TryDeleteFile(path)) // TODO: what about deleting directories?
                     .ToArray();
-                Tracing.Logger.Log.LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseDeletingSharedOpaqueOutputs, DateTime.UtcNow.Subtract(start));
+                LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseDeletingSharedOpaqueOutputs, DateTime.UtcNow.Subtract(start));
 
                 // select failures
                 var failures = deletionResults
@@ -3274,7 +3291,7 @@ namespace BuildXL.Processes
                     // We want an AbsolutePath for the full access. This may not be parse-able due to the accessed path
                     // being invalid, or a path format we do not understand. Note that TryParseAbsolutePath logs as appropriate
                     // in the latter case.
-                    if (!reported.TryParseAbsolutePath(m_context, m_pip, out parsedPath))
+                    if (!reported.TryParseAbsolutePath(m_context, m_loggingContext, m_pip, out parsedPath))
                     {
                         continue;
                     }
@@ -3394,9 +3411,10 @@ namespace BuildXL.Processes
                                 hasEnumeration = true;
                             }
 
-                            // if the access is a write (and not a directory creation), then the path is a candidate to be part of a shared opaque
+                            // if the access is a write on a file (that is, not on a directory), then the path is a candidate to be part of a shared opaque
                             isPathCandidateToBeOwnedByASharedOpaque |= 
                                 access.RequestedAccess.HasFlag(RequestedAccess.Write) &&
+                                !access.FlagsAndAttributes.HasFlag(FlagsAndAttributes.FILE_ATTRIBUTE_DIRECTORY) &&
                                 !access.IsDirectoryCreationOrRemoval();
                         }
 
@@ -3509,11 +3527,11 @@ namespace BuildXL.Processes
             }
 
             // The only construct that defines a scope for detours that we allow under shared opaques is sealed directories
-            // (other constructs are allowed, but they don't affect detours manifest)
-            // This means we cannot directly use the manifest path to check if is the root of a shared opaque
-            // but we can start looking up from the reported manifest path
-            // Furthermore, nested shared opaques from the same pip are blocked, so the first shared opaque
-            // we find by walking up the path is the one
+            // (other constructs are allowed, but they don't affect detours manifest).
+            // This means we cannot directly use the manifest path to check if it is the root of a shared opaque,
+            // but we can start looking up from the reported manifest path.
+            // Because of bottom-up search, if a pip declares nested shared opaque directories, the innermost directory
+            // wins the ownership of a produced file.
 
             var initialNode = access.ManifestPath.Value;
 

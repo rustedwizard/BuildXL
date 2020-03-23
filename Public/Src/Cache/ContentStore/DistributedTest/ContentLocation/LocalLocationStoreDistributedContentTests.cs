@@ -13,11 +13,11 @@ using BuildXL.Cache.ContentStore.Distributed;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
 using BuildXL.Cache.ContentStore.Distributed.Redis;
-using BuildXL.Cache.ContentStore.Distributed.Sessions;
 using BuildXL.Cache.ContentStore.Distributed.Stores;
 using BuildXL.Cache.ContentStore.Extensions;
 using BuildXL.Cache.ContentStore.FileSystem;
 using BuildXL.Cache.ContentStore.Hashing;
+using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
@@ -102,6 +102,7 @@ namespace ContentStoreTest.Distributed.Sessions
         /// <nodoc />
         protected bool EnableProactiveCopy { get; set; } = false;
         protected bool PushProactiveCopies { get; set; } = false;
+        protected int? ProactivePushCountLimit { get; set; }
         protected bool EnableProactiveReplication { get; set; } = false;
         protected bool ProactiveCopyOnPuts { get; set; } = true;
         protected bool ProactiveCopyOnPins { get; set; } = false;
@@ -310,6 +311,7 @@ namespace ContentStoreTest.Distributed.Sessions
                     GrpcPort = grpcPort,
                     GrpcPortFileName = Guid.NewGuid().ToString(),
                     ScenarioName = Guid.NewGuid().ToString(),
+                    MaxProactivePushRequestHandlers = ProactivePushCountLimit, 
                 }
             };
 
@@ -583,6 +585,38 @@ namespace ContentStoreTest.Distributed.Sessions
         }
 
         [Fact]
+        public async Task TestDistributedCacheServiceTracker()
+        {
+            int machineCount = 1;
+            var loggingContext = new Context(Logger);
+            ConfigureWithOneMaster();
+
+            await RunTestAsync(
+                loggingContext,
+                machineCount,
+                async context =>
+                {
+                    var logFilePath = context.Directories[0].CreateRandomFileName();
+                    var logIntervalSeconds = 10;
+
+                    // Create a new service tracker, in the constructor we will try to get previous online time
+                    // Because the file was never created previously, we can not determine offlineTime
+                    var testServiceTracker = new DistributedCacheServiceRunningTracker(context, TestClock, FileSystem, logIntervalSeconds, logFilePath);
+                    testServiceTracker.Dispose();
+                    testServiceTracker.GetStatus().Should().NotContain("offlineTime");
+                    testServiceTracker.PeriodicLogToFile(context, TestClock.UtcNow.ToString());
+
+                    TestClock.UtcNow += TimeSpan.FromSeconds(logIntervalSeconds);
+
+                    // From the previous simulated interval, we created a new file and wrote a timestamp to it.
+                    // Now we should be able to determine previous offlineTIme
+                    testServiceTracker.GetStatus().Should().Contain("offlineTime");
+
+                    await Task.Yield();
+                });
+        }
+
+        [Fact]
         public async Task ProactiveCopyDistributedTest()
         {
             EnableProactiveCopy = true;
@@ -818,6 +852,78 @@ namespace ContentStoreTest.Distributed.Sessions
                 });
         }
 
+        [Fact]
+        public async Task ProactiveCopyWithTooManyRequestsTest()
+        {
+            // This test adds a lot of files in a session (without proactive copies on put),
+            // and then explicitly forces a push to another session in parallel.
+            // The test expects that some of the operations would be rejected (even though the push itself is considered successful).
+
+            EnableProactiveReplication = false;
+            EnableProactiveCopy = true;
+            PushProactiveCopies = true;
+            
+            ProactiveCopyOnPuts = false;
+            UseGrpcServer = true;
+
+            ConfigureWithOneMaster(dcs => dcs.TouchFrequencyMinutes = 1);
+
+            // Limiting the concurrency and expecting that at least some of them will fail.
+            ProactivePushCountLimit = 1;
+            await runTestAsync(count: 100, expectAllSuccesses: false);
+
+            // Increasing the concurrency to the number of operations. All the pushes should be successful and accepted.
+            ProactivePushCountLimit = 100;
+            await runTestAsync(count: 100, expectAllSuccesses: true);
+
+            Task runTestAsync(int count, bool expectAllSuccesses)
+            {
+                return RunTestAsync(
+                    new Context(Logger),
+                    storeCount: 2,
+                    iterations: 1,
+                    implicitPin: ImplicitPin.None,
+                    testFunc: async context =>
+                              {
+                                  var session0 = context.GetDistributedSession(0);
+
+                                  var putResults = new List<PutResult>();
+
+                                  for (int i = 0; i < count; i++)
+                                  {
+                                      putResults.Add(
+                                          await session0.PutRandomAsync(context, HashType.MD5, provideHash: false, size: 31, CancellationToken.None));
+                                  }
+
+                                  TestClock.Increment();
+
+                                  var tasks = putResults.Select(
+                                      async pr =>
+                                      {
+                                          var result = await session0.ProactiveCopyIfNeededAsync(
+                                              context,
+                                              pr.ContentHash,
+                                              tryBuildRing: false,
+                                              ProactiveCopyReason.Replication);
+                                          return result.OutsideRingCopyResult;
+                                      });
+
+                                  var results = await Task.WhenAll(tasks);
+                                  // We should have at least some skipped operations, because we tried 100 pushes at the same time with 1 as the push count limit.
+
+                                  var acceptedSuccesses = results.Count(r => r.Value);
+                                  if (expectAllSuccesses)
+                                  {
+                                      acceptedSuccesses.Should().Be(count);
+                                  }
+                                  else
+                                  {
+                                      acceptedSuccesses.Should().NotBe(count);
+                                  }
+                              });
+            }
+        }
+
         private LocalRedisProcessDatabase GetDatabase(Context context, ref int index, bool useDatabasePool = true)
         {
             if (!useDatabasePool)
@@ -834,6 +940,59 @@ namespace ContentStoreTest.Distributed.Sessions
             }
 
             return localDatabase;
+        }
+
+        [Fact]
+        public async Task PinWithUnverifiedCountTest()
+        {
+            var startTime = TestClock.UtcNow;
+            TimeSpan pinCacheTimeToLive = TimeSpan.FromMinutes(30);
+
+            _overrideDistributed = s =>
+                                   {
+                                       // Enable pin better to ensure pin configuration is passed to distributed store,
+                                       // but defaults use low risk and high risk tolerance for machine 
+                                       // or file loss to prevent pin better from kicking in.
+                                       s.IsPinBetterEnabled = true;
+                                       s.ContentAvailabilityGuarantee = nameof(ContentAvailabilityGuarantee.FileRecordsExist);
+                                       s.PinCacheReplicaCreditRetentionMinutes = (int)pinCacheTimeToLive.TotalMinutes;
+                                       s.PinMinUnverifiedCount = 2;
+                                       s.IsPinCachingEnabled = true;
+                                   };
+
+            ContentAvailabilityGuarantee = ContentAvailabilityGuarantee.FileRecordsExist;
+
+            await RunTestAsync(
+                new Context(Logger),
+                storeCount: 3,
+                async context =>
+                {
+                    var sessions = context.Sessions;
+                    var session0 = context.GetDistributedSession(0);
+                    var session1 = context.GetDistributedSession(1);
+                    var session2 = context.GetDistributedSession(2);
+
+                    var content = ThreadSafeRandom.GetBytes((int)ContentByteCount);
+                    var hashInfo = HashInfoLookup.Find(ContentHashType);
+                    var contentHash = hashInfo.CreateContentHasher().GetContentHash(content);
+                    var path = context.Directories[0].CreateRandomFileName();
+                    FileSystem.WriteAllBytes(path, content);
+
+                    // Insert random file in session 1
+                    var putResult0 = await sessions[1].PutFileAsync(context, ContentHashType, path, FileRealizationMode.Any, Token).ShouldBeSuccess();
+
+                    // Locations that have the content are less than PinMinUnverifiedCount, therefore counter will not be incremented
+                    // Session 0 will also copy the content to itself, now enough locations have the content to satisfy PinMinUnverifiedCount
+                    var result = await sessions[0].PinAsync(context, putResult0.ContentHash, Token).ShouldBeSuccess();
+                    var counters = session0.GetCounters().ToDictionaryIntegral();
+                    counters["PinUnverifiedCountSatisfied.Count"].Should().Be(0);
+
+                    await UploadCheckpointOnMasterAndRestoreOnWorkers(context);
+
+                    var result1 = await sessions[2].PinAsync(context, putResult0.ContentHash, Token).ShouldBeSuccess();
+                    var counters1 = session2.GetCounters().ToDictionaryIntegral();
+                    counters1["PinUnverifiedCountSatisfied.Count"].Should().Be(1);
+                });
         }
 
         [Fact]
@@ -1282,6 +1441,8 @@ namespace ContentStoreTest.Distributed.Sessions
 
             ConfigureWithOneMaster(s =>
             {
+                s.LogReconciliationHashes = true;
+                s.UseContextualEntryDatabaseOperationLogging = true;
                 s.Unsafe_DisableReconciliation = false;
                 if (slowReconciliation)
                 {

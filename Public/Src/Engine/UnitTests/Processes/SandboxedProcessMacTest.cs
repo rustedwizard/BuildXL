@@ -8,14 +8,15 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using BuildXL.Interop.MacOS;
+using BuildXL.Interop.Unix;
 using BuildXL.Processes;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Instrumentation.Common;
 using Test.BuildXL.Executables.TestProcess;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
-using static BuildXL.Interop.MacOS.Sandbox.AccessReport;
+using static BuildXL.Interop.Unix.Sandbox.AccessReport;
 
 #pragma warning disable AsyncFixer02
 
@@ -52,7 +53,7 @@ namespace Test.BuildXL.Processes
 
             public bool NotifyUsage(uint cpuUsage, uint availableRamMB) { return true; }
 
-            public bool NotifyPipStarted(FileAccessManifest fam, SandboxedProcessMac process) { return true; }
+            public bool NotifyPipStarted(LoggingContext loggingContext, FileAccessManifest fam, SandboxedProcessMac process) { return true; }
 
             public void NotifyPipProcessTerminated(long pipId, int processId) { ProcessTerminated?.Invoke(pipId, processId); }
 

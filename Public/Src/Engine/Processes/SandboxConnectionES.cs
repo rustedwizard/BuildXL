@@ -9,9 +9,10 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using BuildXL.Interop.MacOS;
+using BuildXL.Interop.Unix;
 using BuildXL.Native.Processes;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Instrumentation.Common;
 
 namespace BuildXL.Processes
 {
@@ -142,7 +143,7 @@ namespace BuildXL.Processes
         }
 
         /// <inheritdoc />
-        public bool NotifyPipStarted(FileAccessManifest fam, SandboxedProcessMac process)
+        public bool NotifyPipStarted(LoggingContext loggingContext, FileAccessManifest fam, SandboxedProcessMac process)
         {
             Contract.Requires(process.Started);
             Contract.Requires(fam.PipId != 0);
@@ -163,6 +164,7 @@ namespace BuildXL.Processes
             {
                 var debugFlags = true;
                 ArraySegment<byte> manifestBytes = fam.GetPayloadBytes(
+                    loggingContext,
                     setup,
                     wrapper.Instance,
                     timeoutMins: 10, // don't care because on Mac we don't kill the process from the sandbox once it times out

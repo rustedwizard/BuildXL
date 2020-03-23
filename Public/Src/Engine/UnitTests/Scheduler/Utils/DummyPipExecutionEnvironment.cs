@@ -127,7 +127,7 @@ namespace Test.BuildXL.Scheduler.Utils
             PipFragmentRenderer = this.CreatePipFragmentRenderer();
             IpcProvider = ipcProvider ?? IpcFactory.GetProvider();
 
-            FileContentTable = fileContentTable ?? FileContentTable.CreateNew();
+            FileContentTable = fileContentTable ?? FileContentTable.CreateNew(LoggingContext);
             Cache = pipCache;
             FileAccessWhitelist = fileAccessWhitelist;
             m_allowUnspecifiedSealedDirectories = allowUnspecifiedSealedDirectories;
@@ -154,6 +154,7 @@ namespace Test.BuildXL.Scheduler.Utils
 
             State = new PipExecutionState(
                 config,
+                loggingContext,
                 cache: new PipTwoPhaseCache(loggingContext, Cache, context, PathExpander),
                 fileAccessWhitelist: FileAccessWhitelist,
                 directoryMembershipFingerprinter: this,
@@ -706,6 +707,16 @@ namespace Test.BuildXL.Scheduler.Utils
         }
 
         public bool ShouldCreateHandleWithSequentialScan(FileArtifact file) => false;
+
+        public bool TryGetProducerPip(in FileOrDirectoryArtifact artifact, out PipId producer)
+        {
+            throw new NotImplementedException();
+        }
+
+        public bool IsReachableFrom(PipId from, PipId to)
+        {
+            throw new NotImplementedException();
+        }
     }
 
     internal sealed class DummyServiceManager : ServiceManager

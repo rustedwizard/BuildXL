@@ -120,12 +120,21 @@ namespace Test.BuildXL.TestUtilities
             {
                 if (m_testOutputDirectory == null)
                 {
-                    m_testOutputDirectory = Environment.GetEnvironmentVariable("TEMP");
+                    m_testOutputDirectory = GetTempDir();
                     Directory.CreateDirectory(m_testOutputDirectory);
                 }
 
                 return m_testOutputDirectory;
             }
+        }
+
+        /// <summary>
+        /// Returns a path to a temporary directory.
+        /// The directory is not guaranteed to exist.
+        /// </summary>
+        public static string GetTempDir()
+        {
+            return Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath();
         }
 
         /// <summary>
@@ -488,9 +497,9 @@ namespace Test.BuildXL.TestUtilities
         /// <summary>
         /// Creates a LoggingContext for use by tests
         /// </summary>
-        public static LoggingContext CreateLoggingContextForTest()
+        public static LoggingContext CreateLoggingContextForTest(ILogger logger = null)
         {
-            return new LoggingContext(loggerComponentInfo: "BuildXLTest", environment: "BuildXLTest");
+            return new LoggingContext(loggerComponentInfo: "BuildXLTest", environment: "BuildXLTest", logger: logger);
         }
 
         /// <summary>

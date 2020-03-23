@@ -6,7 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Linq;
-using BuildXL.Interop.MacOS;
+using BuildXL.Interop.Unix;
 
 namespace BuildXL.Utilities.Configuration.Mutable
 {
@@ -151,6 +151,8 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MaxSealDirs = template.MaxSealDirs;
             EnableHistoricCommitMemoryProjection = template.EnableHistoricCommitMemoryProjection;
             MaximumCommitUtilizationPercentage = template.MaximumCommitUtilizationPercentage;
+            DelayedCacheLookupMinMultiplier = template.DelayedCacheLookupMinMultiplier;
+            DelayedCacheLookupMaxMultiplier = template.DelayedCacheLookupMaxMultiplier;
         }
 
         /// <inheritdoc />
@@ -358,5 +360,11 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public int MaximumCommitUtilizationPercentage { get; set; }
+
+        /// <inheritdoc />
+        public double? DelayedCacheLookupMinMultiplier { get; set; }
+
+        /// <inheritdoc />
+        public double? DelayedCacheLookupMaxMultiplier { get; set; }
     }
 }

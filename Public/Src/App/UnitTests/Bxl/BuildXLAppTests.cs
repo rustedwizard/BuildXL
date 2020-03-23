@@ -8,6 +8,7 @@ using System.Text;
 using System.Xml;
 using BuildXL;
 using BuildXL.App.Tracing;
+using BuildXL.Scheduler;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
@@ -33,7 +34,7 @@ namespace Test.BuildXL
                 global::BuildXL.Engine.Tracing.Logger.Log.DistributionExecutePipFailedNetworkFailure(loggingContext, "ArbitraryPip", "ArbitraryWorker", "ArbitraryMessage", "ArbitraryStep", "ArbitraryCaller");
                 global::BuildXL.Scheduler.Tracing.Logger.Log.PipMaterializeDependenciesFromCacheFailure(loggingContext, "ArbitraryPip", "ArbitraryMessage");
 
-                var infrastructureErrorClassification = BuildXLApp.ClassifyFailureFromLoggedEvents(Events.StaticContext, listener);
+                var infrastructureErrorClassification = BuildXLApp.ClassifyFailureFromLoggedEvents(loggingContext, listener);
                 XAssert.AreEqual(ExitKind.InfrastructureError, infrastructureErrorClassification.ExitKind);
                 XAssert.AreEqual(global::BuildXL.Engine.Tracing.LogEventId.DistributionExecutePipFailedNetworkFailure.ToString(), infrastructureErrorClassification.ErrorBucket);
             }
@@ -79,13 +80,13 @@ namespace Test.BuildXL
         [Fact]
         public void TestScrubbingCommandLine()
         {
-            XAssert.AreEqual($"{Branding.ProductExecutableName} /first [...] /tenth", Logger.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /third /fourth /fifth /sixth /seventh /eight /ninth /tenth", 20, 10));
-            XAssert.AreEqual($"{Branding.ProductExecutableName} /first [...]nth", Logger.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 20, 3));
-            XAssert.AreEqual("bxl.[...]nth", Logger.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 4, 3));
-            XAssert.AreEqual($"{Branding.ProductExecutableName} /first /second /tenth", Logger.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 4, 332));
-            XAssert.AreEqual($"{Branding.ProductExecutableName} /first /second /tenth", Logger.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 432, 2));
-            XAssert.AreEqual("[...]", Logger.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 0, 0));
-            XAssert.AreEqual("", Logger.ScrubCommandLine("", 1, 1));
+            XAssert.AreEqual($"{Branding.ProductExecutableName} /first [...] /tenth", BuildXLApp.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /third /fourth /fifth /sixth /seventh /eight /ninth /tenth", 20, 10));
+            XAssert.AreEqual($"{Branding.ProductExecutableName} /first [...]nth", BuildXLApp.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 20, 3));
+            XAssert.AreEqual("bxl.[...]nth", BuildXLApp.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 4, 3));
+            XAssert.AreEqual($"{Branding.ProductExecutableName} /first /second /tenth", BuildXLApp.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 4, 332));
+            XAssert.AreEqual($"{Branding.ProductExecutableName} /first /second /tenth", BuildXLApp.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 432, 2));
+            XAssert.AreEqual("[...]", BuildXLApp.ScrubCommandLine($"{Branding.ProductExecutableName} /first /second /tenth", 0, 0));
+            XAssert.AreEqual("", BuildXLApp.ScrubCommandLine("", 1, 1));
         }
 
         /// <summary>

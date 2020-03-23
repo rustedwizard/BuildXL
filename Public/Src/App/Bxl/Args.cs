@@ -22,7 +22,7 @@ using static BuildXL.Utilities.FormattableStringEx;
 using HelpLevel = BuildXL.Utilities.Configuration.HelpLevel;
 using Strings = bxl.Strings;
 #if PLATFORM_OSX
-using static BuildXL.Interop.MacOS.Memory;
+using static BuildXL.Interop.Unix.Memory;
 #endif
 
 #pragma warning disable SA1649 // File name must match first type name
@@ -179,7 +179,10 @@ namespace BuildXL
             {
                 var cl = new CommandLineUtilities(args);
 
-                var configuration = new BuildXL.Utilities.Configuration.Mutable.CommandLineConfiguration();
+                // Setting engine configuration has to be done before the creation of configuration.
+                SetEngineConfigurationVersionIfSpecified(cl);
+
+                var configuration = new Utilities.Configuration.Mutable.CommandLineConfiguration();
                 var startupConfiguration = configuration.Startup;
                 var engineConfiguration = configuration.Engine;
                 var layoutConfiguration = configuration.Layout;
@@ -313,6 +316,12 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "debugScript",
                             opt => frontEndConfiguration.DebugScript = opt),
+                        OptionHandlerFactory.CreateOption(
+                            "delayCacheLookupMin",
+                            opt => schedulingConfiguration.DelayedCacheLookupMinMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 100)),
+                        OptionHandlerFactory.CreateOption(
+                            "delayCacheLookupMax",
+                            opt => schedulingConfiguration.DelayedCacheLookupMaxMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 100)),
                         OptionHandlerFactory.CreateBoolOption(
                             "scriptShowSlowest",
                             opt => frontEndConfiguration.ShowSlowestElementsStatistics = opt),
@@ -421,9 +430,6 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "engineCacheDirectory",
                             opt => layoutConfiguration.EngineCacheDirectory = CommandLineUtilities.ParsePathOption(opt, pathTable)),
-                        OptionHandlerFactory.CreateOption(
-                            "engineVersion",
-                            opt => EngineVersion.Version = CommandLineUtilities.ParseInt32Option(opt, 0, int.MaxValue)),
                         OptionHandlerFactory.CreateBoolOption(
                             "ensureTempDirectoriesExistenceBeforePipExecution",
                             sign => sandboxConfiguration.EnsureTempDirectoriesExistenceBeforePipExecution = sign),
@@ -1005,6 +1011,10 @@ namespace BuildXL
                             sign => schedulingConfiguration.AllowCopySymlink = sign,
                             isUnsafe: true),
                         OptionHandlerFactory.CreateBoolOption(
+                            "unsafe_AllowDuplicateTemporaryDirectory",
+                            sign => engineConfiguration.AllowDuplicateTemporaryDirectory = sign,
+                            isUnsafe: true),
+                        OptionHandlerFactory.CreateBoolOption(
                             "unsafe_DisableCycleDetection",
                             sign => frontEndConfiguration.DisableCycleDetection = sign,
                             isUnsafe: true),
@@ -1155,6 +1165,13 @@ namespace BuildXL
                             (opt) => sandboxConfiguration.UnsafeSandboxConfigurationMutable.PreserveOutputsTrustLevel =
                             CommandLineUtilities.ParseInt32Option(opt, (int)PreserveOutputsTrustValue.Lowest, int.MaxValue),
                             isUnsafe: true),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "unsafe_ProbeDirectorySymlinkAsDirectory",
+                            sign =>
+                            {
+                                sandboxConfiguration.UnsafeSandboxConfigurationMutable.ProbeDirectorySymlinkAsDirectory = sign;
+                            },
+                            isUnsafe: true),
                         // TODO: Remove this!
                         OptionHandlerFactory.CreateBoolOption(
                             "unsafe_SourceFileCanBeInsideOutputDirectory",
@@ -1297,6 +1314,17 @@ namespace BuildXL
                 if (failPipOnFileAccessErrorSet && unsafeUnexpectedFileAccessesAreErrorsSet)
                 {
                     throw CommandLineUtilities.Error(Strings.Args_FileAccessAsErrors_FailPipFlags);
+                }
+
+                if (schedulingConfiguration.DelayedCacheLookupMinMultiplier.HasValue ^ schedulingConfiguration.DelayedCacheLookupMaxMultiplier.HasValue)
+                {
+                    throw CommandLineUtilities.Error("Both /delayCacheLookupMin and /delayCacheLookupMax must be specified.");
+                }
+
+                if (schedulingConfiguration.DelayedCacheLookupMinMultiplier.HasValue
+                    && schedulingConfiguration.DelayedCacheLookupMinMultiplier.Value > schedulingConfiguration.DelayedCacheLookupMaxMultiplier.Value)
+                {
+                    throw CommandLineUtilities.Error("Both /delayCacheLookupMin cannot be bigger than /delayCacheLookupMax.");
                 }
 
                 // Validate logging configuration.
@@ -1472,6 +1500,29 @@ namespace BuildXL
             string[] splittedABTestingArgs = new WinParser().SplitArgs(abTestingArgs);
             var cl2 = new CommandLineUtilities(splittedABTestingArgs);
             IterateArgs(cl2, configuration, specialCaseUnsafeOptions);
+        }
+
+        private void SetEngineConfigurationVersionIfSpecified(CommandLineUtilities cl)
+        {
+            var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (CommandLineUtilities.Option opt in cl.Options)
+            {
+                if (string.Equals(opt.Name, "p", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(opt.Name, "parameter", StringComparison.OrdinalIgnoreCase))
+                {
+                    CommandLineUtilities.ParsePropertyOption(opt, properties);
+                }
+            }
+
+            // We don't check for every option name in the cl.Options because we want to use the same rules of last-one-win as we did for processing arguments.
+            if (properties.TryGetValue(EngineVersion.PropertyName, out string valueString))
+            {
+                if (int.TryParse(valueString, out var result))
+                {
+                    EngineVersion.Version = result;
+                }
+            }
         }
 
         private void IterateArgs(CommandLineUtilities cl, Utilities.Configuration.Mutable.CommandLineConfiguration configuration, HashSet<string> specialCaseUnsafeOptions)
