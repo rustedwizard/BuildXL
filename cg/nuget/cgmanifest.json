@@ -158,6 +158,15 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
+          "Name": "DeduplicationSigned",
+          "Version": "1.0.14"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
           "Name": "Desktop.Analyzers",
           "Version": "1.1.0"
         }
@@ -2670,7 +2679,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "RuntimeContracts",
-          "Version": "0.1.9.1"
+          "Version": "0.1.10"
         }
       }
     },

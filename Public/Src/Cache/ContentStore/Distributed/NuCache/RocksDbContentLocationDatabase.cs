@@ -19,7 +19,6 @@ using BuildXL.Cache.ContentStore.Interfaces.Synchronization;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
-using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Cache.MemoizationStore.Interfaces.Results;
@@ -31,6 +30,8 @@ using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using AbsolutePath = BuildXL.Cache.ContentStore.Interfaces.FileSystem.AbsolutePath;
+
+#nullable enable annotations
 
 namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 {
@@ -84,15 +85,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private enum ClusterStateKeys
         {
-            MaxMachineId
+            MaxMachineId,
+            StoredEpoch
         }
 
         /// <inheritdoc />
         public RocksDbContentLocationDatabase(IClock clock, RocksDbContentLocationDatabaseConfiguration configuration, Func<IReadOnlyList<MachineId>> getInactiveMachines)
             : base(clock, configuration, getInactiveMachines)
         {
-            Contract.Requires(configuration.FlushPreservePercentInMemory >= 0 && configuration.FlushPreservePercentInMemory <= 1);
-            Contract.Requires(configuration.FlushDegreeOfParallelism > 0);
             Contract.Requires(configuration.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep > 0);
 
             _configuration = configuration;
@@ -121,19 +121,22 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <inheritdoc />
         protected override BoolResult InitializeCore(OperationContext context)
         {
-            if (_configuration.FullRangeCompactionInterval != Timeout.InfiniteTimeSpan)
-            {
-                _compactionTimer = new Timer(
-                    _ => FullRangeCompaction(context.CreateNested(nameof(RocksDbContentLocationDatabase), caller: nameof(FullRangeCompaction))),
-                    null,
-                    IsDatabaseWriteable ? _configuration.FullRangeCompactionInterval : Timeout.InfiniteTimeSpan,
-                    Timeout.InfiniteTimeSpan);
-            }
-
             var result = InitialLoad(context, GetActiveSlot(context.TracingContext));
-            if (result && _configuration.TestInitialCheckpointPath != null)
+            if (result)
             {
-                return RestoreCheckpoint(context, _configuration.TestInitialCheckpointPath);
+                if (_configuration.TestInitialCheckpointPath != null)
+                {
+                    return RestoreCheckpoint(context, _configuration.TestInitialCheckpointPath);
+                }
+
+                if (_configuration.FullRangeCompactionInterval != Timeout.InfiniteTimeSpan)
+                {
+                    _compactionTimer = new Timer(
+                        _ => FullRangeCompaction(context.CreateNested(nameof(RocksDbContentLocationDatabase), caller: nameof(FullRangeCompaction))),
+                        null,
+                        IsDatabaseWriteable ? _configuration.FullRangeCompactionInterval : Timeout.InfiniteTimeSpan,
+                        Timeout.InfiniteTimeSpan);
+                }
             }
 
             return result;
@@ -162,15 +165,44 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             var result = Load(context, activeSlot, clean);
 
-            if (!clean && !result.Succeeded)
-            {
-                context.TracingContext.Warning($"Failed to load database without cleaning. Retrying with clean=true. Failure: {result}");
+            bool reload = false;
 
+            if (!clean)
+            {
+                if (result.Succeeded)
+                {
+                    if (IsStoredEpochInvalid(out var epoch))
+                    {
+                        Counters[ContentLocationDatabaseCounters.EpochMismatches].Increment();
+                        context.TraceDebug($"Stored epoch '{epoch}' does not match configured epoch '{_configuration.Epoch}'. Retrying with clean=true.");
+                        reload = true;
+                    }
+                    else
+                    {
+                        Counters[ContentLocationDatabaseCounters.EpochMatches].Increment();
+                    }
+                }
+
+                if (!result.Succeeded)
+                {
+                    context.TracingContext.Warning($"Failed to load database without cleaning. Retrying with clean=true. Failure: {result}");
+                    reload = true;
+                }
+            }
+
+            if (reload)
+            {
                 // If failed when cleaning is disabled, try again with forcing a clean
-                return Load(context, activeSlot, clean: true);
+                return Load(context, GetNextSlot(activeSlot), clean: true);
             }
 
             return result;
+        }
+
+        private bool IsStoredEpochInvalid(out string epoch)
+        {
+            TryGetGlobalEntry(nameof(ClusterStateKeys.StoredEpoch), out epoch);
+            return _configuration.Epoch != epoch;
         }
 
         private BoolResult Load(OperationContext context, StoreSlot activeSlot, bool clean)
@@ -179,9 +211,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             {
                 var storeLocation = GetStoreLocation(activeSlot);
 
-                if (Directory.Exists(storeLocation))
+                if (clean)
                 {
-                    if (clean)
+                    Counters[ContentLocationDatabaseCounters.DatabaseCleans].Increment();
+
+                    if (Directory.Exists(storeLocation))
                     {
                         FileUtilities.DeleteDirectoryContents(storeLocation, deleteRootDirectory: true);
                     }
@@ -189,7 +223,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                 Directory.CreateDirectory(storeLocation);
 
-                Tracer.Info(context, $"Creating RocksDb store at '{storeLocation}'.");
+                Tracer.Info(context, $"Creating RocksDb store at '{storeLocation}'. Clean={clean}, Configured Epoch='{_configuration.Epoch}'");
 
                 var possibleStore = KeyValueStoreAccessor.Open(
                     new KeyValueStoreAccessor.RocksDbStoreArguments()
@@ -309,6 +343,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             try
             {
+                if (IsStoredEpochInvalid(out var storedEpoch))
+                {
+                    SetGlobalEntry(nameof(ClusterStateKeys.StoredEpoch), _configuration.Epoch);
+                    Tracer.Info(context.TracingContext, $"Updated stored epoch from '{storedEpoch}' to '{_configuration.Epoch}'.");
+                }
+
                 var targetDirectory = checkpointDirectory.ToString();
                 Tracer.Info(context.TracingContext, $"Saving content location database checkpoint to '{targetDirectory}'.");
 
@@ -330,6 +370,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             try
             {
+                LogMemoryUsage(context);
+
                 var activeSlot = _activeSlot;
 
                 var newActiveSlot = GetNextSlot(activeSlot);
@@ -360,6 +402,55 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             catch (Exception ex) when (ex.IsRecoverableIoException())
             {
                 return new BoolResult(ex, "Restore checkpoint failed.");
+            }
+        }
+
+        private void LogMemoryUsage(OperationContext context)
+        {
+            if (_keyValueStore != null)
+            {
+                try
+                {
+                    var usage = _keyValueStore.Use(store =>
+                    {
+                        // From the docs:
+                        // 
+                        // There are a couple of components in RocksDB that contribute to memory usage:
+                        // Block cache
+                        // Indexes and bloom filters
+                        // Memtables
+                        // Blocks pinned by iterators
+                        // 
+                        // Since we never create a cache, we don't need to check those.
+
+                        long? indexesAndBloomFilters = null;
+                        long? memtables = null;
+                        if (long.TryParse(store.GetProperty("rocksdb.estimate-table-readers-mem"), out var val))
+                        {
+                            indexesAndBloomFilters = val;
+                        }
+                        if (long.TryParse(store.GetProperty("rocksdb.cur-size-all-mem-tables"), out val))
+                        {
+                            memtables = val;
+                        }
+
+                        return (indexesAndBloomFilters, memtables);
+                    });
+
+                    if (usage.Succeeded)
+                    {
+                        var (indexesAndBloomFilters, memtables) = usage.Result;
+                        Tracer.Debug(context, $"Loading next checkpoint. Current database memory usage: IndexesAndBloomFilters={indexesAndBloomFilters}bytes, Memtables={memtables}bytes");
+                    }
+                    else
+                    {
+                        Tracer.Debug(context, $"Failed to get database memory usage: {usage.Failure.DescribeIncludingInnerFailures()}");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Tracer.Debug(context, $"Failed to get database memory usage. Exception: {e}");
+                }
             }
         }
 
@@ -481,7 +572,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <inheritdoc />
         protected override IEnumerable<(ShortHash key, ContentLocationEntry entry)> EnumerateEntriesWithSortedKeysFromStorage(
             OperationContext context,
-            EnumerationFilter valueFilter,
+            EnumerationFilter? valueFilter,
             bool returnKeysOnly)
         {
             var token = context.Token;
@@ -584,7 +675,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        internal override void Persist(OperationContext context, ShortHash hash, ContentLocationEntry entry)
+        internal override void Persist(OperationContext context, ShortHash hash, ContentLocationEntry? entry)
         {
             if (entry == null)
             {

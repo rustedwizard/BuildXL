@@ -35,11 +35,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         /// <inheritdoc />
         protected override Tracer Tracer { get; } = new ContentSessionTracer(nameof(RedisContentLocationStoreFactory));
 
-        /// <summary>
-        /// Salt to determine keyspace's current version
-        /// </summary>
-        public const string Salt = "V4";
-
         private readonly IConnectionStringProvider /*CanBeNull*/ _contentConnectionStringProvider;
         private readonly IConnectionStringProvider /*CanBeNull*/ _machineConnectionStringProvider;
 
@@ -59,7 +54,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         private readonly IDistributedContentCopier _copier;
 
         /// <nodoc />
-        protected readonly string KeySpace;
+        protected string KeySpace => Configuration.Keyspace;
 
         /// <nodoc />
         protected readonly RedisContentLocationStoreConfiguration Configuration;
@@ -80,11 +75,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
             /*CanBeNull*/IConnectionStringProvider machineLocationConnectionStringProvider,
             IClock clock,
             TimeSpan contentHashBumpTime,
-            string keySpace,
             RedisContentLocationStoreConfiguration configuration,
             IDistributedContentCopier copier)
         {
-            Contract.Requires(!string.IsNullOrWhiteSpace(keySpace));
+            Contract.Requires(configuration != null);
+            Contract.Requires(!string.IsNullOrWhiteSpace(configuration.Keyspace));
 
             _contentConnectionStringProvider = contentConnectionStringProvider;
             _machineConnectionStringProvider = machineLocationConnectionStringProvider;
@@ -92,8 +87,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
             _contentHashBumpTime = contentHashBumpTime;
             _copier = copier;
             _lazyLocalLocationStore = new Lazy<LocalLocationStore>(() => CreateLocalLocationStore());
-            KeySpace = keySpace + Salt;
-            Configuration = configuration ?? RedisContentLocationStoreConfiguration.Default;
+            Configuration = configuration;
 
             if (Configuration.HasReadOrWriteMode(ContentLocationMode.Redis))
             {
@@ -109,8 +103,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
 
             if (Configuration.HasReadOrWriteMode(ContentLocationMode.Redis))
             {
-                var redisDatabaseAdapter = CreateDatabase(RedisDatabaseFactoryForContent);
-                var machineLocationRedisDatabaseAdapter = CreateDatabase(RedisDatabaseFactoryForMachineLocations);
+                var redisDatabaseAdapter = CreateDatabase(RedisDatabaseFactoryForContent, "RedisDatabaseFactoryForContent");
+                var machineLocationRedisDatabaseAdapter = CreateDatabase(RedisDatabaseFactoryForMachineLocations, "RedisDatabaseFactoryForMachineLocations");
 
                 contentLocationStore = new RedisContentLocationStore(
                     redisDatabaseAdapter,
@@ -133,18 +127,25 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         private LocalLocationStore CreateLocalLocationStore()
         {
             Contract.Assert(RedisDatabaseFactoryForRedisGlobalStore != null);
-            var redisDatabaseForGlobalStore = CreateDatabase(RedisDatabaseFactoryForRedisGlobalStore);
-            var secondaryRedisDatabaseForGlobalStore = CreateDatabase(RedisDatabaseFactoryForRedisGlobalStoreSecondary, optional: true);
+            var redisDatabaseForGlobalStore = CreateDatabase(RedisDatabaseFactoryForRedisGlobalStore, "primaryRedisDatabase");
+            var secondaryRedisDatabaseForGlobalStore = CreateDatabase(RedisDatabaseFactoryForRedisGlobalStoreSecondary, "secondaryRedisDatabase",optional: true);
             IGlobalLocationStore globalStore = new RedisGlobalStore(Clock, Configuration, redisDatabaseForGlobalStore, secondaryRedisDatabaseForGlobalStore);
             var localLocationStore = new LocalLocationStore(Clock, globalStore, Configuration, _copier);
             return localLocationStore;
         }
 
-        private RedisDatabaseAdapter CreateDatabase(RedisDatabaseFactory factory, bool optional = false)
+        private RedisDatabaseAdapter CreateDatabase(RedisDatabaseFactory factory, string databaseName, bool optional = false)
         {
             if (factory != null)
             {
-                return new RedisDatabaseAdapter(factory, KeySpace, redisConnectionErrorLimit: Configuration.RedisConnectionErrorLimit);
+                var adapterConfiguration = new RedisDatabaseAdapterConfiguration(
+                    KeySpace,
+                    Configuration.RedisConnectionErrorLimit,
+                    traceOperationFailures: Configuration.TraceRedisFailures,
+                    traceTransientFailures: Configuration.TraceRedisTransientFailures,
+                    databaseName: databaseName);
+
+                return new RedisDatabaseAdapter(factory, adapterConfiguration);
             }
             else
             {

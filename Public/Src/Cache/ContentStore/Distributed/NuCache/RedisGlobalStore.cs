@@ -63,8 +63,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// </summary>
         public RedisKey FullyQualifiedClusterStateKey => _clusterStateKey.UnsafeGetFullKey();
 
+        internal RedisContentLocationStoreConfiguration Configuration => _configuration;
         private readonly RedisContentLocationStoreConfiguration _configuration;
 
+        internal RedisBlobAdapter BlobAdapter => _blobAdapter;
         private readonly RedisBlobAdapter _blobAdapter;
 
         private Role? _role = null;
@@ -628,7 +630,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             return context.PerformOperationAsync(
                 Tracer,
-                () => _blobAdapter.GetBlobAsync(context, hash),
+                () => TaskUtilities.WithTimeoutAsync(_ => _blobAdapter.GetBlobAsync(context, hash), _configuration.GetBlobTimeout, context.Token),
                 traceOperationStarted: false,
                 counter: Counters[GlobalStoreCounters.GetBlob]);
         }

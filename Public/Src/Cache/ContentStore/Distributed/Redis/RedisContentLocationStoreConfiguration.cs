@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Threading;
 using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Utils;
 
@@ -12,6 +13,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
     /// </summary>
     public class RedisContentLocationStoreConfiguration : LocalLocationStoreConfiguration
     {
+        /// <summary>
+        /// The keyspace under which all keys in redis are stored
+        /// </summary>
+        public string Keyspace { get; set; }
+
         /// <summary>
         /// Gets or sets size of batch calls to Redis.
         /// </summary>
@@ -52,7 +58,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         /// <summary>
         /// Default configuration instance.
         /// </summary>
-        public static RedisContentLocationStoreConfiguration Default { get; } = new RedisContentLocationStoreConfiguration();
+        public static RedisContentLocationStoreConfiguration Default { get; } = new RedisContentLocationStoreConfiguration()
+        {
+            Keyspace = "Default:"
+        };
 
         /// <summary>
         /// Configuration of redis garbage collection.
@@ -90,6 +99,21 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         /// This configuration allows us to recreate a connection if there is no successful calls to redis and all the calls are failing with connectivity issues.
         /// </remarks>
         public int RedisConnectionErrorLimit { get; set; } = int.MaxValue;
+
+        /// <summary>
+        /// Whether to trace failures in redis access layer.
+        /// </summary>
+        public bool TraceRedisFailures { get; set; } = false;
+
+        /// <summary>
+        /// Whether to trace transient failures in redis access layer.
+        /// </summary>
+        public bool TraceRedisTransientFailures { get; set; } = false;
+
+        /// <summary>
+        /// Timeout for GetBlob operations.
+        /// </summary>
+        public TimeSpan GetBlobTimeout { get; set; } = Timeout.InfiniteTimeSpan;
 
         /// <summary>
         /// Indicates the mode used when writing content locations

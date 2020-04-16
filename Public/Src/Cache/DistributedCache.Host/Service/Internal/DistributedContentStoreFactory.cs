@@ -21,7 +21,6 @@ using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
-using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
@@ -30,13 +29,17 @@ using BuildXL.Cache.Host.Configuration;
 using BuildXL.Cache.MemoizationStore.Distributed.Stores;
 using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
 using Microsoft.Practices.TransientFaultHandling;
-using Microsoft.WindowsAzure.Storage.Auth;
 using static BuildXL.Cache.Host.Service.Internal.ConfigurationHelper;
 
 namespace BuildXL.Cache.Host.Service.Internal
 {
     public sealed class DistributedContentStoreFactory
     {
+        /// <summary>
+        /// Salt to determine keyspace's current version
+        /// </summary>
+        public const string RedisKeySpaceSalt = "V4";
+
         private readonly RedisContentSecretNames _redisContentSecretNames;
         private readonly string _keySpace;
         private readonly IAbsFileSystem _fileSystem;
@@ -144,7 +147,6 @@ namespace BuildXL.Cache.Host.Service.Internal
                 machineLocationsConnectionStringProvider,
                 _arguments.Overrides.Clock,
                 contentHashBumpTime,
-                _keySpace,
                 configuration: RedisContentLocationStoreConfiguration,
                 copier: _copier
             );
@@ -156,6 +158,7 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             var redisContentLocationStoreConfiguration = new RedisMemoizationStoreConfiguration
             {
+                Keyspace = _keySpace + RedisKeySpaceSalt,
                 LogReconciliationHashes = _distributedSettings.LogReconciliationHashes,
                 RedisBatchPageSize = _distributedSettings.RedisBatchPageSize,
                 BlobExpiryTimeMinutes = _distributedSettings.BlobExpiryTimeMinutes,
@@ -177,6 +180,8 @@ namespace BuildXL.Cache.Host.Service.Internal
             };
 
             ApplyIfNotNull(_distributedSettings.RedisConnectionErrorLimit, v => redisContentLocationStoreConfiguration.RedisConnectionErrorLimit = v);
+            ApplyIfNotNull(_distributedSettings.TraceRedisFailures, v => redisContentLocationStoreConfiguration.TraceRedisFailures = v);
+            ApplyIfNotNull(_distributedSettings.TraceRedisTransientFailures, v => redisContentLocationStoreConfiguration.TraceRedisTransientFailures = v);
 
             ApplyIfNotNull(_distributedSettings.ReplicaCreditInMinutes, v => redisContentLocationStoreConfiguration.ContentLifetime = TimeSpan.FromMinutes(v));
             ApplyIfNotNull(_distributedSettings.MachineRisk, v => redisContentLocationStoreConfiguration.MachineRisk = v);
@@ -185,6 +190,8 @@ namespace BuildXL.Cache.Host.Service.Internal
             ApplyIfNotNull(_distributedSettings.TouchFrequencyMinutes, v => redisContentLocationStoreConfiguration.TouchFrequency = TimeSpan.FromMinutes(v));
             ApplyIfNotNull(_distributedSettings.EvictionMinAgeMinutes, v => redisContentLocationStoreConfiguration.EvictionMinAge = TimeSpan.FromMinutes(v));
             ApplyIfNotNull(_distributedSettings.RetryWindowSeconds, v => redisContentLocationStoreConfiguration.RetryWindow = TimeSpan.FromSeconds(v));
+
+            ApplyIfNotNull(_distributedSettings.RedisGetBlobTimeoutMilliseconds, v => redisContentLocationStoreConfiguration.GetBlobTimeout = TimeSpan.FromMilliseconds(v));
 
             redisContentLocationStoreConfiguration.ReputationTrackerConfiguration.Enabled = _distributedSettings.IsMachineReputationEnabled;
 
@@ -207,14 +214,6 @@ namespace BuildXL.Cache.Host.Service.Internal
                     dbConfig.MetadataGarbageCollectionEnabled = true;
                     dbConfig.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep = _distributedSettings.MaximumNumberOfMetadataEntriesToStore;
                 }
-
-                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseCacheEnabled, v => dbConfig.ContentCacheEnabled = v);
-                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseFlushDegreeOfParallelism, v => dbConfig.FlushDegreeOfParallelism = v);
-                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseFlushTransactionSize, v => dbConfig.FlushTransactionSize = v);
-                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseFlushSingleTransaction, v => dbConfig.FlushSingleTransaction = v);
-                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseFlushPreservePercentInMemory, v => dbConfig.FlushPreservePercentInMemory = v);
-                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseCacheMaximumUpdatesPerFlush, v => dbConfig.CacheMaximumUpdatesPerFlush = v);
-                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseCacheFlushingMaximumInterval, v => dbConfig.CacheFlushingMaximumInterval = v);
 
                 ApplyIfNotNull(
                     _distributedSettings.FullRangeCompactionIntervalMinutes,
@@ -305,30 +304,11 @@ namespace BuildXL.Cache.Host.Service.Internal
         {
             var distributedSettings = arguments.Configuration.DistributedContentSettings;
 
-            ContentAvailabilityGuarantee contentAvailabilityGuarantee;
-            if (string.IsNullOrEmpty(distributedSettings.ContentAvailabilityGuarantee))
-            {
-                contentAvailabilityGuarantee = ContentAvailabilityGuarantee.FileRecordsExist;
-            }
-            else if (!Enum.TryParse(distributedSettings.ContentAvailabilityGuarantee, true, out contentAvailabilityGuarantee))
-            {
-                throw new ArgumentException($"Unable to parse {nameof(distributedSettings.ContentAvailabilityGuarantee)}: [{distributedSettings.ContentAvailabilityGuarantee}]");
-            }
-
-            PinConfiguration pinConfiguration = null;
+            PinConfiguration pinConfiguration = new PinConfiguration();
             if (distributedSettings.IsPinBetterEnabled)
             {
-                pinConfiguration = new PinConfiguration();
-                ApplyIfNotNull(distributedSettings.PinRisk, v => pinConfiguration.PinRisk = v);
                 ApplyIfNotNull(distributedSettings.PinMinUnverifiedCount, v => pinConfiguration.PinMinUnverifiedCount = v);
-                ApplyIfNotNull(distributedSettings.MachineRisk, v => pinConfiguration.MachineRisk = v);
-                ApplyIfNotNull(distributedSettings.FileRisk, v => pinConfiguration.FileRisk = v);
                 ApplyIfNotNull(distributedSettings.MaxIOOperations, v => pinConfiguration.MaxIOOperations = v);
-
-                pinConfiguration.IsPinCachingEnabled = distributedSettings.IsPinCachingEnabled;
-
-                ApplyIfNotNull(distributedSettings.PinCacheReplicaCreditRetentionMinutes, v => pinConfiguration.PinCachePerReplicaRetentionCreditMinutes = v);
-                ApplyIfNotNull(distributedSettings.PinCacheReplicaCreditRetentionDecay, v => pinConfiguration.PinCacheReplicaCreditRetentionFactor = v);
             }
 
             var contentHashBumpTime = TimeSpan.FromMinutes(distributedSettings.ContentHashBumpTimeMinutes);
@@ -361,7 +341,6 @@ namespace BuildXL.Cache.Host.Service.Internal
                 EnableRepairHandling = distributedSettings.IsRepairHandlingEnabled,
                 ContentHashBumpTime = lazyTouchContentHashBumpTime,
                 LocationStoreBatchSize = distributedSettings.RedisBatchPageSize,
-                ContentAvailabilityGuarantee = contentAvailabilityGuarantee,
                 PrioritizeDesignatedLocationsOnCopies = distributedSettings.PrioritizeDesignatedLocationsOnCopies,
                 RestrictedCopyReplicaCount = distributedSettings.RestrictedCopyReplicaCount,
                 CopyAttemptsWithRestrictedReplicas = distributedSettings.CopyAttemptsWithRestrictedReplicas,
@@ -460,6 +439,10 @@ namespace BuildXL.Cache.Host.Service.Internal
                 configuration.Checkpoint.Role = Role.Worker;
             }
 
+            // It is important to set the current role of the service, to have non-null Role column
+            // in all the tracing messages emitted to Kusto.
+            GlobalInfoStorage.SetServiceRole(configuration.Checkpoint.Role?.ToString() ?? "MasterEligible");
+
             var checkpointConfiguration = configuration.Checkpoint;
 
             ApplyIfNotNull(_distributedSettings.MirrorClusterState, value => configuration.MirrorClusterState = value);
@@ -481,6 +464,7 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             configuration.ReconciliationCycleFrequency = TimeSpan.FromMinutes(_distributedSettings.ReconciliationCycleFrequencyMinutes);
             configuration.ReconciliationMaxCycleSize = _distributedSettings.ReconciliationMaxCycleSize;
+            configuration.ReconciliationMaxRemoveHashesCycleSize = _distributedSettings.ReconciliationMaxRemoveHashesCycleSize;
 
             ApplyIfNotNull(_distributedSettings.UseIncrementalCheckpointing, value => configuration.Checkpoint.UseIncrementalCheckpointing = value);
             ApplyIfNotNull(_distributedSettings.IncrementalCheckpointDegreeOfParallelism, value => configuration.Checkpoint.IncrementalCheckpointDegreeOfParallelism = value);
@@ -540,6 +524,8 @@ namespace BuildXL.Cache.Host.Service.Internal
                 eventHubConnectionString: ((PlainTextSecret)GetRequiredSecret(secrets, _distributedSettings.EventHubSecretName)).Secret,
                 consumerGroupName: "$Default",
                 epoch: _keySpace + _distributedSettings.EventHubEpoch);
+
+            dbConfig.Epoch = eventStoreConfiguration.Epoch;
 
             configuration.EventStore = eventStoreConfiguration;
             ApplyIfNotNull(

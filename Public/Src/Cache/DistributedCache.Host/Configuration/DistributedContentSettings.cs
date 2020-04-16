@@ -146,6 +146,16 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(1, int.MaxValue)]
         public int? RedisConnectionErrorLimit { get; set; }
 
+        [DataMember]
+        public bool? TraceRedisFailures { get; set; }
+
+        [DataMember]
+        public bool? TraceRedisTransientFailures { get; set; }
+
+        [DataMember]
+        [Validation.Range(-1, int.MaxValue)]
+        public int? RedisGetBlobTimeoutMilliseconds { get; set; }
+
         // TODO: file a work item to remove the flag!
         [DataMember]
         public bool CheckLocalFiles { get; set; } = false;
@@ -425,10 +435,6 @@ namespace BuildXL.Cache.Host.Configuration
         public bool IsPinBetterEnabled { get; set; } = false;
 
         [DataMember]
-        [Validation.Range(0, 1, minInclusive: false, maxInclusive: false)]
-        public double? PinRisk { get; set; }
-
-        [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? PinMinUnverifiedCount { get; set; }
 
@@ -437,33 +443,8 @@ namespace BuildXL.Cache.Host.Configuration
         public double? MachineRisk { get; set; }
 
         [DataMember]
-        [Validation.Range(0, 1, minInclusive: false, maxInclusive: false)]
-        public double? FileRisk { get; set; }
-
-        [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? MaxIOOperations { get; set; }
-        #endregion
-
-        #region Pin Caching
-        [DataMember]
-        public bool IsPinCachingEnabled { get; set; } = false;
-
-        /// <summary>
-        /// Gets or sets the starting retention time for content hash entries in the pin cache.
-        /// </summary>
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int? PinCacheReplicaCreditRetentionMinutes { get; set; }
-
-        /// <summary>
-        /// Gets or sets the decay applied for replicas to <see cref="PinCacheReplicaCreditRetentionMinutes"/>. Must be between 0 and 0.9.
-        /// For each replica 1...n, with decay d, the additional retention is depreciated by d^n (i.e. only  <see cref="PinCacheReplicaCreditRetentionMinutes"/> * d^n is added to the total retention
-        /// based on the replica).
-        /// </summary>
-        [DataMember]
-        [Validation.Range(0, double.MaxValue, minInclusive: false)]
-        public double? PinCacheReplicaCreditRetentionDecay { get; set; }
         #endregion
 
         #region Local Location Store
@@ -514,7 +495,10 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
-        public int ReconciliationMaxCycleSize { get; set; } = 100000;
+        public int ReconciliationMaxCycleSize { get; set; } = 100_000;
+
+        [DataMember]
+        public int? ReconciliationMaxRemoveHashesCycleSize { get; set; } = null;
 
         [DataMember]
         public bool IsContentLocationDatabaseEnabled { get; set; } = false;
@@ -539,31 +523,6 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseEntryTimeToLiveMinutes { get; set; }
-
-        [DataMember]
-        public bool? ContentLocationDatabaseCacheEnabled { get; set; }
-
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int? ContentLocationDatabaseFlushDegreeOfParallelism { get; set; }
-
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int? ContentLocationDatabaseFlushTransactionSize { get; set; }
-
-        [DataMember]
-        public bool? ContentLocationDatabaseFlushSingleTransaction { get; set; }
-
-        [DataMember]
-        [Validation.Range(0, 1)]
-        public double? ContentLocationDatabaseFlushPreservePercentInMemory { get; set; }
-
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int? ContentLocationDatabaseCacheMaximumUpdatesPerFlush { get; set; }
-
-        [DataMember]
-        public TimeSpan? ContentLocationDatabaseCacheFlushingMaximumInterval { get; set; }
 
         [DataMember]
         public bool ContentLocationDatabaseLogsBackupEnabled { get; set; }

@@ -11,6 +11,7 @@ config({
         ...globR(d`Public/Sdk/UnitTests`, "module.config.dsc"),
         ...globR(d`Private/Wdg`, "module.config.dsc"),
         ...globR(d`Private/QTest`, "module.config.dsc"),
+        ...globR(d`Private/CloudTest`, "module.config.dsc"),
         ...globR(d`Private/InternalSdk`, "module.config.dsc"),
         ...globR(d`Private/Tools`, "module.config.dsc"),
         ...globR(d`Public/Sdk/SelfHost`, "module.config.dsc"),
@@ -69,7 +70,7 @@ config({
                 { id: "CLAP", version: "4.6" },
                 { id: "CLAP-DotNetCore", version: "4.6" },
 
-                { id: "RuntimeContracts", version: "0.1.9.1" },
+                { id: "RuntimeContracts", version: "0.1.10" },
 
                 { id: "Microsoft.NETFramework.ReferenceAssemblies.net451", version: "1.0.0-alpha-5", osSkip: [ "macOS" ]},
                 { id: "Microsoft.NETFramework.ReferenceAssemblies.net461", version: "1.0.0-alpha-5", osSkip: [ "macOS" ]},
@@ -202,6 +203,7 @@ config({
                     dependentPackageIdsToSkip: ["Xamarin.Android.Support.CustomTabs", "Xamarin.Android.Support.v7.AppCompat"] },
 
                 // CloudStore dependencies
+                { id: "DeduplicationSigned", version: "1.0.14" },
                 { id: "Microsoft.Bcl", version: "1.1.10" },
                 { id: "Microsoft.Bcl.Async", version: "1.0.168" },
                 { id: "Microsoft.Bcl.AsyncInterfaces", version: "1.1.0" },
@@ -401,7 +403,19 @@ config({
                     hash: "VSO0:71B123A9120E24D3AB783D277A3649AFB56C97DDB7E79C9568625D51FF29D8CD00",
                     archiveType: "tgz",
                 },
-
+                // Rush tests need an LTS (older) version of NodeJs
+                {
+                    moduleName: "NodeJs.ForRush.win-x64",
+                    url: "https://nodejs.org/dist/v12.16.1/node-v12.16.1-win-x64.zip",
+                    hash: "VSO0:B65327703FB1775A7ABD637D44816CDE13DFE01BD98FF2B1B1DE8DAC46D1567800",
+                    archiveType: "zip",
+                },
+                {
+                    moduleName: "NodeJs.ForRush.osx-x64",
+                    url: "https://nodejs.org/dist/v12.16.1/node-v12.16.1-darwin-x64.tar.gz",
+                    hash: "VSO0:A3DEEC9D7C133120F255195146072452C6D06D24E7F97754F342627C53A5008000",
+                    archiveType: "tgz",
+                },
                 // Electron
                 {
                     moduleName: "Electron.win-x64",

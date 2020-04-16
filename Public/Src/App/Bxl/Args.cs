@@ -725,6 +725,9 @@ namespace BuildXL
                             "minimumDiskSpaceForPipsGb",
                             opt => schedulingConfiguration.MinimumDiskSpaceForPipsGb = CommandLineUtilities.ParseInt32Option(opt, 0, Int32.MaxValue)),
                         OptionHandlerFactory.CreateOption(
+                            "numRetryFailedPipsDueToLowMemory",
+                            opt => schedulingConfiguration.NumRetryFailedPipsDueToLowMemory = CommandLineUtilities.ParseInt32Option(opt, 0, Int32.MaxValue)),
+                        OptionHandlerFactory.CreateOption(
                             "minWorkers",
                             opt => distributionConfiguration.MinimumWorkers = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
@@ -1479,7 +1482,9 @@ namespace BuildXL
             // Sort ABTesting args.
             var randomOption = startupConfiguration.ABTestingArgs.OrderBy(a => a.Key).ToList()[randomNum];
             string abTestingKey = randomOption.Key;
-            string abTestingArgs = randomOption.Value;
+            // If an A/B testing argument is coming from a response file, the option's value might be wrapped in quotes.
+            // Need to remove them so the parser can properly split the string into individual arguments.
+            string abTestingArgs = randomOption.Value.Trim('"');
 
             using (var helper = new HashingHelper(pathTable, false))
             {
