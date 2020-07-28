@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-extern alias Async;
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
@@ -125,8 +124,7 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
                 }
                 else
                 {
-                    context.Debug("DistributedCache Stats:");
-                    stats.CounterSet.LogOrderedNameValuePairs(s => _tracer.Debug(context, s));
+                    _tracer.TraceStatisticsAtShutdown(context, stats.CounterSet, prefix: "DistributedCacheStats:");
                 }
 
                 var innerCacheShutdown = await _innerICache.ShutdownAsync(context);
@@ -236,7 +234,7 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
         }
 
         /// <inheritdoc />
-        public Async::System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
+        public System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
         {
             return _innerICache.EnumerateStrongFingerprints(context);
         }

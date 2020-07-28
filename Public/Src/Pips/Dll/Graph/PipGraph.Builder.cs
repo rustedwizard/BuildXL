@@ -257,6 +257,7 @@ namespace BuildXL.Pips.Graph
                             modules: Modules,
                             pipProducers: PipProducers,
                             opaqueDirectoryProducers: OutputDirectoryProducers,
+                            outputDirectoryExclusions: OutputDirectoryExclusions,
                             outputDirectoryRoots: OutputDirectoryRoots,
                             compositeSharedOpaqueProducers: CompositeOutputDirectoryProducers,
                             sourceSealedDirectoryRoots: SourceSealedDirectoryRoots,
@@ -1393,7 +1394,7 @@ namespace BuildXL.Pips.Graph
                     return false;
                 }
 
-                if (process.PreserveOutputWhitelist.IsValid && process.PreserveOutputWhitelist.Length > 0)
+                if (process.PreserveOutputAllowlist.IsValid && process.PreserveOutputAllowlist.Length > 0)
                 {
                     if (!process.AllowPreserveOutputs)
                     {
@@ -1401,11 +1402,11 @@ namespace BuildXL.Pips.Graph
                         return false;
                     }
 
-                    foreach (var whitelistPath in process.PreserveOutputWhitelist)
+                    foreach (var allowlistpath in process.PreserveOutputAllowlist)
                     {
-                        if (!outputsByPath.ContainsKey(whitelistPath) && !outputDirectorySet.Contains(whitelistPath))
+                        if (!outputsByPath.ContainsKey(allowlistpath) && !outputDirectorySet.Contains(allowlistpath))
                         {
-                            LogEventWithPipProvenance(Logger.ScheduleFailAddPipDueToInvalidPreserveOutputWhitelist, process);
+                            LogEventWithPipProvenance(Logger.ScheduleFailAddPipDueToInvalidPreserveOutputAllowlist, process);
                             return false;
                         }
                     }
@@ -2095,7 +2096,8 @@ namespace BuildXL.Pips.Graph
                                 var existingPipId = m_uniqueTempDirPaths.GetOrAdd(tempDir, process.PipId);
                                 if (process.PipId != existingPipId)
                                 {
-                                    Logger.Log.MultiplePipsUsingSameTemporaryDirectory(LoggingContext, tempDir.ToString(Context.PathTable), process.PipId.ToString(), existingPipId.ToString());
+                                    Pip existingPip = PipTable.HydratePip(existingPipId, PipQueryContext.PipGraphAddPipToPipDependency);
+                                    Logger.Log.MultiplePipsUsingSameTemporaryDirectory(LoggingContext, tempDir.ToString(Context.PathTable), process.GetDescription(Context), existingPip.GetDescription(Context));
                                     return false;
                                 }
                             }
@@ -2110,6 +2112,12 @@ namespace BuildXL.Pips.Graph
                             data: directory,
                             addValueFactory: (p, directory) => (directory.IsSharedOpaque, new HashSet<DirectoryArtifact> { directory }),
                             updateValueFactory: (p, directory, oldValue) => ConstructOutputDirectoryRootElement(oldValue, directory));
+                    }
+
+                    // Add the process exclusions to the all-up collection of exclusions
+                    foreach (var exclusion in process.OutputDirectoryExclusions)
+                    {
+                        OutputDirectoryExclusions.Add(exclusion);
                     }
 
                     // Link to value pip

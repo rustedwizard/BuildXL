@@ -696,6 +696,12 @@ namespace BuildXL.Native.IO
             return s_fileSystem.IsReparsePointActionable(reparsePointType);
         }
 
+        /// <see cref="IFileSystem.IsReparsePointSymbolicLink(ReparsePointType)"/>
+        public static bool IsReparsePointSymbolicLink(ReparsePointType reparsePointType)
+        {
+            return s_fileSystem.IsReparsePointSymbolicLink(reparsePointType);
+        }
+
         /// <see cref="IFileSystem.TryGetReparsePointType(string)"/>
         public static Possible<ReparsePointType> TryGetReparsePointType(string path)
         {
@@ -773,7 +779,35 @@ namespace BuildXL.Native.IO
         /// <see cref="IFileSystem.GetFullPath(string)"/>
         public static string GetFullPath(string path) => s_fileSystem.GetFullPath(path);
 
-#endregion
+        /// <summary>
+        /// Returns a unique temporary file name, and creates a 0-byte file by that name on disk.
+        /// </summary>
+        /// <remarks>
+        /// This method functions like <see cref="Path.GetTempFileName()"/>, i.e., it creates a unqiue temp file and returns its name with full path.
+        /// <see cref="Path.GetTempFileName()"/> uses the combination a hardcoded prefix and a 4-letter random number as the file name. 
+        /// If the file already exist, it will loop to create a new random number until it finds a name of a file doesn't exist. 
+        /// This API is shared. If any of the managed process doesn't clean up their temp files, it will affect our performance and we might possibly get access denial. 
+        /// So we implement this API to replace <see cref="Path.GetTempFileName()"/>. 
+        /// We use Guid.NewGuid().ToString() as part of the file name to make sure the uniqueness.
+        /// </remarks>
+        public static string GetTempFileName()
+        {
+            var path = GetTempPath();
+            using var fileStream = File.Create(path);
+            fileStream.Close();
+            return path;
+        }
+
+        /// <summary>
+        /// Returns a unique temporary file path without creating a file at that location.
+        /// <seealso cref="GetTempFileName" />
+        /// </summary>
+        public static string GetTempPath()
+        {
+            return Path.Combine(Path.GetTempPath(), "bxl_" + Guid.NewGuid().ToString() + ".tmp");
+        }
+
+        #endregion
 
         #region Journaling functions
 
@@ -912,6 +946,12 @@ namespace BuildXL.Native.IO
         public static string GetFinalPathNameByHandle(SafeFileHandle handle, bool volumeGuidPath = false)
         {
             return s_fileSystem.GetFinalPathNameByHandle(handle, volumeGuidPath);
+        }
+        
+        /// <see cref="IFileSystem.TryGetFinalPathNameByPath(string, out string, out int, bool)"/>
+        public static bool TryGetFinalPathNameByPath(string path, out string finalPath, out int nativeErrorCode, bool volumeGuidPath = false)
+        {
+            return s_fileSystem.TryGetFinalPathNameByPath(path, out finalPath, out nativeErrorCode, volumeGuidPath);
         }
 
         /// <see cref="IFileSystem.FlushPageCacheToFilesystem(SafeFileHandle)"/>

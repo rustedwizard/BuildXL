@@ -37,7 +37,7 @@ namespace Test.BuildXL.Scheduler.Utils
         private PipProvenance m_pipProvenance;
         private IEnumerable<FileArtifact> m_directoryDependenciesToConsume;
         private Func<ProcessBuilder, PipData> m_argumentsFactory;
-        private IEnumerable<AbsolutePath> m_preserveOutputWhitelist;
+        private IEnumerable<AbsolutePath> m_preserveOutputAllowlist;
         private FileArtifact m_changeAffectedInputListWrittenFile;
 
         public IEnumerable<FileArtifactWithAttributes> Outputs
@@ -115,9 +115,9 @@ namespace Test.BuildXL.Scheduler.Utils
             return this;
         }
 
-        public ProcessBuilder WithPreserveOutputWhitelist(params AbsolutePath[] paths)
+        public ProcessBuilder WithPreserveOutputAllowlist(params AbsolutePath[] paths)
         {
-            m_preserveOutputWhitelist = paths;
+            m_preserveOutputAllowlist = paths;
             return this;
         }
 
@@ -195,8 +195,6 @@ namespace Test.BuildXL.Scheduler.Utils
 
         public Process Build()
         {
-            Contract.Assert(m_executable != null, "WithExecutable method should be called before calling Build() method");
-
             return new Process(
                     executable: m_executable,
                     workingDirectory: m_workingDirectory,
@@ -225,7 +223,7 @@ namespace Test.BuildXL.Scheduler.Utils
                     additionalTempDirectories: ReadOnlyArray<AbsolutePath>.Empty,
                     options: m_options, 
                     serviceInfo: m_serviceInfo,
-                    preserveOutputWhitelist: ReadOnlyArray<AbsolutePath>.From(m_preserveOutputWhitelist ?? Enumerable.Empty<AbsolutePath>()),
+                    preserveOutputAllowlist: ReadOnlyArray<AbsolutePath>.From(m_preserveOutputAllowlist ?? Enumerable.Empty<AbsolutePath>()),
                     changeAffectedInputListWrittenFile: m_changeAffectedInputListWrittenFile);
         }
 

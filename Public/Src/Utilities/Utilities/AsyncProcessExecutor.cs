@@ -85,9 +85,9 @@ namespace BuildXL.Utilities
         public int ProcessId => m_processId != -1 ? m_processId : (m_processId = Process.Id);
 
         /// <summary>
-        /// Gets active peak memory usage.
+        /// Gets memory counters of the process
         /// </summary>
-        public ulong? GetActivePeakWorkingSet()
+        public ProcessMemoryCountersSnapshot? GetMemoryCountersSnapshot()
         {
             try
             {
@@ -95,8 +95,8 @@ namespace BuildXL.Utilities
                 {
                     return null;
                 }
-
-                return Dispatch.GetActivePeakWorkingSet(Process.Handle, ProcessId);
+                
+                return Dispatch.GetMemoryCountersSnapshot(Process.Handle, ProcessId);
             }
 #pragma warning disable ERP022 // Unobserved exception in generic exception handler
             catch
@@ -145,6 +145,19 @@ namespace BuildXL.Utilities
             if (!System.IO.File.Exists(Process.StartInfo.FileName))
             {
                 ThrowBuildXLException($"Process creation failed: File '{Process.StartInfo.FileName}' not found", new Win32Exception(0x2));
+            }
+
+            if (!string.IsNullOrWhiteSpace(Process.StartInfo.WorkingDirectory) &&
+                !System.IO.Directory.Exists(Process.StartInfo.WorkingDirectory))
+            {
+                try
+                {
+                    System.IO.Directory.CreateDirectory(Process.StartInfo.WorkingDirectory);
+                }
+                catch (Exception e)
+                {
+                    ThrowBuildXLException($"Process creation failed: Working directory '{Process.StartInfo.WorkingDirectory}' cannot be created", e);
+                }
             }
 
             try

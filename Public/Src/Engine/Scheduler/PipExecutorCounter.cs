@@ -754,11 +754,6 @@ namespace BuildXL.Scheduler
         IpcPipsSucceededRemotely,
 
         /// <summary>
-        /// Counts the number of times processes were killed and retried due to resource limits
-        /// </summary>
-        ProcessRetriesDueToResourceLimits,
-
-        /// <summary>
         /// The end-to-end time spent running a process, including any possible retries
         /// </summary>
         [CounterType(CounterType.Stopwatch)]
@@ -805,6 +800,38 @@ namespace BuildXL.Scheduler
         /// </summary>
         [CounterType(CounterType.Stopwatch)]
         QueryRamUsageDuration,
+
+        /// <summary>
+        /// The time spent emptying the working set
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        ResumeProcessDuration,
+
+        /// <summary>
+        /// The time spent emptying the working set
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        EmptyWorkingSetDuration,
+
+        /// <summary>
+        /// The number of successful EmptyWorkingSet operations
+        /// </summary>
+        EmptyWorkingSetSucceeded,
+
+        /// <summary>
+        /// The number of times pips empty their workingset more than once. 
+        /// </summary>
+        EmptyWorkingSetSucceededMoreThanOnce,
+
+        /// <summary>
+        /// Counts the number of times processes were killed and retried due to resource limits
+        /// </summary>
+        ProcessRetriesDueToResourceLimits,
+
+        /// <summary>
+        /// Counts the number of times processes were killed and retried due to suspend or resume failures
+        /// </summary>
+        ProcessRetriesDueToSuspendOrResumeFailure,
 
         /// <summary>
         /// The time spent cancelling processes due exceeding resource limits
@@ -965,10 +992,21 @@ namespace BuildXL.Scheduler
         FullGraphDirectoryEnumerations,
 
         /// <summary>
+        /// The number of minimal graph with alien files directory enumerations.
+        /// </summary>
+        MinimalGraphWithAlienFilesDirectoryEnumerations,
+
+        /// <summary>
         /// The time spent to enumerate the directories via full graph 
         /// </summary>
         [CounterType(CounterType.Stopwatch)]
         FullGraphDirectoryEnumerationsDuration,
+
+        /// <summary>
+        /// The time spent to enumerate the directories via minimal graph with alien files
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        MinimalGraphWithAlienFilesDirectoryEnumerationsDuration,
 
         /// <summary>
         /// The number of existing directory probes in pathsets
@@ -1198,10 +1236,24 @@ namespace BuildXL.Scheduler
         CriticalLowCommitMemory,
 
         /// <summary>
+        /// Number of times when we cancel a suspended pip due to the lack of active processes.
+        /// </summary>
+        CancelSuspendedPipDueToNoRunningProcess,
+
+        /// <summary>
         /// Number of times ExistingFileProbe was reclassified as AbsentPathProbe due to path being both
         /// an explicitly declared output and inside a shared opaque directory.
         /// </summary>
         ExistingFileProbeReclassifiedAsAbsentForNonExistentSharedOpaqueOutput,
+
+        /// <summary>
+        /// Time spent computing which files must be included in a composite SOD. Includes:
+        /// - getting the list of files for each directory inside of a composite SOD
+        /// - deduping this list
+        /// - applying a filter (if specified)
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        ComputeCompositeSharedOpaqueContentDuration,
     }
 
     /// <summary>

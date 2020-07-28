@@ -180,6 +180,9 @@
   <data name="HelpText_DisplayHelp_BreakOnUnexpectedFileAccess" xml:space="preserve">
     <value>Break into the debugger when {ShortProductName} detects that a tool accesses a file that was not declared in the specification dependencies. This option is useful when developing a new tool or SDKs using these tools. Defaults to off.</value>
   </data>
+  <data name="HelpText_DisplayHelp_MaxNumPipTelemetryBatches" xml:space="preserve">
+    <value>Specifies the maximum number of batched messages to be sent to telemetry, default set to 10 messages.</value>
+  </data>
   <data name="HelpText_DisplayHelp_LogsDirectory" xml:space="preserve">
     <value>Specifies the path to the logs directory.</value>
   </data>
@@ -246,7 +249,7 @@
   <data name="HelpText_DisplayHelp_CacheDirectory" xml:space="preserve">
     <value>Specifies the root directory for the incremental artifact cache (short form: /cd)</value>
   </data>
-   <data name="HelpText_DisplayHelp_AllowDuplicateTemporaryDirectory" xml:space="preserve">
+  <data name="HelpText_DisplayHelp_AllowDuplicateTemporaryDirectory" xml:space="preserve">
     <value>When enabled, pips with duplicate temporary directories are allowed. Defaults to false.</value>
   </data>
   <data name="HelpText_DisplayHelp_Incremental" xml:space="preserve">
@@ -287,6 +290,9 @@
   </data>
   <data name="HelpText_DisplayHelp_IgnoreReparsePoints" xml:space="preserve">
     <value>When enabled, {ShortProductName} will not track reparse points. This might lead to incorrect builds because some file accesses will not be enforced. Any reparse points (symlinks and mount points) will not be followed.</value>
+  </data>
+  <data name="HelpText_DisplayHelp_IgnoreFullSymlinkResolving" xml:space="preserve">
+    <value>When enabled, {ShortProductName} will not fully resolve paths containing any sort of symbolic links (directory + file symbolic links). This might lead to incorrect builds because some file accesses will not be enforced or tracked at all.</value>
   </data>
   <data name="HelpText_DisplayHelp_IgnorePreloadedDlls" xml:space="preserve">
     <value>When enabled, {ShortProductName} will not report Dlls loaded before Detours was started. This might lead to incorrect builds because some file accesses will not be enforced.</value>
@@ -796,6 +802,9 @@ Example: ad2d42d2ec5d2ca0c0b7ad65402d07c7ef40b91e</value>
   <data name="HelpText_DisplayHelp_TrackBuildsInUserFolder" xml:space="preserve">
     <value>When enabled, {ShortProductName} will log every build invocation in the users folder so the viewer and analyzers can use that to figure out what to use. Defaults to on.</value>
   </data>
+  <data name="HelpText_DisplayHelp_TrackGvfsProjections" xml:space="preserve">
+    <value>When enabled, {ShortProductName} will track every .gvfs/GVFS_projection file found in any readable mount and disable features that depend on USN journal scanning whenever any of those files change. Defaults to off.</value>
+  </data>
   <data name="HelpText_DisplayHelp_TrackMethodInvocations" xml:space="preserve">
     <value>When enabled, {ShortProductName} captures most frequently invoked {ShortScriptName} methods. Defaults to off.</value>
   </data>
@@ -877,12 +886,6 @@ Example: ad2d42d2ec5d2ca0c0b7ad65402d07c7ef40b91e</value>
   <data name="HelpText_DisplayHelp_AllowFetchingCachedGraphFromContentCache" xml:space="preserve">
     <value>Allow fetching cached graph from content cache. Defaults to on.</value>
   </data>
-  <data name="HelpText_DisplayHelp_SymlinkDefinitionFile" xml:space="preserve">
-    <value>Specifies the file containing mappings from symlinks to their targets, and those symlinks will be created, if necessary, before pip executions</value>
-  </data>
-  <data name="HelpText_DisplayHelp_LazySymlinkCreation" xml:space="preserve">
-    <value>Creates symlink from the symlink definition file lazily. Defaults to off.</value>
-  </data>
   <data name="HelpText_DisplayHelp_CompressGraphFiles" xml:space="preserve">
     <value>When enabled, graph files are compressed.</value>
   </data>
@@ -897,12 +900,6 @@ Example: ad2d42d2ec5d2ca0c0b7ad65402d07c7ef40b91e</value>
   </data>
   <data name="HelpText_DisplayHelp_UseFileContentTablePathMappings" xml:space="preserve">
     <value>Use file content table path mappings to avoid opening handles for hashing files already in the table. Defaults to off.</value>
-  </data>
-  <data name="HelpText_DisplayHelp_PopulateSymlinkDirectory" xml:space="preserve">
-    <value>Specifies a directory to eagerly populate with symlinks when symlink definition file and lazy symlink creation are enabled.</value>
-  </data>
-  <data name="HelpText_DisplayHelp_UnexpectedSymlinkAccessReportingMode" xml:space="preserve">
-    <value>Specifies the when unexpected symlink file/directory accesses are reported as warnings: None, ExecutionOnly (only for executed processes), All (executed and cached process observations report unexpected accesses). Default: All. NOTE: This is only enabled when a symlink definition file is provided.</value>
   </data>
   <data name="HelpText_DisplayHelp_DisableGraphPostValidation" xml:space="preserve">
     <value>Disables post validation of graph construction. Defaults to on.</value>
@@ -1047,5 +1044,11 @@ Example: ad2d42d2ec5d2ca0c0b7ad65402d07c7ef40b91e</value>
   </data>
   <data name="HelpText_DisplayHelp_EnableHistoricCommitMemoryProjection" xml:space="preserve">
     <value>Controls whether Scheduler should use commit memory projection based on historic commit memory usage.</value>
+  </data>
+  <data name="HelpText_DisplayHelp_VmConcurrencyLimit" xml:space="preserve">
+    <value>Max number of processes executed in VM. Value 0 means unbounded. Defaults to 0.</value>
+  </data>
+  <data name="HelpText_DisplayHelp_ManageMemoryMode" xml:space="preserve">
+    <value>Specifies the mode to manage memory under pressure. Defaults to CancellationRam where {ShortProductName} attemps to cancel processes. EmptyWorkingSet mode will empty working set of processes instead of cancellation. Suspend mode will suspend processes to free memory.</value>
   </data>
 </root>

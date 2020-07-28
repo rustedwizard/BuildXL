@@ -209,6 +209,26 @@ namespace Transformer {
          * File to write the change affected input list of the pip before it execute.
          */
         changeAffectedInputListWrittenFile?: Path;
+
+        /**
+         * When this option is set to true bxl cannot cancel the pip due to correctness reasons.
+         * Defaults to false. 
+         */
+        uncancellable?: boolean;
+
+        /**
+         * Defines a collection of directory scopes that will be excluded from being part of opaque directory outputs
+         * Any artifact produced under these directories won't be considered part of any opaque (shared or exclusive) directory
+         * produced by this process
+         */
+        outputDirectoryExclusions?: Directory[];
+
+        /**
+         * When set, the execution of a process is considered to have failed if the process writes to standard error, regardless
+         * of the exit code.
+         * Defaults to false.
+         */
+        writingToStandardErrorFailsExecution?: boolean
     }
 
     @@public
@@ -248,7 +268,8 @@ namespace Transformer {
          * If the list is empty, all file and directory outputs are preserved. 
          * If the list is not empty, only given paths are preserved and the rest is deleted
          */
-        preserveOutputWhitelist?: (File | Directory)[];
+		preserveOutputAllowlist?: (File | Directory)[];
+        preserveOutputWhitelist?: (File | Directory)[]; // compatibility
         incrementalTool?: boolean;
 
         /**

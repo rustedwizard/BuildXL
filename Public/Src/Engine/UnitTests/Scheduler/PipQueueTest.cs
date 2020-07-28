@@ -333,7 +333,7 @@ namespace Test.BuildXL.Scheduler
                     cache: new PipTwoPhaseCache(LoggingContext, Cache, context, PathExpander),
                     unsafeConfiguration: configuration.Sandbox.UnsafeSandboxConfiguration,
                     preserveOutputsSalt: new PreserveOutputsInfo(ContentHashingUtilities.CreateRandom(), Configuration.Sandbox.UnsafeSandboxConfiguration.PreserveOutputsTrustLevel),
-                    fileAccessWhitelist: FileAccessWhitelist,
+                    fileAccessAllowlist: FileAccessAllowlist,
                     directoryMembershipFingerprinter: this,
                     pathExpander: PathExpander,
                     executionLog: null,
@@ -402,7 +402,7 @@ namespace Test.BuildXL.Scheduler
 
             public FileContentTable FileContentTable { get; }
 
-            public FileAccessWhitelist FileAccessWhitelist => null;
+            public FileAccessAllowlist FileAccessAllowlist => null;
 
             /// <summary>
             /// In-memory cache (not the real one)
@@ -427,6 +427,9 @@ namespace Test.BuildXL.Scheduler
 
             /// <inheritdoc />
             public bool IsTerminating => false;
+
+            /// <inheritdoc />
+            public bool InputsLazilyMaterialized => false;
 
             public DirectoryFingerprint? TryComputeDirectoryFingerprint(
                 AbsolutePath directoryPath, 
@@ -647,6 +650,8 @@ namespace Test.BuildXL.Scheduler
             public VmInitializer VmInitializer { get; }
 
             public ITempCleaner TempCleaner { get; }
+
+            public SymlinkedAccessResolver SymlinkedAccessResolver => null;
         }
     }
 

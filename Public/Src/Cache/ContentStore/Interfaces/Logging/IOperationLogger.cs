@@ -64,9 +64,43 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Logging
     }
 
     /// <summary>
-    /// Represents an operation result used for tracing purposes.
+    /// Interface that contains the core data about the operation (for both starts and stops).
     /// </summary>
-    public readonly struct OperationResult
+    public interface IOperationInfo
+    {
+        /// <summary>
+        /// Message to log.
+        /// </summary>
+        string Message { get; }
+
+        /// <summary>
+        /// Name of an operation.
+        /// </summary>
+        string OperationName { get; }
+
+        /// <summary>
+        /// Name of a tracer (i.e. the origin of the message/operation).
+        /// </summary>
+        string TracerName { get; } // Component. WARNING: CloudBuild-sided change required to rename
+
+        /// <nodoc />
+        OperationKind OperationKind { get; }
+
+        /// <summary>
+        /// Tracing severity of the result.
+        /// </summary>
+        Severity Severity { get; }
+
+        /// <summary>
+        /// Id of an operation.
+        /// </summary>
+        string OperationId { get; }
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    public readonly struct LogMessage : IOperationInfo
     {
         /// <summary>
         /// Message to log.
@@ -81,7 +115,115 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Logging
         /// <summary>
         /// Name of a tracer (i.e. the origin of the message/operation).
         /// </summary>
-        public string TracerName { get; } // Component
+        public string TracerName { get; } // Component. WARNING: CloudBuild-sided change required to rename
+
+        /// <nodoc />
+        public OperationKind OperationKind { get; }
+
+        /// <summary>
+        /// Tracing severity of the result.
+        /// </summary>
+        public Severity Severity { get; }
+
+        /// <summary>
+        /// Id of an operation.
+        /// </summary>
+        public string OperationId { get; }
+
+        /// <nodoc />
+        public LogMessage(
+            string message,
+            string operationName,
+            string tracerName,
+            OperationKind operationKind,
+            string operationId,
+            Severity severity)
+        {
+            Contract.RequiresNotNullOrEmpty(message, "message should not be null or empty");
+
+            Message = message;
+            OperationName = operationName;
+            TracerName = tracerName;
+            OperationKind = operationKind;
+            Severity = severity;
+            OperationId = operationId;
+        }
+    }
+
+    /// <summary>
+    /// Contains information about the operation start.
+    /// </summary>
+    public readonly struct OperationStarted : IOperationInfo
+    {
+        /// <summary>
+        /// Message to log.
+        /// </summary>
+        public string Message { get; }
+
+        /// <summary>
+        /// Name of an operation.
+        /// </summary>
+        public string OperationName { get; }
+
+        /// <summary>
+        /// Name of a tracer (i.e. the origin of the message/operation).
+        /// </summary>
+        public string TracerName { get; } // Component. WARNING: CloudBuild-sided change required to rename
+
+        /// <nodoc />
+        public OperationKind OperationKind { get; }
+
+        /// <summary>
+        /// Tracing severity of the result.
+        /// </summary>
+        public Severity Severity { get; }
+
+        /// <summary>
+        /// Id of an operation.
+        /// </summary>
+        public string OperationId { get; }
+
+        /// <nodoc />
+        public OperationStarted(
+            string message,
+            string operationName,
+            string tracerName,
+            OperationKind operationKind,
+            string operationId,
+            Severity severity)
+        {
+            Contract.RequiresNotNullOrEmpty(message, "message should not be null or empty");
+            Contract.RequiresNotNullOrEmpty(operationName, "operationName should not be null or empty");
+            Contract.RequiresNotNullOrEmpty(tracerName, "tracerName should not be null or empty");
+
+            Message = message;
+            OperationName = operationName;
+            TracerName = tracerName;
+            OperationKind = operationKind;
+            Severity = severity;
+            OperationId = operationId;
+        }
+    }
+
+    /// <summary>
+    /// Represents an operation result used for tracing purposes.
+    /// </summary>
+    public readonly struct OperationResult : IOperationInfo
+    {
+        /// <summary>
+        /// Message to log.
+        /// </summary>
+        public string Message { get; }
+
+        /// <summary>
+        /// Name of an operation.
+        /// </summary>
+        public string OperationName { get; }
+
+        /// <summary>
+        /// Name of a tracer (i.e. the origin of the message/operation).
+        /// </summary>
+        public string TracerName { get; } // Component. WARNING: CloudBuild-sided change required to rename
 
         /// <summary>
         /// The result of an operation.
@@ -170,7 +312,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Logging
         /// <summary>
         /// Name of a tracer (i.e. the origin of the message/operation).
         /// </summary>
-        public string TracerName { get; }
+        public string TracerName { get; } // Component. WARNING: CloudBuild-sided change required to rename
 
         /// <nodoc />
         public Metric(string name, long value, string tracerName)

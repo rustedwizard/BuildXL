@@ -161,12 +161,12 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 // stream. To avoid that, exit early instead.
                 if (headers.Count == 0)
                 {
-                    return new CopyFileResult(CopyFileResult.ResultCode.SourcePathError, $"Failed to connect to copy server {Key.Host} at port {Key.GrpcPort}.");
+                    return new CopyFileResult(CopyResultCode.ServerUnavailable, $"Failed to connect to copy server {Key.Host} at port {Key.GrpcPort}.");
                 }
 
                 // Parse header collection.
-                string exception = null;
-                string message = null;
+                string? exception = null;
+                string? message = null;
                 CopyCompression compression = CopyCompression.None;
                 foreach (Metadata.Entry header in headers)
                 {
@@ -191,9 +191,9 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                     switch (exception)
                     {
                         case "ContentNotFound":
-                            return new CopyFileResult(CopyFileResult.ResultCode.FileNotFoundError, message);
+                            return new CopyFileResult(CopyResultCode.FileNotFoundError, message);
                         default:
-                            return new CopyFileResult(CopyFileResult.ResultCode.SourcePathError, message);
+                            return new CopyFileResult(CopyResultCode.UnknownServerError, message);
                     }
                 }
 
@@ -205,7 +205,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 }
                 catch (Exception targetException)
                 {
-                    return new CopyFileResult(CopyFileResult.ResultCode.DestinationPathError, targetException);
+                    return new CopyFileResult(CopyResultCode.DestinationPathError, targetException);
                 }
 
                 // Copy the content to the target stream.
@@ -239,11 +239,11 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             {
                 if (r.StatusCode == StatusCode.Unavailable)
                 {
-                    return new CopyFileResult(CopyFileResult.ResultCode.SourcePathError, r);
+                    return new CopyFileResult(CopyResultCode.ServerUnavailable, r);
                 }
                 else
                 {
-                    return new CopyFileResult(CopyFileResult.ResultCode.Unknown, r);
+                    return new CopyFileResult(CopyResultCode.Unknown, r);
                 }
             }
         }
@@ -277,14 +277,14 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         /// <summary>
         /// Pushes content to another machine.
         /// </summary>
-        public async Task<PushFileResult> PushFileAsync(OperationContext context, ContentHash hash, Func<Task<Result<Stream>>> source)
+        public async Task<PushFileResult> PushFileAsync(OperationContext context, ContentHash hash, Stream stream)
         {
             try
             {
                 var pushRequest = new PushRequest(hash, context.TracingContext.Id);
                 var headers = pushRequest.GetMetadata();
 
-                var call = _client.PushFile(headers, cancellationToken: context.Token);
+                using var call = _client.PushFile(headers, cancellationToken: context.Token);
                 var requestStream = call.RequestStream;
 
                 var responseHeaders = await call.ResponseHeadersAsync;
@@ -299,27 +299,44 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 var pushResponse = PushResponse.FromMetadata(responseHeaders);
                 if (!pushResponse.ShouldCopy)
                 {
-                    context.TraceDebug($"{nameof(PushFileAsync)}: copy of {hash.ToShortString()} was skipped.");
-                    return PushFileResult.Rejected();
+                    return PushFileResult.Rejected(pushResponse.Rejection);
                 }
 
-                var streamResult = await source();
+                // If we get a response before we finish streaming, it must be that the server cancelled the operation.
+                using var serverIsDoneSource = new CancellationTokenSource();
+                var pushCancellationToken = CancellationTokenSource.CreateLinkedTokenSource(serverIsDoneSource.Token, context.Token).Token;
 
-                if (!streamResult)
-                {
-                    await requestStream.CompleteAsync();
-                    return new PushFileResult(streamResult, "Failed to retrieve source stream.");
-                }
-                
-                using (var stream = streamResult.Value)
-                {
-                    await StreamContentAsync(stream, new byte[_bufferSize], requestStream, context.Token);
-                }
+                var responseStream = call.ResponseStream;
+                var responseMoveNext = responseStream.MoveNext(context.Token);
+
+                var responseCompletedTask = responseMoveNext.ContinueWith(
+                    t =>
+                    {
+                        // It is possible that the next operation in this method will fail
+                        // causing stack unwinding that will dispose serverIsDoneSource.
+                        //
+                        // Then when responseMoveNext is done serverIsDoneSource is already disposed and
+                        // serverIsDoneSource.Cancel will throw ObjectDisposedException.
+                        // This exception is not observed because the stack could've been unwound before
+                        // the result of this method is awaited.
+                        IgnoreObjectDisposedException(() => serverIsDoneSource.Cancel());
+                    });
+
+                await StreamContentAsync(stream, new byte[_bufferSize], requestStream, pushCancellationToken);
+
+                context.Token.ThrowIfCancellationRequested();
 
                 await requestStream.CompleteAsync();
 
-                var responseStream = call.ResponseStream;
-                await responseStream.MoveNext(context.Token);
+                await responseCompletedTask;
+
+                // Make sure that we only attempt to read response when it is available.
+                var responseIsAvailable = await responseMoveNext;
+                if (!responseIsAvailable)
+                {
+                    return new PushFileResult("Failed to get final response.");
+                }
+
                 var response = responseStream.Current;
 
                 return response.Header.Succeeded
@@ -329,6 +346,17 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             catch (RpcException r)
             {
                 return new PushFileResult(r);
+            }
+        }
+
+        private static void IgnoreObjectDisposedException(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (ObjectDisposedException)
+            {
             }
         }
 
@@ -344,7 +372,10 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
 
             while (true)
             {
-                ct.ThrowIfCancellationRequested();
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
 
                 if (chunkSize == 0) { break; }
 

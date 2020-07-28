@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.Globalization;
@@ -315,8 +316,9 @@ namespace BuildXL.Pips
         public bool TryComposeSharedOpaqueDirectory(
             AbsolutePath directoryRoot,
             IReadOnlyList<DirectoryArtifact> contents,
+            SealDirectoryContentFilter? contentFilter,
             [CanBeNull] string description,
-            string[] tags,
+            [CanBeNull] string[] tags,
             out DirectoryArtifact sharedOpaqueDirectory)
         {
             Contract.Requires(directoryRoot.IsValid);
@@ -330,7 +332,9 @@ namespace BuildXL.Pips
 
             PipData usage = PipDataBuilder.CreatePipData(Context.StringTable, string.Empty, PipDataFragmentEscaping.NoEscaping, description != null
                 ? new PipDataAtom[] { description }
-                : new PipDataAtom[] { "'", directoryRoot, " [", contents.Count.ToString(CultureInfo.InvariantCulture), " shared opaque directories]" });
+                : new PipDataAtom[] { "'", directoryRoot, "' [", contents.Count.ToString(CultureInfo.InvariantCulture),
+                    " shared opaque directories, filter: ",
+                    contentFilter.HasValue ? $"'{contentFilter.Value.Regex}' (kind: {Enum.GetName(typeof(SealDirectoryContentFilter.ContentFilterKind),     contentFilter.Value.Kind)})" : "''",  "]" });
 
             sharedOpaqueDirectory = PipGraph.ReserveSharedOpaqueDirectory(directoryRoot);
 
@@ -338,7 +342,8 @@ namespace BuildXL.Pips
                     directoryRoot,
                     contents,
                     CreatePipProvenance(usage),
-                    ToStringIds(tags));
+                    ToStringIds(tags),
+                    contentFilter);
 
             // The seal directory is ready to be initialized, since the directory artifact has been reserved already
             pip.SetDirectoryArtifact(sharedOpaqueDirectory);

@@ -357,22 +357,6 @@ namespace BuildXL.Engine
                             return cacheGraphStats;
                         }
 
-                        AsyncOut<AbsolutePath> symlinkFileLocation = new AsyncOut<AbsolutePath>();
-                        if (!SymlinkDefinitionFileProvider.TryFetchWorkerSymlinkFileAsync(
-                            outerLoggingContext,
-                            Context.PathTable,
-                            cacheForWorker,
-                            Configuration.Layout,
-                            m_workerService,
-                            symlinkFileLocation).Result)
-                        {
-                            cacheGraphStats.CacheMissReason = GraphCacheMissReason.NoFingerprintFromMaster;
-                            cacheGraphStats.MissReason = cacheGraphStats.CacheMissReason;
-                            return cacheGraphStats;
-                        }
-
-                        m_workerSymlinkDefinitionFile = symlinkFileLocation.Value;
-
                         // Success. Populate the stats
                         cacheGraphStats.WasHit = true;
                         cacheGraphStats.WorkerHit = true;
@@ -487,12 +471,20 @@ namespace BuildXL.Engine
             EngineState engineState,
             InputTracker.InputChanges inputChanges)
         {
-            Tuple<PipGraph, EngineContext> t = EngineSchedule.LoadPipGraphAsync(
-                Context,
-                serializer,
-                Configuration,
-                loggingContext,
-                engineState).GetAwaiter().GetResult();
+            Tuple<PipGraph, EngineContext> t = null;
+            try
+            {
+                t = EngineSchedule.LoadPipGraphAsync(
+                    Context,
+                    serializer,
+                    Configuration,
+                    loggingContext,
+                    engineState).GetAwaiter().GetResult();
+            }
+            catch (BuildXLException e)
+            {
+                Logger.Log.FailedReloadPipGraph(loggingContext, e.ToString());
+            }
 
             if (t == null)
             {
@@ -571,22 +563,28 @@ namespace BuildXL.Engine
             InputTracker.InputChanges inputChanges,
             string buildEngineFingerprint)
         {
-            Tuple<EngineSchedule, EngineContext, IConfiguration> t = EngineSchedule.LoadAsync(
-                Context,
-                serializer,
-                cacheInitializationTask,
-                FileContentTable,
-                journalState,
-                Configuration,
-                loggingContext,
-                m_collector,
-                m_directoryTranslator,
-                engineState,
-                symlinkDefinitionFile: IsDistributedWorker ? 
-                    m_workerSymlinkDefinitionFile.Value :
-                    Configuration.Layout.SymlinkDefinitionFile,
-                tempCleaner: m_tempCleaner,
-                buildEngineFingerprint).GetAwaiter().GetResult();
+            Tuple<EngineSchedule, EngineContext, IConfiguration> t = null;
+
+            try
+            {
+                t = EngineSchedule.LoadAsync(
+                    Context,
+                    serializer,
+                    cacheInitializationTask,
+                    FileContentTable,
+                    journalState,
+                    Configuration,
+                    loggingContext,
+                    m_collector,
+                    m_directoryTranslator,
+                    engineState,
+                    tempCleaner: m_tempCleaner,
+                    buildEngineFingerprint).GetAwaiter().GetResult();
+            }
+            catch (BuildXLException e)
+            {
+                Logger.Log.FailedReloadPipGraph(loggingContext, e.ToString());
+            }
 
             if (t == null)
             {
@@ -602,8 +600,12 @@ namespace BuildXL.Engine
             Configuration = t.Item3;
 
             // Copy the graph files to the session output
-            m_executionLogGraphCopy = TryCreateHardlinksToScheduleFilesInSessionFolder(loggingContext, serializer);
-            m_previousInputFilesCopy = TryCreateHardlinksToPreviousInputFilesInSessionFolder(loggingContext, serializer);
+            if (Configuration.Distribution.BuildRole != DistributedBuildRoles.Worker)
+            {
+                // No need to link these files to the logs directory on workers since they are redundant with what's on the master
+                m_executionLogGraphCopy = TryCreateHardlinksToScheduleFilesInSessionFolder(loggingContext, serializer);
+                m_previousInputFilesCopy = TryCreateHardlinksToPreviousInputFilesInSessionFolder(loggingContext, serializer);
+            }
 
             return GraphReuseResult.CreateForFullReuse(t.Item1, inputChanges);
         }

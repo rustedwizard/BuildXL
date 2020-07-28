@@ -10,6 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Engine.Cache;
+using BuildXL.Engine.Cache.Serialization;
+using BuildXL.Native.IO;
 using BuildXL.Pips;
 using BuildXL.Pips.DirectedGraph;
 using BuildXL.Pips.Graph;
@@ -22,6 +24,7 @@ using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using static BuildXL.Scheduler.Tracing.CacheMissAnalysisUtilities;
 using static BuildXL.Scheduler.Tracing.FingerprintStore;
 using static BuildXL.Utilities.FormattableStringEx;
 
@@ -49,6 +52,7 @@ namespace BuildXL.Scheduler.Tracing
             using (logTarget.Counters.StartStopwatch(FingerprintStoreCounters.InitializeCacheMissAnalysisDuration))
             {
                 var option = configuration.Logging.CacheMissAnalysisOption;
+                string downLoadedPriviousFingerprintStoreSavedPath = null;
                 if (option.Mode == CacheMissMode.Disabled)
                 {
                     return null;
@@ -80,6 +84,7 @@ namespace BuildXL.Scheduler.Tracing
                             if (result.Succeeded && result.Result)
                             {
                                 path = cacheSavePath.ToString(context.PathTable);
+                                downLoadedPriviousFingerprintStoreSavedPath = path;
                                 break;
                             }
                         }
@@ -109,8 +114,8 @@ namespace BuildXL.Scheduler.Tracing
                         possibleStore.Result,
                         graph,
                         runnablePipPerformance,
-                        configuration.Logging.CacheMissDiffFormat,
-                        configuration.Logging.CacheMissBatch,
+                        configuration,
+                        downLoadedPriviousFingerprintStoreSavedPath,
                         testHooks: testHooks);
                 }
 
@@ -127,8 +132,10 @@ namespace BuildXL.Scheduler.Tracing
         private readonly IDictionary<PipId, RunnablePipPerformanceInfo> m_runnablePipPerformance;
         private readonly PipExecutionContext m_context;
 
-        private readonly int m_maxCacheMissCanPerform = EngineEnvironmentSettings.MaxNumPipsForCacheMissAnalysis.Value;
+        private int MaxCacheMissCanPerform => m_configuration.Logging.CacheMissBatch ? EngineEnvironmentSettings.MaxNumPipsForCacheMissAnalysis.Value * EngineEnvironmentSettings.MaxMessagesPerBatch : EngineEnvironmentSettings.MaxNumPipsForCacheMissAnalysis.Value;
         private int m_numCacheMissPerformed = 0;
+
+        private readonly string m_downLoadedPreviousFingerprintStoreSavedPath = null;
 
         /// <summary>
         /// Dictionary of cache misses for runtime cache miss analysis.
@@ -137,13 +144,12 @@ namespace BuildXL.Scheduler.Tracing
 
         private readonly NagleQueue<JProperty> m_batchLoggingQueue;
 
-        // According to https://www.aria.ms/developers/deep-dives/input-constraints/, 
-        // the event size limit is 2.5MB. Each charater in a string take 2 bytes. 
-        // So the maximum length of an event can be set up to 2.5*1024*1024/2.
-        // However, we don't want to send an event hit this limit. 
-        // The number we set here is big enough for a batch reporting but still far away from hitting the limit.
-        private const int MaxLogSizeValue = 800000;
-        internal static int MaxLogSize = MaxLogSizeValue;
+        private readonly IConfiguration m_configuration;
+
+        /// <summary>
+        /// Number of batch messages already sent to telemetry.
+        /// </summary>
+        public static int s_numberOfBatchesLogged = 0;
 
         /// <summary>
         /// A previous build's <see cref="FingerprintStore"/> that can be used for cache miss comparison.
@@ -151,7 +157,7 @@ namespace BuildXL.Scheduler.Tracing
         /// </summary>
         public FingerprintStore PreviousFingerprintStore { get; }
 
-        private readonly CacheMissDiffFormat m_cacheMissDiffFormat;
+        private CacheMissDiffFormat CacheMissDiffFormat => m_configuration.Logging.CacheMissDiffFormat;
         private readonly FingerprintStoreTestHooks m_testHooks;
 
         private RuntimeCacheMissAnalyzer(
@@ -161,8 +167,8 @@ namespace BuildXL.Scheduler.Tracing
             FingerprintStore previousFingerprintStore,
             IReadonlyDirectedGraph graph,
             IDictionary<PipId, RunnablePipPerformanceInfo> runnablePipPerformance,
-            CacheMissDiffFormat cacheMissDiffFormat,
-            bool cacheMissBatch,
+            IConfiguration configuration,
+            string downLoadedPreviousFingerprintStoreSavedPath,
             FingerprintStoreTestHooks testHooks = null)
         {
             m_loggingContext = loggingContext;
@@ -173,20 +179,19 @@ namespace BuildXL.Scheduler.Tracing
             m_changedPips = new VisitationTracker(graph);
             m_pipCacheMissesDict = new ConcurrentDictionary<PipId, PipCacheMissInfo>();
             m_runnablePipPerformance = runnablePipPerformance;
-            m_cacheMissDiffFormat = cacheMissDiffFormat;
-            m_maxCacheMissCanPerform = cacheMissBatch ? EngineEnvironmentSettings.MaxNumPipsForCacheMissAnalysis.Value * EngineEnvironmentSettings.MaxMessagesPerBatch : EngineEnvironmentSettings.MaxNumPipsForCacheMissAnalysis.Value;
 
-            m_batchLoggingQueue = cacheMissBatch ? NagleQueue<JProperty>.Create(
+            m_batchLoggingQueue = configuration.Logging.CacheMissBatch ? NagleQueue<JProperty>.Create(
                 BatchLogging,
                 maxDegreeOfParallelism: 1,
-                interval: TimeSpan.FromMinutes(1),
+                interval: TimeSpan.FromMinutes(5),
                 batchSize: EngineEnvironmentSettings.MaxMessagesPerBatch) : null;
 
 
             m_testHooks = testHooks;
             m_testHooks?.InitRuntimeCacheMisses();
+            m_configuration = configuration;
+            m_downLoadedPreviousFingerprintStoreSavedPath = downLoadedPreviousFingerprintStoreSavedPath;
         }
-
 
         /// <summary>
         /// The batch log payload example: 
@@ -220,29 +225,26 @@ namespace BuildXL.Scheduler.Tracing
             // 2. according to some research, manually serialization with JsonTextWritter can improve performance.
             using (Counters.StartStopwatch(FingerprintStoreCounters.CacheMissBatchLoggingTime))                
             {
-                ProcessResults(results, MaxLogSize, m_loggingContext);
+                ProcessResults(results, m_configuration, m_loggingContext);
+                Counters.AddToCounter(FingerprintStoreCounters.CacheMissBatchingDequeueCount, results.Length);
                 return Unit.VoidTask;
             }
         }
 
-        internal static void ProcessResults(JProperty[] results, int maxLogSize, LoggingContext loggingContext)
+        internal static void ProcessResults(JProperty[] results, IConfiguration configuration, LoggingContext loggingContext)
         {
+            int maxLogSize = configuration.Logging.AriaIndividualMessageSizeLimitBytes;
             using (var sbPool = Pools.GetStringBuilder())
             {
                 var sb = sbPool.Instance;
-                var sw = new StringWriter(sb);
-                var writer = new JsonTextWriter(sw);
+                using var sw = new StringWriter(sb);
+                using var writer = new JsonTextWriter(sw);
                 var logStarted = false;
+                var hasProperty = false;
                 var lenSum = 0;
-                for (int i = 0; i < results.Length;)
+                for (int i = 0; i < results.Length; i++)
                 {
-                    if (!logStarted)
-                    {
-                        writer.WriteStartObject();
-                        writer.WritePropertyName("CacheMissAnalysisResults");
-                        writer.WriteStartObject();
-                        logStarted = true;
-                    }
+                    startLoggingIfNot();
 
                     var name = results[i].Name.ToString();
                     var value = results[i].Value.ToString();
@@ -250,41 +252,89 @@ namespace BuildXL.Scheduler.Tracing
                     if (lenSum < maxLogSize)
                     {
                         writeProperty(name, value);
-                        i++;
                     }
                     else
                     {
-                        // Give warning instead of a single result if max length exceeded, 
-                        // otherwise finish this batch without i++. 
-                        // So this item will go to next batch.
-                        if ((name.Length + value.Length) > maxLogSize)
+                        // End the current batch before start a new one.
+                        endLoggingIfStarted();
+
+                        // Log a single event, if this single result itself is too big.
+                        if ((name.Length + value.Length) >= maxLogSize)
                         {
-                            writeProperty(name, "Warning: The actual cache miss analysis result is too long to present.");
-                            i++;
+                            // Have to shorten the result to fit the telemetry.
+                            var marker = "[...]";
+                            var prefix = value.Substring(0, maxLogSize / 2);
+                            var suffix = value.Substring(value.Length - maxLogSize / 2);
+                            logAsSingle(name, prefix + marker + suffix);
                         }
-                        lenSum = 0;
-                        endLogging();
+                        else
+                        {
+                            // Start a new batch.
+                            startLoggingIfNot();
+                            writeProperty(name, value);
+                            lenSum = name.Length + value.Length;
+                        }
                     }
                 }
 
-                endLogging();
+                endLoggingIfStarted();
 
                 void writeProperty(string name, string value)
                 {
                     writer.WritePropertyName(name);
                     writer.WriteRawValue(value);
+                    hasProperty = true;
                 }
 
                 void endLogging()
                 {
+                    writer.WriteEndObject();
+                    writer.WriteEndObject();
+                    // Only log when has result in it.
+                    if (hasProperty)
+                    {
+                        Logger.Log.CacheMissAnalysisBatchResults(loggingContext, sw.ToString());
+                    }
+                    logStarted = false;
+                    hasProperty = false;
+                    lenSum = 0;
+                    writer.Flush();
+                    sb.Clear();
+                }
+
+                void endLoggingIfStarted()
+                {
                     // Only log when at least one result has been written to the Json string
                     if (logStarted)
                     {
-                        writer.WriteEndObject();
-                        writer.WriteEndObject();
-                        logStarted = false;
-                        Logger.Log.CacheMissAnalysisBatchResults(loggingContext, sw.ToString());                      
+                        endLogging();
                     }
+                }
+
+                void startLogging()
+                {
+                    writer.Flush();
+                    sb.Clear();
+                    writer.WriteStartObject();
+                    writer.WritePropertyName("CacheMissAnalysisResults");
+                    writer.WriteStartObject();
+                    logStarted = true;
+                }
+
+                void startLoggingIfNot()
+                {
+                    // Only log when at least one result has been written to the Json string
+                    if (!logStarted)
+                    {
+                        startLogging();
+                    }
+                }
+
+                void logAsSingle(string name, string value)
+                {
+                    startLogging();
+                    writeProperty(name, value);
+                    endLogging();
                 }
             }
         }
@@ -341,12 +391,13 @@ namespace BuildXL.Scheduler.Tracing
                         missInfo,
                         () => new FingerprintStoreReader.PipRecordingSession(PreviousFingerprintStore, oldEntry),
                         () => new FingerprintStoreReader.PipRecordingSession(m_logTarget.ExecutionFingerprintStore, newEntry),
-                        m_cacheMissDiffFormat);
+                        CacheMissDiffFormat);
 
                     pipDescription = pip.GetDescription(m_context);
 
                     if (m_batchLoggingQueue != null)
                     {
+                        Counters.IncrementCounter(FingerprintStoreCounters.CacheMissBatchingEnqueueCount);
                         m_batchLoggingQueue.Enqueue(resultAndDetail.Detail.ToJObjectWithPipInfo(pip.FormattedSemiStableHash, pipDescription, fromCacheLookup));
                     }
                     else
@@ -376,7 +427,7 @@ namespace BuildXL.Scheduler.Tracing
 
         private bool IsCacheMissEligible(PipId pipId)
         {
-            if (Interlocked.Increment(ref m_numCacheMissPerformed) >= m_maxCacheMissCanPerform)
+            if (Interlocked.Increment(ref m_numCacheMissPerformed) >= MaxCacheMissCanPerform)
             {
                 Counters.IncrementCounter(FingerprintStoreCounters.CacheMissAnalysisExceedMaxNumAndCannotPerformCount);
                 return false;
@@ -416,13 +467,22 @@ namespace BuildXL.Scheduler.Tracing
             using (Counters.StartStopwatch(FingerprintStoreCounters.PreviousFingerprintStoreDisposeDuration))
             {
                 PreviousFingerprintStore.Dispose();
+                DeletePreviousFingerprintStoreDirectory();
             }
 
             using (Counters.StartStopwatch(FingerprintStoreCounters.RuntimeCacheMissBatchLoggingQueueDisposeDuration))
             {
                 m_batchLoggingQueue?.Dispose();
             }
-        }      
+        }
+
+        private void DeletePreviousFingerprintStoreDirectory()
+        {
+            if (!string.IsNullOrEmpty(m_downLoadedPreviousFingerprintStoreSavedPath) && FileUtilities.Exists(m_downLoadedPreviousFingerprintStoreSavedPath))
+            {
+                FileUtilities.DeleteDirectoryContents(m_downLoadedPreviousFingerprintStoreSavedPath, true);
+            }
+        }
 
         private struct CacheMissTimer : IDisposable
         {

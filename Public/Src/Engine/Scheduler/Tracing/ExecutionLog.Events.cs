@@ -364,6 +364,11 @@ namespace BuildXL.Scheduler.Tracing
         public bool IgnoreReparsePoints;
 
         /// <summary>
+        /// Whether the /unsafe_IgnoreFullSymlinkResolving flag is passed to BuildXL.
+        /// </summary>
+        public bool IgnoreFullSymlinkResolving;
+
+        /// <summary>
         /// Whether the /unsafe_IgnorePreloadedDlls flag is passed to BuildXL.
         /// </summary>
         public bool IgnorePreloadedDlls;
@@ -472,6 +477,7 @@ namespace BuildXL.Scheduler.Tracing
             ZwFileCreateOpenMonitored = salts.MonitorZwCreateOpenQueryFile;
             IgnoreNonCreateFileReparsePoints = salts.IgnoreNonCreateFileReparsePoints;
             IgnoreReparsePoints = salts.IgnoreReparsePoints;
+            IgnoreFullSymlinkResolving = salts.IgnoreFullSymlinkResolving;
             IgnorePreloadedDlls = salts.IgnorePreloadedDlls;
             IgnoreGetFinalPathNameByHandle = salts.IgnoreGetFinalPathNameByHandle;
             ExistingDirectoryProbesAsEnumerations = salts.ExistingDirectoryProbesAsEnumerations;
@@ -504,6 +510,7 @@ namespace BuildXL.Scheduler.Tracing
                        ignoreZwOtherFileInformation: IgnoreZwOtherFileInformation,
                        ignoreNonCreateFileReparsePoints: IgnoreNonCreateFileReparsePoints,
                        ignoreReparsePoints: IgnoreReparsePoints,
+                       ignoreFullSymlinkResolving: IgnoreFullSymlinkResolving,
                        ignorePreloadedDlls: IgnorePreloadedDlls,
                        ignoreGetFinalPathNameByHandle: IgnoreGetFinalPathNameByHandle,
                        existingDirectoryProbesAsEnumerations: ExistingDirectoryProbesAsEnumerations,
@@ -554,6 +561,7 @@ namespace BuildXL.Scheduler.Tracing
             writer.Write(NormalizeReadTimestamps);
             writer.Write(PipWarningsPromotedToErrors);
             writer.Write(RequiredKextVersionNumber);
+            writer.Write(IgnoreFullSymlinkResolving);
         }
 
         /// <inheritdoc />
@@ -581,6 +589,7 @@ namespace BuildXL.Scheduler.Tracing
             NormalizeReadTimestamps = reader.ReadBoolean();
             PipWarningsPromotedToErrors = reader.ReadBoolean();
             RequiredKextVersionNumber = reader.ReadString();
+            IgnoreFullSymlinkResolving = reader.ReadBoolean();
         }
     }
 
@@ -921,7 +930,7 @@ namespace BuildXL.Scheduler.Tracing
         /// <summary>
         /// The reported file accesses
         /// </summary>
-        public IReadOnlyCollection<ReportedFileAccess> WhitelistedReportedFileAccesses;
+        public IReadOnlyCollection<ReportedFileAccess> AllowlistedReportedFileAccesses;
 
         /// <summary>
         /// The reported Process Detouring Status messages
@@ -939,7 +948,7 @@ namespace BuildXL.Scheduler.Tracing
             ExecutionResultSerializer.WriteReportedProcessesAndFileAccesses(
                 writer,
                 ReportedFileAccesses,
-                WhitelistedReportedFileAccesses,
+                AllowlistedReportedFileAccesses,
                 ReportedProcesses);
             writer.Write(
                 ProcessDetouringStatuses, 
@@ -951,17 +960,17 @@ namespace BuildXL.Scheduler.Tracing
         {
             PipId = PipId.Deserialize(reader);
             ReportedFileAccess[] reportedFileAccesses;
-            ReportedFileAccess[] whitelistedReportedFileAccesses;
+            ReportedFileAccess[] allowlistedReportedFileAccesses;
             ReportedProcess[] reportedProcesses;
             ExecutionResultSerializer.ReadReportedProcessesAndFileAccesses(
                 reader,
                 out reportedFileAccesses,
-                out whitelistedReportedFileAccesses,
+                out allowlistedReportedFileAccesses,
                 out reportedProcesses);
             ProcessDetouringStatuses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ProcessDetouringStatusData.Deserialize(r2)));
             ReportedProcesses = reportedProcesses;
             ReportedFileAccesses = reportedFileAccesses;
-            WhitelistedReportedFileAccesses = whitelistedReportedFileAccesses;
+            AllowlistedReportedFileAccesses = allowlistedReportedFileAccesses;
         }
     }
 
@@ -1160,6 +1169,9 @@ namespace BuildXL.Scheduler.Tracing
         /// </summary>
         public int RamPercent;
 
+        /// <nodoc />
+        public int AfterRamPercent;
+
         /// <summary>
         /// Ram utilization in MB
         /// </summary>
@@ -1169,6 +1181,9 @@ namespace BuildXL.Scheduler.Tracing
         /// Available Ram in MB
         /// </summary>
         public int RamFreeMb;
+
+        /// <nodoc />
+        public int AfterRamFreeMb;
 
         /// <summary>
         /// Percentage of available commit used. Note if the machine has an expandable page file, this is based on the

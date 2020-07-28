@@ -174,7 +174,7 @@ void TranslateFilePath(_In_ const std::wstring& inFileName, _Out_ std::wstring& 
 }
 
 // Some perform file accesses, which don't yet fall into any configurable file access manifest category.
-// These files now can be whitelisted, but there are already users deployed without the whitelisting feature
+// These files now can be allowlisted, but there are already users deployed without the allowlisting feature
 // that rely on these file accesses not blocked.
 // These are some tools that use internal files or do some implicit directory creation, etc.
 // In this list the tools are the CCI based set of products, csc compiler, resource compiler, build.exe trace log, etc.
@@ -270,7 +270,7 @@ bool GetSpecialCaseRulesForSpecialTools(
 //     1. Code coverage runs
 //     2. Te drive devices
 //     3. Dos devices and special system devices/names (pipes, null dev etc).
-// These accesses now should be white listed, but many users have deployed products that have specs not declaring such accesses.
+// These accesses now should be allowlisted, but many users have deployed products that have specs not declaring such accesses.
 bool GetSpecialCaseRulesForCoverageAndSpecialDevices(
     __in  PCWSTR absolutePath,
     __in  size_t absolutePathLength,
@@ -579,49 +579,36 @@ static SubstituteProcessExecutionPluginFunc GetSubstituteProcessExecutionPluginF
 
     // (1) Check for CommandMatches.
     std::string winApiProcName("CommandMatches");
-
     SubstituteProcessExecutionPluginFunc substituteProcessExecutionPluginFunc = reinterpret_cast<SubstituteProcessExecutionPluginFunc>(
         reinterpret_cast<void*>(GetProcAddress(g_SubstituteProcessExecutionPluginDllHandle, winApiProcName.c_str())));
-
     if (substituteProcessExecutionPluginFunc != nullptr)
     {
         return substituteProcessExecutionPluginFunc;
     }
 
-    Dbg(L"Unable to find 'CommandMatches' function in SubstituteProcessExecutionPluginFunc '%s', lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
-
     // (2) Check for CommandMatches@<param_size> based on platform.
-
 #if defined(_WIN64)
     winApiProcName.append("@48"); // 6 64-bit parameters
 #elif defined(_WIN32)
     winApiProcName.append("@24"); // 6 32-bit parameters
 #endif
-
     substituteProcessExecutionPluginFunc = reinterpret_cast<SubstituteProcessExecutionPluginFunc>(
         reinterpret_cast<void*>(GetProcAddress(g_SubstituteProcessExecutionPluginDllHandle, winApiProcName.c_str())));
-
     if (substituteProcessExecutionPluginFunc != nullptr)
     {
         return substituteProcessExecutionPluginFunc;
     }
 
-    Dbg(L"Unable to find 'CommandMatches@<param_size>' function in SubstituteProcessExecutionPluginFunc '%s', lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
-
-    // (2) Check for _CommandMatches@<param_size>.
-
+    // (3) Check for _CommandMatches@<param_size>.
     winApiProcName.insert(0, 1, '_');
-
     substituteProcessExecutionPluginFunc = reinterpret_cast<SubstituteProcessExecutionPluginFunc>(
         reinterpret_cast<void*>(GetProcAddress(g_SubstituteProcessExecutionPluginDllHandle, winApiProcName.c_str())));
-
     if (substituteProcessExecutionPluginFunc != nullptr)
     {
         return substituteProcessExecutionPluginFunc;
     }
 
-    Dbg(L"Unable to find '_CommandMatches@<param_size>' function in SubstituteProcessExecutionPluginFunc '%s', lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
-
+    Dbg(L"Unable to find 'CommandMatches', 'CommandMatches@<param_size>', or '_CommandMatches@<param_size>' functions in SubstituteProcessExecutionPluginFunc '%s', lasterr=%d", g_SubstituteProcessExecutionPluginDllPath, GetLastError());
     return nullptr;
 }
 
@@ -999,7 +986,7 @@ bool ParseFileAccessManifest(
     }
 
     FileReadContext fileReadContext;
-    fileReadContext.FileExistence = FileExistence::Existent; // Clearly this process started somehow.
+    fileReadContext.Existence = FileExistence::Existent; // Clearly this process started somehow.
     fileReadContext.OpenedDirectory = false;
     
     AccessCheckResult readCheck = policyResult.CheckReadAccess(RequestedReadAccess::Read, fileReadContext);

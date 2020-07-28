@@ -3,9 +3,14 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics.ContractsLight;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Distributed.Utilities;
 using BuildXL.Cache.ContentStore.Interfaces.Distributed;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Tracing;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
 using StackExchange.Redis;
 
 namespace BuildXL.Cache.ContentStore.Distributed.Redis
@@ -15,17 +20,19 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
     /// </summary>
     public static class RedisConnectionMultiplexer
     {
+        private static readonly Tracer Tracer = new Tracer(nameof(RedisConnectionMultiplexer));
+
         /// <summary>
         /// Sets a static instance of <see cref="IConnectionMultiplexer"/> used for testing
         /// </summary>
         internal static IConnectionMultiplexer TestConnectionMultiplexer { private get; set; }
 
-        private static readonly ConcurrentDictionary<string, Lazy<Task<IConnectionMultiplexer>>> Multiplexers = new ConcurrentDictionary<string, Lazy<Task<IConnectionMultiplexer>>>(StringComparer.Ordinal);
+        private static readonly ConcurrentDictionary<RedisEndpoint, Lazy<Task<IConnectionMultiplexer>>> Multiplexers = new ConcurrentDictionary<RedisEndpoint, Lazy<Task<IConnectionMultiplexer>>>();
 
         /// <summary>
         /// Creates a <see cref="IConnectionMultiplexer"/> using given <see cref="IConnectionStringProvider"/>
         /// </summary>
-        public static async Task<IConnectionMultiplexer> CreateAsync(Context context, IConnectionStringProvider connectionStringProvider)
+        public static async Task<IConnectionMultiplexer> CreateAsync(Context context, IConnectionStringProvider connectionStringProvider, Severity logSeverity = Severity.Unknown)
         {
             if (TestConnectionMultiplexer != null)
             {
@@ -48,9 +55,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
             options.ConnectTimeout = (int)TimeSpan.FromSeconds(30).TotalMilliseconds;
             options.SyncTimeout = (int)TimeSpan.FromSeconds(30).TotalMilliseconds;
 
-            var endpoints = string.Join(", ", options.EndPoints);
+            var endpoints = options.GetRedisEndpoint();
 
-            context.Debug($"RedisConnectionMultiplexer: Connecting to Redis endpoint {endpoints}.");
+            context.Debug($"{nameof(RedisConnectionMultiplexer)}: creating {nameof(RedisConnectionMultiplexer)} for {endpoints}.");
 
             // Enforce SSL if password is specified. This allows connecting to non password protected local server without SSL
             if (!string.IsNullOrWhiteSpace(options.Password))
@@ -60,22 +67,37 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
 
             var multiplexerTask = Multiplexers.GetOrAdd(
                 endpoints,
-                _ =>
-                {
-                    return new Lazy<Task<IConnectionMultiplexer>>(() => GetConnectionMultiplexerAsync(options));
-                });
+                _ => new Lazy<Task<IConnectionMultiplexer>>(() => GetConnectionMultiplexerAsync(context, options, logSeverity)));
 
             return await multiplexerTask.Value;
         }
 
-        private static async Task<IConnectionMultiplexer> GetConnectionMultiplexerAsync(ConfigurationOptions options)
+        private static async Task<IConnectionMultiplexer> GetConnectionMultiplexerAsync(Context context, ConfigurationOptions options, Severity logSeverity)
         {
-            return await ConnectionMultiplexer.ConnectAsync(options);
+            var operationContext = new OperationContext(context);
+            var endpoint = options.GetRedisEndpoint();
+
+            return await operationContext.PerformNonResultOperationAsync(
+                Tracer,
+                async () =>
+                {
+                    context.Debug($"{nameof(RedisConnectionMultiplexer)}: Connecting to redis endpoint: {endpoint}");
+                    if (logSeverity != Severity.Unknown)
+                    {
+                        var replacementContext = context.CreateNested(componentName: nameof(RedisConnectionMultiplexer));
+                        var logger = new TextWriterAdapter(replacementContext, logSeverity, component: "Redis.StackExchange");
+                        return await ConnectionMultiplexer.ConnectAsync(options, logger);
+                    }
+
+                    return await ConnectionMultiplexer.ConnectAsync(options);
+                },
+                extraEndMessage: r => $"Endpoint: {endpoint}",
+                traceOperationStarted: false);
         }
 
         private static string AllowAdminIfNeeded(string connectionString)
         {
-            // alloAdmin=true option is needed in order to call InfoAsync.
+            // allowAdmin=true option is needed in order to call InfoAsync.
             string allowAdmin = "allowAdmin=true";
             if (connectionString.IndexOf(allowAdmin, StringComparison.OrdinalIgnoreCase) >= 0)
             {
@@ -88,13 +110,20 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         /// <summary>
         /// Shutdown and forget a connection multiplexer.
         /// </summary>
-        public static async Task ForgetAsync(ConfigurationOptions options)
+        public static async Task ForgetAsync(Context context, ConfigurationOptions options)
         {
-            if (Multiplexers.TryRemove(options.SslHost, out var multiplexerTask))
+            RedisEndpoint endPoints = options.GetRedisEndpoint();
+            context.Debug($"Removing {nameof(RedisConnectionMultiplexer)} for endpoint: {endPoints}");
+            if (Multiplexers.TryRemove(endPoints, out var multiplexerTask))
             {
+                context.Debug($"Closing connection multiplexer. Endpoint: {options.GetRedisEndpoint()}");
                 IConnectionMultiplexer multiplexer = await multiplexerTask.Value;
                 await multiplexer.CloseAsync(allowCommandsToComplete: true);
                 multiplexer.Dispose();
+            }
+            else
+            {
+                context.Warning($"Can't find {nameof(RedisConnectionMultiplexer)} for endpoint: {endPoints}");
             }
         }
     }

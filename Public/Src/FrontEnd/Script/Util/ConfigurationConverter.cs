@@ -286,6 +286,31 @@ namespace BuildXL.FrontEnd.Script.Util
                     context.ErrorContext);
             }
 
+            // Special treatment for object literals, since we want to match it to an implementation
+            if (val is ObjectLiteral)
+            {
+                // Let's go through the target types in order to check if we find an implementation for any of them.
+                // First one wins
+                bool found = false;
+                foreach (var targetType in union.GetAllowedTypes())
+                {
+                    try
+                    {
+                        val = ConvertAny(val, targetType, null, context);
+                        found = true;
+                        break;
+                    }
+                    catch (ConversionException) { }
+                }
+
+                if (!found)
+                {
+                    throw new ConversionException(
+                        I($"No implementation found for type '{val.GetType()}' that match the expected values of the discriminating union {resultType}"),
+                        context.ErrorContext);
+                }
+            }
+
             if (!union.TrySetValue(val))
             {
                 throw new ConversionException(
@@ -586,6 +611,27 @@ namespace BuildXL.FrontEnd.Script.Util
                 context.ErrorContext);
         }
 
+        private FullSymbol ConvertToFullSymbol(object value, in ConversionContext context)
+        {
+            Contract.Requires(value != null);
+
+            if (value is string stringValue)
+            {
+                if (FullSymbol.TryCreate(m_context.SymbolTable, stringValue, out FullSymbol fullSymbol, out _) == FullSymbol.ParseResult.Success)
+                {
+                    return fullSymbol;
+                }
+                
+                throw new ConversionException(
+                    I($"Value '{value}' is not a valid symbol"),
+                    context.ErrorContext);
+            }
+
+            throw new ConversionException(
+                I($"Cannot convert '{value}' of type '{value.GetType()}' to symbol"),
+                context.ErrorContext);
+        }
+
         private static object ConvertToNumber(object value, TypeInfo targetType, in ConversionContext context)
         {
             if (TypeConverter.TryConvertNumber(value, targetType, out object result))
@@ -812,6 +858,11 @@ namespace BuildXL.FrontEnd.Script.Util
             if (resultTypeInfo.TypeHandle.IsString())
             {
                 return ConvertToString(valueToConvert, context);
+            }
+
+            if (resultTypeInfo.TypeHandle.IsFullSymbol())
+            {
+                return ConvertToFullSymbol(valueToConvert, context);
             }
 
             // target: List<?> (List<,> is deprecated, thus not handled here)

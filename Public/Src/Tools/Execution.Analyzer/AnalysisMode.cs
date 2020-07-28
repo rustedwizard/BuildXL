@@ -24,7 +24,8 @@ namespace BuildXL.Execution.Analyzer
         PipExecutionPerformance,
         ProcessDetouringStatus,
         ToolEnumeration,
-        Whitelist,
+        Whitelist, // compatibility
+        Allowlist,
         LogCompare,
         IdeGenerator,
         BuildStatus,
@@ -57,6 +58,6 @@ namespace BuildXL.Execution.Analyzer
         CopyFile, 
         XlgToDb,
         DebugLogs,
-        ContentPlacement
+        JavaScriptDependencyFixer
     }
 }

@@ -19,11 +19,7 @@ namespace Hashing {
                 NetFx.System.Runtime.Serialization.dll,
                 NetFx.System.Xml.dll,
             ]),
-            ...(qualifier.targetFramework !== "netstandard2.0" ? [] :
-            [
-                importFrom("System.Threading.Tasks.Dataflow").pkg,
-            ]),
-            importFrom("System.Interactive.Async").pkg,
+            ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
         ],
         runtimeContent: Context.getCurrentHost().os !== "win" ? [] : [
             {
@@ -34,6 +30,7 @@ namespace Hashing {
                 ]
             },
         ],
+        nullable: true,
         allowUnsafeBlocks: true,
     });
 }

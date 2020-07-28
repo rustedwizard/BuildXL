@@ -3,7 +3,7 @@
 
 namespace Library {
 
-    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNet472;
+    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNetStandard20;
 
     @@public
     export const dll = BuildXLSdk.library({
@@ -14,6 +14,8 @@ namespace Library {
                 NetFx.System.Data.dll,
                 NetFx.System.Runtime.Serialization.dll
             ),
+
+            ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
             
             ...importFrom("BuildXL.Utilities").Native.securityDlls,
             UtilitiesCore.dll,
@@ -29,7 +31,7 @@ namespace Library {
             importFrom("Grpc.Core.Api").pkg,
             importFrom("Google.Protobuf").pkg,
             importFrom("System.Data.SQLite.Core").pkg,
-            importFrom("System.Interactive.Async").pkg,
+            ...BuildXLSdk.bclAsyncPackages,
 
             BuildXLSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
             ...importFrom("BuildXL.Utilities").Native.securityDlls,
@@ -39,6 +41,12 @@ namespace Library {
             importFrom("Sdk.Protocols.Grpc").runtimeContent,
         ],
         allowUnsafeBlocks: true,
+        
+        nullable: true,
+        // Should explicitly avoiding adding a file with non-nullable attributes,
+        // because this project has internals visibility into Interfaces.dll that already contains
+        // such attributes.
+        addNotNullAttributeFile: false,
         internalsVisibleTo: [
             "BuildXL.Cache.ContentStore.Test",
             "BuildXL.Cache.ContentStore.Distributed.Test",

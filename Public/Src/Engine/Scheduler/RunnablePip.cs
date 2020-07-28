@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using BuildXL.Native.IO;
 using BuildXL.Pips;
 using BuildXL.Pips.Operations;
+using BuildXL.Processes;
 using BuildXL.Scheduler.Distribution;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Scheduler.WorkDispatcher;
@@ -58,16 +59,6 @@ namespace BuildXL.Scheduler
         /// Execution environment
         /// </summary>
         public IPipExecutionEnvironment Environment { get; }
-
-        /// <summary>
-        /// Number of retries attempted for this pip
-        /// </summary>
-        public int RetryCountDueToStoppedWorker { get; private set; }
-
-        /// <summary>
-        /// Number of retries attempted for this pip
-        /// </summary>
-        public int RetryCountDueToLowMemory { get; private set; }
 
         /// <summary>
         /// Number of retries attempted for this pip
@@ -186,6 +177,21 @@ namespace BuildXL.Scheduler
         /// </summary>
         public bool IsWaitingForWorker { get; set; }
 
+        /// <summary>
+        /// Thread id of the step
+        /// </summary>
+        public int ThreadId { get; internal set; }
+
+        /// <summary>
+        /// Start time of the step
+        /// </summary>
+        public DateTime StepStartTime { get; internal set; }
+
+        /// <summary>
+        /// Duration of the execution step
+        /// </summary>
+        public TimeSpan StepDuration { get; internal set; }
+
         internal RunnablePip(
             LoggingContext phaseLoggingContext,
             PipId pipId,
@@ -209,8 +215,6 @@ namespace BuildXL.Scheduler
             ScheduleTime = DateTime.UtcNow;
             Performance = new RunnablePipPerformanceInfo(ScheduleTime);
             m_pip = pip;
-            RetryCountDueToStoppedWorker = 0;
-            RetryCountDueToLowMemory = 0;
             MaxRetryLimitForStoppedWorker = maxRetryLimitForStoppedWorker;
         }
 
@@ -231,6 +235,14 @@ namespace BuildXL.Scheduler
                 End();
             }
         }
+
+        /// <summary>
+        /// Whether to include the pip in the tracer log
+        /// </summary>
+        public bool IncludeInTracer => Environment.Configuration.Logging.LogTracer
+            && Step.IncludeInTracer()
+            && PipType == PipType.Process
+            && Worker != null;
 
         /// <summary>
         /// Changes the priority of the pip
@@ -296,19 +308,15 @@ namespace BuildXL.Scheduler
         /// </summary>
         public PipExecutionStep SetPipResult(in PipResult result)
         {
+            Performance.Suspended(ExecutionResult?.PerformanceInformation?.SuspendedDurationMs ?? 0);
+
             if (result.Status == PipResultStatus.Canceled &&
                 !Environment.IsTerminating)
             {
+                // Handle Retryable Cancellations
                 SetWorker(null);
 
-                if (ExecutionResult?.IsCancelledDueToResourceExhaustion == true)
-                {
-                    RetryCountDueToLowMemory++;
-                }
-                else
-                {
-                    RetryCountDueToStoppedWorker++;
-                }
+                Performance.Retried(ExecutionResult?.RetryInfo ?? RetryInfo.RetryOnDifferentWorker(RetryReason.StoppedWorker));
 
                 return DecideNextStepForRetry();
             }
@@ -338,7 +346,7 @@ namespace BuildXL.Scheduler
         /// </summary>
         public bool ShouldRetryDueToStoppedWorker()
         {
-            return MaxRetryLimitForStoppedWorker > RetryCountDueToStoppedWorker;
+            return MaxRetryLimitForStoppedWorker > Performance.RetryCountDueToStoppedWorker;
         }
 
         /// <summary>
@@ -533,7 +541,8 @@ namespace BuildXL.Scheduler
                         kernelTime: performanceInformation.KernelTime,
                         memoryCounters: performanceInformation.MemoryCounters,
                         numberOfProcesses: performanceInformation.NumberOfProcesses,
-                        workerId: performanceInformation.WorkerId);
+                        workerId: performanceInformation.WorkerId,
+                        suspendedDurationMs: performanceInformation.SuspendedDurationMs);
                 }
                 else
                 {
@@ -550,9 +559,10 @@ namespace BuildXL.Scheduler
                             ioCounters: default(IOCounters),
                             userTime: TimeSpan.Zero,
                             kernelTime: TimeSpan.Zero,
-                            memoryCounters: ProcessMemoryCounters.CreateFromMb(0, 0, 0),
+                            memoryCounters: ProcessMemoryCounters.CreateFromMb(0, 0, 0, 0),
                             numberOfProcesses: 0,
-                            workerId: 0);
+                            workerId: 0,
+                            suspendedDurationMs: 0);
                 }
             }
             else

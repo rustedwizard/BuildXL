@@ -10,8 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.Sessions;
+using BuildXL.Cache.ContentStore.Extensions;
 using BuildXL.Cache.ContentStore.Hashing;
-using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.Extensions;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
@@ -23,6 +23,7 @@ using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.Utils;
+using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
 
@@ -38,7 +39,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         // Used for testing.
         internal enum Counters
         {
-            ProactiveReplication_Succeeded,
+            ProactiveReplication_Succeeded, 
             ProactiveReplication_Failed,
             ProactiveReplication_Skipped,
             ProactiveReplication_Rejected,
@@ -55,10 +56,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
         private readonly IContentLocationStoreFactory _contentLocationStoreFactory;
         private readonly ContentStoreTracer _tracer = new ContentStoreTracer(nameof(DistributedContentStore<T>));
-        private readonly NagleQueue<ContentHash> _evictionNagleQueue;
-        private NagleQueue<ContentHashWithSize> _touchNagleQueue;
-        private readonly ContentTrackerUpdater _contentTrackerUpdater;
-        private readonly bool _enableDistributedEviction;
         private readonly IClock _clock;
 
         private DateTime? _lastEvictedEffectiveLastAccessTime;
@@ -92,7 +89,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public DistributedContentStore(
             MachineLocation localMachineLocation,
             AbsolutePath localCacheRoot,
-            Func<NagleQueue<ContentHash>, DistributedEvictionSettings, ContentStoreSettings, TrimBulkAsync, IContentStore> innerContentStoreFunc,
+            Func<ContentStoreSettings, IDistributedLocationStore, IContentStore> innerContentStoreFunc,
             IContentLocationStoreFactory contentLocationStoreFactory,
             DistributedContentStoreSettings settings,
             DistributedContentCopier<T> distributedCopier,
@@ -107,30 +104,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             _distributedCopier = distributedCopier;
             _copierWorkingDirectory = new DisposableDirectory(distributedCopier.FileSystem, localCacheRoot / "Temp");
 
-            contentStoreSettings = contentStoreSettings ?? ContentStoreSettings.DefaultSettings;
+            contentStoreSettings ??= ContentStoreSettings.DefaultSettings;
             _settings = settings;
 
-            // Queue is created in unstarted state because the eviction function
-            // requires the context passed at startup.
-            _evictionNagleQueue = NagleQueue<ContentHash>.CreateUnstarted(
-                Redis.RedisContentLocationStoreConstants.BatchDegreeOfParallelism,
-                Redis.RedisContentLocationStoreConstants.BatchInterval,
-                _settings.LocationStoreBatchSize);
-
-            _enableDistributedEviction = _settings.ReplicaCreditInMinutes != null;
-            var distributedEvictionSettings = _enableDistributedEviction ? SetUpDistributedEviction(_settings.ReplicaCreditInMinutes, _settings.LocationStoreBatchSize) : null;
-
-            var enableTouch = _settings.ContentHashBumpTime.HasValue;
-            if (enableTouch)
-            {
-                _contentTrackerUpdater = new ContentTrackerUpdater(ScheduleBulkTouch, _settings.ContentHashBumpTime.Value, clock: _clock);
-            }
-
-            TrimBulkAsync trimBulkAsync = null;
-            InnerContentStore = innerContentStoreFunc(_evictionNagleQueue, distributedEvictionSettings, contentStoreSettings, trimBulkAsync);
+            InnerContentStore = innerContentStoreFunc(contentStoreSettings, this);
         }
-
-        #region IDistributedContentCopierHost Members
 
         AbsolutePath IDistributedContentCopierHost.WorkingFolder => _copierWorkingDirectory.Path;
 
@@ -138,13 +116,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         {
             _contentLocationStore.MachineReputationTracker.ReportReputation(location, reputation);
         }
-
-        Result<MachineLocation[]> IDistributedContentCopierHost.GetDesignatedLocations(ContentHash hash)
-        {
-            return _contentLocationStore.GetDesignatedLocations(hash);
-        }
-
-        #endregion IDistributedContentCopierHost Members
 
         private Task<Result<ReadOnlyDistributedContentSession<T>>> CreateCopySession(Context context)
         {
@@ -204,50 +175,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
             if (_settings.EnableProactiveReplication
                 && _contentLocationStore is TransitioningContentLocationStore tcs
-                && tcs.IsLocalLocationStoreEnabled
                 && InnerContentStore is ILocalContentStore localContentStore)
             {
                 await ProactiveReplicationAsync(context.CreateNested(nameof(DistributedContentStore<T>)), localContentStore, tcs).ThrowIfFailure();
             }
 
-            Func<ContentHash[], Task> evictionHandler;
-            var localContext = context.CreateNested(nameof(DistributedContentStore<T>));
-            if (_enableDistributedEviction)
-            {
-                evictionHandler = hashes => EvictContentAsync(localContext, hashes);
-            }
-            else
-            {
-                evictionHandler = hashes => DistributedGarbageCollectionAsync(localContext, hashes);
-            }
-
-            // Queue is created in unstarted state because the eviction function
-            // requires the context passed at startup. So we start the queue here.
-            _evictionNagleQueue.Start(evictionHandler);
-
-            var touchContext = context.CreateNested(nameof(DistributedContentStore<T>));
-            _touchNagleQueue = NagleQueue<ContentHashWithSize>.Create(
-                hashes => TouchBulkAsync(touchContext, hashes),
-                Redis.RedisContentLocationStoreConstants.BatchDegreeOfParallelism,
-                Redis.RedisContentLocationStoreConstants.BatchInterval,
-                batchSize: _settings.LocationStoreBatchSize);
-
             return BoolResult.Success;
-        }
-
-        private async Task<ProactiveCopyResult> ProactiveCopyIfNeededAsync(OperationContext operationContext, ContentHash hash)
-        {
-            var sessionResult = await ProactiveCopySession.Value;
-            if (sessionResult)
-            {
-                return await sessionResult.Value.ProactiveCopyIfNeededAsync(
-                    operationContext,
-                    hash,
-                    tryBuildRing: false,
-                    reason: ProactiveCopyReason.Replication);
-            }
-
-            return new ProactiveCopyResult(sessionResult, "Failed to retrieve session for proactive copies.");
         }
 
         private Task<BoolResult> ProactiveReplicationAsync(
@@ -255,12 +188,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             ILocalContentStore localContentStore,
             TransitioningContentLocationStore contentLocationStore)
         {
-            Contract.Requires(contentLocationStore.IsLocalLocationStoreEnabled);
-
             return context.PerformOperationAsync(
                    Tracer,
                    async () =>
                    {
+                       var proactiveCopySession = await ProactiveCopySession.Value.ThrowIfFailureAsync();
+
                        await contentLocationStore.LocalLocationStore.EnsureInitializedAsync().ThrowIfFailure();
 
                        while (!context.Token.IsCancellationRequested)
@@ -268,9 +201,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                            // Create task before starting operation to ensure uniform intervals assuming operation takes less than the delay.
                            var delayTask = Task.Delay(_settings.ProactiveReplicationInterval, context.Token);
 
-                           await ProactiveReplicationIterationAsync(context, localContentStore, contentLocationStore).ThrowIfFailure();
+                           await ProactiveReplicationIterationAsync(context, proactiveCopySession, localContentStore, contentLocationStore).ThrowIfFailure();
 
-                           if (_settings.InlineProactiveReplication)
+                           if (_settings.InlineOperationsForTests)
                            {
                                // Inlining is used only for testing purposes. In those cases,
                                // we only perform one proactive replication.
@@ -282,11 +215,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
                        return BoolResult.Success;
                    })
-                .FireAndForgetOrInlineAsync(context, _settings.InlineProactiveReplication);
+                .FireAndForgetOrInlineAsync(context, _settings.InlineOperationsForTests);
         }
 
         private Task<ProactiveReplicationResult> ProactiveReplicationIterationAsync(
             OperationContext context,
+            ReadOnlyDistributedContentSession<T> proactiveCopySession,
             ILocalContentStore localContentStore,
             TransitioningContentLocationStore contentLocationStore)
         {
@@ -312,23 +246,46 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     var delayTask = Task.CompletedTask;
                     var wasPreviousCopyNeeded = true;
                     ContentEvictionInfo? lastVisited = default;
-                    foreach (var content in contents)
+
+                    IEnumerable<ContentEvictionInfo> getReplicableHashes()
                     {
-                        context.Token.ThrowIfCancellationRequested();
-
-                        lastVisited = content;
-
-                        scanned++;
-
-                        if (content.ReplicaCount < _settings.ProactiveCopyLocationsThreshold)
+                        foreach (var content in contents)
                         {
+                            scanned++;
+
+                            if (content.ReplicaCount < _settings.ProactiveCopyLocationsThreshold)
+                            {
+                                yield return content;
+                            }
+                            else
+                            {
+                                CounterCollection[Counters.ProactiveReplication_Skipped].Increment();
+                                skipped++;
+                            }
+                        }
+                    }
+
+                    foreach (var page in getReplicableHashes().GetPages(_settings.ProactiveCopyGetBulkBatchSize))
+                    {
+                        var contentInfos = await proactiveCopySession.GetLocationsForProactiveCopyAsync(context, page.SelectList(c => c.ContentHash));
+                        for (int i = 0; i < contentInfos.Count; i++)
+                        {
+                            context.Token.ThrowIfCancellationRequested();
+
+                            var contentInfo = contentInfos[i];
+                            lastVisited = page[i];
+
                             if (wasPreviousCopyNeeded)
                             {
                                 await delayTask;
                                 delayTask = Task.Delay(_settings.DelayForProactiveReplication, context.Token);
                             }
 
-                            var result = await ProactiveCopyIfNeededAsync(context, content.ContentHash);
+                            var result = await proactiveCopySession.ProactiveCopyIfNeededAsync(
+                                context,
+                                contentInfo,
+                                tryBuildRing: false,
+                                reason: CopyReason.Replication);
 
                             wasPreviousCopyNeeded = true;
                             switch (result.Status)
@@ -344,7 +301,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                                     break;
                                 case ProactiveCopyStatus.Rejected:
                                     rejected++;
-                                    CounterCollection[Counters.ProactiveReplication_Succeeded].Increment();
+                                    CounterCollection[Counters.ProactiveReplication_Rejected].Increment();
                                     break;
                                 case ProactiveCopyStatus.Error:
                                     CounterCollection[Counters.ProactiveReplication_Failed].Increment();
@@ -357,6 +314,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                                 break;
                             }
                         }
+
+                        if ((succeeded + failed) >= _settings.ProactiveReplicationCopyLimit)
+                        {
+                            break;
+                        }
                     }
 
                     return new ProactiveReplicationResult(succeeded, failed, skipped, rejected, localContent.Length, scanned, lastVisited);
@@ -367,7 +329,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <inheritdoc />
         protected override async Task<BoolResult> ShutdownCoreAsync(OperationContext context)
         {
-            var results = new List<Tuple<string, BoolResult>>();
+            var results = new List<(string operation, BoolResult result)>();
 
             if (ProactiveCopySession?.IsValueCreated == true)
             {
@@ -375,76 +337,25 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 if (sessionResult.Succeeded)
                 {
                     var proactiveCopySessionShutdownResult = await sessionResult.Value.ShutdownAsync(context);
-                    results.Add(Tuple.Create(nameof(ProactiveCopySession), proactiveCopySessionShutdownResult));
+                    results.Add((nameof(ProactiveCopySession), proactiveCopySessionShutdownResult));
                 }
             }
 
             var innerResult = await InnerContentStore.ShutdownAsync(context);
-            results.Add(Tuple.Create(nameof(InnerContentStore), innerResult));
-
-            _evictionNagleQueue?.Dispose();
-            _touchNagleQueue?.Dispose();
+            results.Add((nameof(InnerContentStore), innerResult));
 
             if (_contentLocationStore != null)
             {
                 var locationStoreResult = await _contentLocationStore.ShutdownAsync(context);
-                results.Add(Tuple.Create(nameof(_contentLocationStore), locationStoreResult));
+                results.Add((nameof(_contentLocationStore), locationStoreResult));
             }
 
             var factoryResult = await _contentLocationStoreFactory.ShutdownAsync(context);
-            results.Add(Tuple.Create(nameof(_contentLocationStoreFactory), factoryResult));
+            results.Add((nameof(_contentLocationStoreFactory), factoryResult));
 
             _copierWorkingDirectory.Dispose();
 
             return ShutdownErrorCompiler(results);
-        }
-
-        private void ScheduleBulkTouch(List<ContentHashWithSize> content)
-        {
-            Contract.Assert(_touchNagleQueue != null);
-            _touchNagleQueue.EnqueueAll(content);
-        }
-
-        /// <summary>
-        /// Batch content hashes that were not removed during eviction to re-register with the content tracker.
-        /// </summary>
-        private async Task EvictContentAsync(Context context, ContentHash[] contentHashes)
-        {
-            var contentHashesAndLocations = new List<ContentHashWithSizeAndLocations>();
-            foreach (ContentHash contentHash in contentHashes)
-            {
-                _tracer.Debug(context, $"[DistributedEviction] Re-adding local location for content hash {contentHash.ToShortString()} because it was not evicted");
-                contentHashesAndLocations.Add(new ContentHashWithSizeAndLocations(contentHash));
-            }
-
-            // LocationStoreOption.None tells the content tracker to:
-            //      1) Only update the location if the hash exists
-            //      2) Not update the expiry
-            var result = await _contentLocationStore.UpdateBulkAsync(
-                context, contentHashesAndLocations, CancellationToken.None, UrgencyHint.Low, LocationStoreOption.None);
-
-            if (!result.Succeeded)
-            {
-                _tracer.Error(context, $"[DistributedEviction] Unable to re-add content hashes to Redis. errorMessage=[{result.ErrorMessage}] diagnostics=[{result.Diagnostics}]");
-            }
-        }
-
-        private async Task DistributedGarbageCollectionAsync(Context context, ContentHash[] contentHashes)
-        {
-            var result = await UnregisterAsync(context, contentHashes, CancellationToken.None);
-            if (!result.Succeeded)
-            {
-                _tracer.Error(context, $"[GarbageCollection] Unable to remove evicted content hashes from Redis. errorMessage=[{result.ErrorMessage}] diagnostics=[{result.Diagnostics}]");
-            }
-        }
-
-        private async Task TouchBulkAsync(Context context, ContentHashWithSize[] contentHashesWithSize)
-        {
-            var result = await _contentLocationStore.TouchBulkAsync(context, contentHashesWithSize, CancellationToken.None, UrgencyHint.Low);
-            if (!result.Succeeded)
-            {
-                _tracer.Error(context, $"Unable to touch {contentHashesWithSize.Length} hashes in the content tracker. errorMessage=[{result.ErrorMessage}] diagnostics=[{result.Diagnostics}]");
-            }
         }
 
         /// <inheritdoc />
@@ -463,7 +374,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                             _distributedCopier,
                             this,
                             LocalMachineLocation,
-                            contentTrackerUpdater: _contentTrackerUpdater,
                             settings: _settings);
                     return new CreateSessionResult<IReadOnlyContentSession>(session);
                 }
@@ -488,7 +398,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                             _distributedCopier,
                             this,
                             LocalMachineLocation,
-                            contentTrackerUpdater: _contentTrackerUpdater,
                             settings: _settings);
                     return new CreateSessionResult<IContentSession>(session);
                 }
@@ -524,9 +433,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// </summary>
         public async Task<StructResult<long>> RemoveFromTrackerAsync(Context context)
         {
-            if (_settings.EnableRepairHandling && InnerContentStore is ILocalContentStore localStore)
+            if (_settings.EnableRepairHandling)
             {
-                var result = await _contentLocationStore.InvalidateLocalMachineAsync(context, localStore, CancellationToken.None);
+                var result = await _contentLocationStore.InvalidateLocalMachineAsync(context, CancellationToken.None);
                 if (!result)
                 {
                     return new StructResult<long>(result);
@@ -540,17 +449,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <summary>
         /// Determines if final BoolResult is success or error.
         /// </summary>
-        /// <param name="results">Paired List of shutdowns and their results.</param>
-        /// <returns>BoolResult as success or error. If error, error message lists messages in order they occurred.</returns>
-        private static BoolResult ShutdownErrorCompiler(IReadOnlyList<Tuple<string, BoolResult>> results)
+        private static BoolResult ShutdownErrorCompiler(IReadOnlyList<(string operation, BoolResult result)> results)
         {
             var sb = new StringBuilder();
-            foreach (Tuple<string, BoolResult> result in results)
+            foreach (var (operation, result) in results)
             {
-                if (!result.Item2.Succeeded)
+                if (!result)
                 {
                     // TODO: Consider compiling Item2's Diagnostics into the final result's Diagnostics instead of ErrorMessage (bug 1365340)
-                    sb.Append(result.Item1 + ": " + result.Item2 + " ");
+                    sb.Append($"{operation}: {result} ");
                 }
             }
 
@@ -566,18 +473,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             {
                 _contentLocationStoreFactory.Dispose();
             }
-        }
-
-        private DistributedEvictionSettings SetUpDistributedEviction(int? replicaCreditInMinutes, int locationStoreBatchSize)
-        {
-            Contract.Assert(_enableDistributedEviction);
-
-            return new DistributedEvictionSettings(
-                (context, contentHashesWithInfo, cts, urgencyHint) =>
-                    _contentLocationStore.TrimOrGetLastAccessTimeAsync(context, contentHashesWithInfo, cts, urgencyHint),
-                locationStoreBatchSize,
-                replicaCreditInMinutes,
-                this);
         }
 
         /// <nodoc />
@@ -646,8 +541,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// </summary>
         public bool TryGetLocalLocationStore(out LocalLocationStore localLocationStore)
         {
-            if (_contentLocationStore is TransitioningContentLocationStore tcs
-                && tcs.IsLocalLocationStoreEnabled)
+            if (_contentLocationStore is TransitioningContentLocationStore tcs)
             {
                 localLocationStore = tcs.LocalLocationStore;
                 return true;
@@ -669,7 +563,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         private bool CheckLlsForContent(ContentHash desiredContent, out DistributedCentralStorage storage)
         {
             if (_contentLocationStore is TransitioningContentLocationStore tcs
-                && tcs.IsLocalLocationStoreEnabled
                 && tcs.LocalLocationStore.DistributedCentralStorage != null
                 && tcs.LocalLocationStore.DistributedCentralStorage.HasContent(desiredContent))
             {
@@ -727,13 +620,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions)
         {
             var operationContext = OperationContext(context);
-            deleteOptions ??= new DeleteContentOptions() { DeleteLocalOnly = true };
+            deleteOptions ??= new DeleteContentOptions() {DeleteLocalOnly = true};
 
-            return operationContext.PerformOperationAsync(Tracer,
+            return operationContext.PerformOperationAsync(
+                Tracer,
                 async () =>
                 {
                     var deleteResult = await InnerContentStore.DeleteAsync(context, contentHash, deleteOptions);
-                    var contentHashes = new ContentHash[] { contentHash };
+                    var contentHashes = new ContentHash[] {contentHash};
                     if (!deleteResult)
                     {
                         return deleteResult;
@@ -751,27 +645,39 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                         return deleteResult;
                     }
 
-                    var result = await _contentLocationStore.GetBulkAsync(context, contentHashes, operationContext.Token, UrgencyHint.Nominal, GetBulkOrigin.Local);
+                    var deleteResultsMapping = new Dictionary<string, DeleteResult>();
+
+                    var result = await _contentLocationStore.GetBulkAsync(
+                        context,
+                        contentHashes,
+                        operationContext.Token,
+                        UrgencyHint.Nominal,
+                        GetBulkOrigin.Local);
                     if (!result)
                     {
-                        return new DeleteResult(result, result.ToString());
+                        deleteResult =  new DeleteResult(result, result.ToString());
+                        deleteResultsMapping.Add(LocalMachineLocation.Path, deleteResult);
+                        return new DistributedDeleteResult(contentHash, deleteResult.ContentSize, deleteResultsMapping);
                     }
+
+                    deleteResultsMapping.Add(LocalMachineLocation.Path, deleteResult);
 
                     // Go through each machine that has this content, and delete async locally on each machine.
                     if (result.ContentHashesInfo[0].Locations != null)
                     {
                         var machineLocations = result.ContentHashesInfo[0].Locations;
-                        return await _distributedCopier.DeleteAsync(operationContext, contentHash, machineLocations);
+                        return await _distributedCopier.DeleteAsync(operationContext, contentHash, deleteResult.ContentSize, machineLocations, deleteResultsMapping);
                     }
 
-                    return deleteResult;
+                    return new DistributedDeleteResult(contentHash, deleteResult.ContentSize, deleteResultsMapping);
                 });
         }
 
         /// <inheritdoc />
-        public Task<BoolResult> HandleCopyFileRequestAsync(Context context, ContentHash hash)
+        public Task<BoolResult> HandleCopyFileRequestAsync(Context context, ContentHash hash, CancellationToken token)
         {
-            var operationContext = OperationContext(context);
+            using var shutdownTracker = TrackShutdown(context, token);
+            var operationContext = shutdownTracker.Context;
             return operationContext.PerformOperationAsync(Tracer,
                 async () =>
                 {

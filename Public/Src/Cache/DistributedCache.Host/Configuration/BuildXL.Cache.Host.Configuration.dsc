@@ -12,9 +12,11 @@ namespace Configuration {
                 NetFx.System.Runtime.Serialization.dll,
                 NetFx.System.ComponentModel.DataAnnotations.dll
             ),
+            ...addIf(qualifier.targetFramework === "netstandard2.0",
+                NetFx.System.ComponentModel.DataAnnotations.dll
+            ),
 
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
-            importFrom("Newtonsoft.Json").pkg,
         ],
         skipDocumentationGeneration: true,
 

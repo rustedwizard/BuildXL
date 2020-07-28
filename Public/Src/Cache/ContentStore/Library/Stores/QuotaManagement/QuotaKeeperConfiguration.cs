@@ -18,27 +18,22 @@ namespace BuildXL.Cache.ContentStore.Stores
         /// <summary>
         /// <see cref="ContentStoreConfiguration.MaxSizeQuota"/>.
         /// </summary>
-        public MaxSizeQuota MaxSizeQuota { get; private set; }
+        public MaxSizeQuota? MaxSizeQuota { get; private set; }
 
         /// <summary>
         /// <see cref="ContentStoreConfiguration.DiskFreePercentQuota"/>.
         /// </summary>
-        public DiskFreePercentQuota DiskFreePercentQuota { get; private set; }
+        public DiskFreePercentQuota? DiskFreePercentQuota { get; private set; }
 
         /// <summary>
         /// <see cref="ContentStoreConfiguration.InitialElasticSize"/>.
         /// </summary>
-        public MaxSizeQuota InitialElasticSize { get; private set; }
+        public MaxSizeQuota? InitialElasticSize { get; private set; }
 
         /// <summary>
         /// <see cref="ContentStoreConfiguration.HistoryWindowSize"/>.
         /// </summary>
         public int? HistoryWindowSize { get; private set; }
-
-        /// <summary>
-        /// <see cref="DistributedEvictionSettings"/>.
-        /// </summary>
-        public DistributedEvictionSettings DistributedEvictionSettings { get; private set; }
 
         /// <summary>
         /// Initial size of the content directory.
@@ -53,7 +48,6 @@ namespace BuildXL.Cache.ContentStore.Stores
         /// <nodoc />
         public static QuotaKeeperConfiguration Create(
             ContentStoreConfiguration configuration,
-            DistributedEvictionSettings evictionSettings,
             long contentDirectorySize)
         {
             Contract.Requires(configuration != null);
@@ -65,7 +59,6 @@ namespace BuildXL.Cache.ContentStore.Stores
                        DiskFreePercentQuota = configuration.DiskFreePercentQuota,
                        InitialElasticSize = configuration.InitialElasticSize,
                        HistoryWindowSize = configuration.HistoryWindowSize,
-                       DistributedEvictionSettings = evictionSettings,
                        ContentDirectorySize = contentDirectorySize,
                    };
         }

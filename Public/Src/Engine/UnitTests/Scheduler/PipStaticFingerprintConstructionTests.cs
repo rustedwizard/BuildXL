@@ -41,13 +41,38 @@ namespace Test.BuildXL.Scheduler
         [Fact]
         public void TestCompositeSharedOpaqueMembersAffectFingerprints()
         {
-            ContentFingerprint fingerprint1 = CreateFingerprintForCompositeSharedOpaque(@"\\root", @"\\root\so1", @"\\root\so2");
-            ContentFingerprint fingerprint2 = CreateFingerprintForCompositeSharedOpaque(@"\\root", @"\\root\so1", @"\\root\so2");
+            ContentFingerprint fingerprint1 = CreateFingerprintForCompositeSharedOpaque(@"\\root", new[] { @"\\root\so1", @"\\root\so2" }, null);
+            ContentFingerprint fingerprint2 = CreateFingerprintForCompositeSharedOpaque(@"\\root", new[] { @"\\root\so1", @"\\root\so2" }, null);
 
             XAssert.AreEqual(fingerprint1, fingerprint2);
 
-            fingerprint1 = CreateFingerprintForCompositeSharedOpaque(@"\\root", @"\\root\so1", @"\\root\so2");
-            fingerprint2 = CreateFingerprintForCompositeSharedOpaque(@"\\root", @"\\root\so1", @"\\root\so3");
+            fingerprint1 = CreateFingerprintForCompositeSharedOpaque(@"\\root", new[] { @"\\root\so1", @"\\root\so2" }, null);
+            fingerprint2 = CreateFingerprintForCompositeSharedOpaque(@"\\root", new[] { @"\\root\so1", @"\\root\so3" }, null);
+
+            XAssert.AreNotEqual(fingerprint1, fingerprint2);
+        }
+
+        [Fact]
+        public void TestCompositeSharedOpaqueFilterAffectsFingerprints()
+        {
+            ContentFingerprint fingerprint1 = CreateFingerprintForCompositeSharedOpaque(
+                @"\\root", new[] { @"\\root\so1" }, new SealDirectoryContentFilter(SealDirectoryContentFilter.ContentFilterKind.Include, ".*"));
+            ContentFingerprint fingerprint2 = CreateFingerprintForCompositeSharedOpaque(
+                @"\\root", new[] { @"\\root\so1" }, new SealDirectoryContentFilter(SealDirectoryContentFilter.ContentFilterKind.Include, ".*"));
+
+            XAssert.AreEqual(fingerprint1, fingerprint2);
+
+            fingerprint1 = CreateFingerprintForCompositeSharedOpaque(
+                @"\\root", new[] { @"\\root\so1" }, new SealDirectoryContentFilter(SealDirectoryContentFilter.ContentFilterKind.Include, ".*exe"));
+            fingerprint2 = CreateFingerprintForCompositeSharedOpaque(
+                @"\\root", new[] { @"\\root\so1" }, new SealDirectoryContentFilter(SealDirectoryContentFilter.ContentFilterKind.Include, ".*txt"));
+
+            XAssert.AreNotEqual(fingerprint1, fingerprint2);
+
+            fingerprint1 = CreateFingerprintForCompositeSharedOpaque(
+                @"\\root", new[] { @"\\root\so1" }, new SealDirectoryContentFilter(SealDirectoryContentFilter.ContentFilterKind.Include, ".*"));
+            fingerprint2 = CreateFingerprintForCompositeSharedOpaque(
+                @"\\root", new[] { @"\\root\so1" }, new SealDirectoryContentFilter(SealDirectoryContentFilter.ContentFilterKind.Exclude, ".*"));
 
             XAssert.AreNotEqual(fingerprint1, fingerprint2);
         }
@@ -99,7 +124,8 @@ namespace Test.BuildXL.Scheduler
             }
         }
 
-        private ContentFingerprint CreateFingerprintForCompositeSharedOpaque(string composedSharedOpaqueRoot, params string[] sharedOpaqueMembers)
+        private ContentFingerprint CreateFingerprintForCompositeSharedOpaque(
+            string composedSharedOpaqueRoot, string[] sharedOpaqueMembers, SealDirectoryContentFilter? contentFilter)
         {
             using (TestEnv env = TestEnv.CreateTestEnvWithPausedScheduler())
             {
@@ -112,6 +138,7 @@ namespace Test.BuildXL.Scheduler
                 var success = env.PipConstructionHelper.TryComposeSharedOpaqueDirectory(
                     env.Paths.CreateAbsolutePath(composedSharedOpaqueRoot), 
                     sharedOpaqueDirectoryArtifactMembers, 
+                    contentFilter: contentFilter,
                     description: null, 
                     tags: new string[0], 
                     out var sharedOpaqueDirectory);

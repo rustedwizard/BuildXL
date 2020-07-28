@@ -11,10 +11,14 @@ config({
         ...globR(d`Public/Sdk/UnitTests`, "module.config.dsc"),
         ...globR(d`Private/Wdg`, "module.config.dsc"),
         ...globR(d`Private/QTest`, "module.config.dsc"),
-        ...globR(d`Private/CloudTest`, "module.config.dsc"),
         ...globR(d`Private/InternalSdk`, "module.config.dsc"),
         ...globR(d`Private/Tools`, "module.config.dsc"),
         ...globR(d`Public/Sdk/SelfHost`, "module.config.dsc"),
+
+        // Internal only modules
+        ...addIf(importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal,
+           ...globR(d`Private/CloudTest`, "module.config.dsc")
+        ),
     ],
 
     frontEnd: {
@@ -70,10 +74,11 @@ config({
                 { id: "CLAP", version: "4.6" },
                 { id: "CLAP-DotNetCore", version: "4.6" },
 
-                { id: "RuntimeContracts", version: "0.1.10" },
+                { id: "RuntimeContracts", version: "0.3.0" },
 
-                { id: "Microsoft.NETFramework.ReferenceAssemblies.net451", version: "1.0.0-alpha-5", osSkip: [ "macOS" ]},
-                { id: "Microsoft.NETFramework.ReferenceAssemblies.net461", version: "1.0.0-alpha-5", osSkip: [ "macOS" ]},
+                { id: "Microsoft.NETFramework.ReferenceAssemblies.net451", version: "1.0.0-alpha-5", osSkip: [ "macOS", "unix" ] },
+                { id: "Microsoft.NETFramework.ReferenceAssemblies.net461", version: "1.0.0-alpha-5", osSkip: [ "macOS", "unix" ] },
+                { id: "Microsoft.NETFramework.ReferenceAssemblies.net462", version: "1.0.0-alpha-5" },
                 { id: "Microsoft.NETFramework.ReferenceAssemblies.net472", version: "1.0.0-alpha-5" },
 
                 { id: "EntityFramework", version: "6.0.0" },
@@ -82,17 +87,17 @@ config({
                 { id: "System.Diagnostics.DiagnosticSource", version: "4.0.0-beta-23516", alias: "System.Diagnostics.DiagnosticsSource.ForEventHub"},
 
                 // Roslyn
-                { id: "Microsoft.Net.Compilers", version: "3.3.1" }, // Update Public/Src/Engine/UnitTests/Engine/Test.BuildXL.Engine.dsc if you change the version of Microsoft.Net.Compilers.
-                { id: "Microsoft.NETCore.Compilers", version: "3.3.1" },
-                { id: "Microsoft.CodeAnalysis.Common", version: "3.4.0" },
-                { id: "Microsoft.CodeAnalysis.CSharp", version: "3.4.0" },
-                { id: "Microsoft.CodeAnalysis.VisualBasic", version: "3.4.0" },
-                { id: "Microsoft.CodeAnalysis.Workspaces.Common", version: "3.4.0",
+                { id: "Microsoft.Net.Compilers", version: "3.5.0" }, // Update Public/Src/Engine/UnitTests/Engine/Test.BuildXL.Engine.dsc if you change the version of Microsoft.Net.Compilers.
+                { id: "Microsoft.NETCore.Compilers", version: "3.5.0" },
+                { id: "Microsoft.CodeAnalysis.Common", version: "3.5.0" },
+                { id: "Microsoft.CodeAnalysis.CSharp", version: "3.5.0" },
+                { id: "Microsoft.CodeAnalysis.VisualBasic", version: "3.5.0" },
+                { id: "Microsoft.CodeAnalysis.Workspaces.Common", version: "3.5.0",
                     dependentPackageIdsToSkip: ["SQLitePCLRaw.bundle_green", "System.Composition"],
                     dependentPackageIdsToIgnore: ["SQLitePCLRaw.bundle_green", "System.Composition"],
                 },
-                { id: "Microsoft.CodeAnalysis.CSharp.Workspaces", version: "3.4.0" },
-                { id: "Microsoft.CodeAnalysis.VisualBasic.Workspaces", version: "3.4.0" },
+                { id: "Microsoft.CodeAnalysis.CSharp.Workspaces", version: "3.5.0" },
+                { id: "Microsoft.CodeAnalysis.VisualBasic.Workspaces", version: "3.5.0" },
 
                 // Old code analysis libraries, for tests only
                 { id: "Microsoft.CodeAnalysis.Common", version: "2.10.0", alias: "Microsoft.CodeAnalysis.Common.Old" },
@@ -100,15 +105,15 @@ config({
                 { id: "Microsoft.CodeAnalysis.VisualBasic", version: "2.10.0", alias: "Microsoft.CodeAnalysis.VisualBasic.Old" },
 
                 // Roslyn Analyzers
-                { id: "Microsoft.CodeAnalysis.Analyzers", version: "2.6.3" },
+                { id: "Microsoft.CodeAnalysis.Analyzers", version: "3.0.0" },
                 { id: "Microsoft.CodeAnalysis.FxCopAnalyzers", version: "2.6.3" },
                 { id: "Microsoft.CodeQuality.Analyzers", version: "2.3.0-beta1" },
                 { id: "Microsoft.NetFramework.Analyzers", version: "2.3.0-beta1" },
                 { id: "Microsoft.NetCore.Analyzers", version: "2.3.0-beta1" },
 
-                { id: "AsyncFixer", version: "1.1.5" },
+                { id: "AsyncFixer", version: "1.3.0" },
                 { id: "ErrorProne.NET.CoreAnalyzers", version: "0.1.2" },
-                { id: "RuntimeContracts.Analyzer", version: "0.1.10" },
+                { id: "RuntimeContracts.Analyzer", version: "0.3.0" },
                 { id: "StyleCop.Analyzers", version: "1.1.0-beta004" },
                 { id: "Text.Analyzers", version: "2.3.0-beta1" },
 
@@ -130,8 +135,7 @@ config({
                 { id: "Microsoft.Tpl.Dataflow", version: "4.5.24" },
                 { id: "Microsoft.TypeScript.Compiler", version: "1.8" },
                 { id: "Microsoft.WindowsAzure.ConfigurationManager", version: "1.8.0.0" },
-                { id: "Newtonsoft.Json", version: "11.0.2" },
-                { id: "Newtonsoft.Json", version: "10.0.3", alias: "Newtonsoft.Json.v10" },
+                { id: "Newtonsoft.Json", version: "12.0.3" },
                 { id: "Newtonsoft.Json.Bson", version: "1.0.1" },
                 { id: "System.Data.SQLite.Core", version: "1.0.109.2" },
                 { id: "System.Reflection.Metadata", version: "1.6.0" },
@@ -143,14 +147,14 @@ config({
                 { id: "NuGet.Frameworks", version: "5.0.0"}, // needed for qtest on .net core
 
                 // Cpp Sdk
-                { id: "VisualCppTools.Community.VS2017Layout", version: "14.11.25506", osSkip: [ "macOS" ] },
+                { id: "VisualCppTools.Community.VS2017Layout", version: "14.11.25506", osSkip: [ "macOS", "unix" ] },
 
                 // ProjFS (virtual file system)
-                { id: "Microsoft.Windows.ProjFS", version: "1.0.19079.1" },
+                { id: "Microsoft.Windows.ProjFS", version: "1.2.19351.1" },
 
                 // RocksDb
-                { id: "RocksDbSharp", version: "5.8.0-b20200303.4", alias: "RocksDbSharpSigned" },
-                { id: "RocksDbNative", version: "6.0.1-b20200303.4" },
+                { id: "RocksDbSharp", version: "6.10.2-b20200625.3", alias: "RocksDbSharpSigned" },
+                { id: "RocksDbNative", version: "6.10.2-b20200625.3" },
                 
                 { id: "JsonDiffPatch.Net", version: "2.1.0" },
 
@@ -199,28 +203,29 @@ config({
                 { id: "Microsoft.NET.Test.Sdk", version: "15.9.0" },
                 { id: "Microsoft.CodeCoverage", version: "15.9.0" },
 
-                { id: "Microsoft.IdentityModel.Clients.ActiveDirectory", version: "4.5.1",
+                { id: "Microsoft.IdentityModel.Clients.ActiveDirectory", version: "5.2.6",
                     dependentPackageIdsToSkip: ["Xamarin.Android.Support.CustomTabs", "Xamarin.Android.Support.v7.AppCompat"] },
+                { id: "System.Private.Uri", version: "4.3.2" },
 
                 // CloudStore dependencies
                 { id: "DeduplicationSigned", version: "1.0.14" },
                 { id: "Microsoft.Bcl", version: "1.1.10" },
                 { id: "Microsoft.Bcl.Async", version: "1.0.168" },
-                { id: "Microsoft.Bcl.AsyncInterfaces", version: "1.1.0" },
+                { id: "Microsoft.Bcl.AsyncInterfaces", version: "1.1.0", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
                 { id: "Microsoft.Bcl.Build", version: "1.0.14" },
-                { id: "StackExchange.Redis", version: "2.0.601",
-                    dependentPackageIdsToSkip: ["System.IO.Pipelines", "System.Threading.Channels"] },
-                { id: "Pipelines.Sockets.Unofficial", version: "2.0.22",
-                    dependentPackageIdsToSkip: ["System.IO.Pipelines", "System.Runtime.CompilerServices.Unsafe"] },
-                { id: "System.Diagnostics.PerformanceCounter", version: "4.5.0" },
-                { id: "System.Threading.Channels", version: "4.5.0",
+                { id: "StackExchange.Redis", version: "2.1.30",
+                    dependentPackageIdsToSkip: ["System.IO.Pipelines", "System.Threading.Channels", "Microsoft.Bcl.AsyncInterfaces", "Pipelines.Sockets.Unofficial"] },
+                { id: "Pipelines.Sockets.Unofficial", version: "2.1.6",
+                    dependentPackageIdsToSkip: ["System.IO.Pipelines", "System.Runtime.CompilerServices.Unsafe", "Microsoft.Bcl.AsyncInterfaces"] },
+                { id: "System.Diagnostics.PerformanceCounter", version: "4.7.0" },
+                { id: "System.Threading.Channels", version: "4.7.0",
                     dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
-                { id: "System.Interactive.Async", version: "3.1.1" },
+                { id: "System.Linq.Async", version: "4.0.0"},
                 { id: "TransientFaultHandling.Core", version: "5.1.1209.1" },
-                { id: "Redis-64", version: "3.0.503", osSkip: [ "macOS" ] },
+                { id: "Redis-64", version: "3.0.503", osSkip: [ "macOS", "unix" ] },
                 { id: "Redis-osx-x64", version: "1.0.0", osSkip: importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal
                     ? [ "win" ]
-                    : [ "win", "macOS" ] },
+                    : [ "win", "macOS", "unix" ] },
 
                 // Testing
                 { id: "System.Security.Cryptography.ProtectedData", version: "4.4.0"},
@@ -230,18 +235,14 @@ config({
 
                 { id: "DotNet.Glob", version: "2.0.3" },
                 { id: "Minimatch", version: "1.1.0.0" },
-                { id: "Microsoft.ApplicationInsights", version: "2.3.0" },
+                { id: "Microsoft.ApplicationInsights", version: "2.11.0", dependentPackageIdsToIgnore: ["System.RunTime.InteropServices"] },
                 { id: "Microsoft.ApplicationInsights.Agent.Intercept", version: "2.0.7" },
                 { id: "Microsoft.ApplicationInsights.DependencyCollector", version: "2.3.0" },
                 { id: "Microsoft.ApplicationInsights.PerfCounterCollector", version: "2.3.0" },
                 { id: "Microsoft.ApplicationInsights.WindowsServer", version: "2.3.0" },
                 { id: "Microsoft.ApplicationInsights.WindowsServer.TelemetryChannel", version: "2.3.0" },
-                { id: "System.Memory", version: "4.5.1" },
-                { id: "System.Runtime.CompilerServices.Unsafe", version: "4.5.0" },
-                { id: "System.IO.Pipelines", version: "4.5.3",
-                    dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
                 { id: "System.Security.Cryptography.Xml", version: "4.5.0" },
-                { id: "System.Text.Encodings.Web", version: "4.5.0" },
+                { id: "System.Text.Encodings.Web", version: "4.7.0" },
                 { id: "System.Security.Permissions", version: "4.5.0" },
                 { id: "System.Security.Cryptography.Pkcs", version: "4.5.0" },
 
@@ -278,15 +279,20 @@ config({
                 { id: "System.Resources.Extensions", version: "4.6.0-preview9.19411.4",
                     dependentPackageIdsToSkip: ["System.Memory"]},
 
+                // Buffers and Memory
+                { id: "System.Buffers", version: "4.5.1" }, // A different version, because StackExchange.Redis uses it.
+                { id: "System.Memory", version: "4.5.4", dependentPackageIdsToSkip: ["System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors"] },
+                { id: "System.Runtime.CompilerServices.Unsafe", version: "4.7.0" },
+                { id: "System.IO.Pipelines", version: "4.7.0", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
+                { id: "System.Numerics.Vectors", version: "4.5.0" },
+
                 // Extra dependencies to make MSBuild work
                 { id: "Microsoft.VisualStudio.Setup.Configuration.Interop", version: "1.16.30"},
                 { id: "System.CodeDom", version: "4.4.0"},
                 { id: "System.Text.Encoding.CodePages", version: "4.5.1",
                     dependentPackageIdsToSkip: ["System.Runtime.CompilerServices.Unsafe"]},
-                { id: "System.Memory", version: "4.5.3", alias: "SystemMemoryForMSBuild",
-                    dependentPackageIdsToSkip: ["*"]},
-                { id: "System.Numerics.Vectors", version: "4.4.0", alias: "SystemNumericsVectorsForMSBuild"},
-                { id: "System.Runtime.CompilerServices.Unsafe", version: "4.5.2", alias: "SystemRuntimeCompilerServicesUnsafeForMSBuild"},
+                { id: "System.Runtime.CompilerServices.Unsafe", version: "4.5.3", alias: "SystemRuntimeCompilerServicesUnsafeForMSBuild", dependentPackageIdsToSkip: ["*"]},
+                {id: "System.Numerics.Vectors", version: "4.4.0", alias: "SystemNumericsVectorsForMSBuild"},
 
                 // Used for MSBuild input/output prediction
                 { id: "Microsoft.Build.Prediction", version: "0.3.0" },
@@ -298,8 +304,8 @@ config({
                 { id: "BuildXL.Tools.AppHostPatcher", version: "1.0.0" },
 
                 // CoreRT
-                { id: "runtime.osx-x64.Microsoft.DotNet.ILCompiler", version: "1.0.0-alpha-27527-01", osSkip: [ "win" ] },
-                { id: "runtime.win-x64.Microsoft.DotNet.ILCompiler", version: "1.0.0-alpha-27527-01", osSkip: [ "macOS" ] },
+                { id: "runtime.osx-x64.Microsoft.DotNet.ILCompiler", version: "1.0.0-alpha-27527-01", osSkip: [ "win", "unix" ] },
+                { id: "runtime.win-x64.Microsoft.DotNet.ILCompiler", version: "1.0.0-alpha-27527-01", osSkip: [ "macOS", "unix" ] },
 
                 // Kusto SDK (for netstandard)
                 { id: "Microsoft.Azure.Kusto.Cloud.Platform.Azure.NETStandard", version: "6.1.8",
@@ -313,11 +319,7 @@ config({
                 { id: "Microsoft.IO.RecyclableMemoryStream", version: "1.2.2" },
                 { id: "Microsoft.Azure.KeyVault", version: "3.0.1"},
                 { id: "Microsoft.Azure.KeyVault.WebKey", version: "3.0.1"},
-                { id: "Microsoft.Rest.ClientRuntime", version: "3.0.0",
-                    dependentPackageIdsToSkip: ["Microsoft.NETCore.Runtime"],
-                    dependentPackageIdsToIgnore: ["Microsoft.NETCore.Runtime"],
-                },
-                { id: "Microsoft.Rest.ClientRuntime.Azure", version: "3.3.18" },
+
                 { id: "Microsoft.NETCore.Windows.ApiSets", version: "1.0.1" },
 
                 // Kusto SDK (for full framework)
@@ -326,8 +328,56 @@ config({
                 { id: "Microsoft.Azure.Kusto.Tools", version: "2.2.2" },
                 { id: "Microsoft.Azure.Management.Kusto", version: "1.0.0" },
 
+                // Azure Communication
+                { id: "Microsoft.Rest.ClientRuntime", version: "2.3.21",
+                    dependentPackageIdsToSkip: ["Microsoft.NETCore.Runtime"],
+                    dependentPackageIdsToIgnore: ["Microsoft.NETCore.Runtime"],
+                },
+                { id: "Microsoft.Rest.ClientRuntime.Azure", version: "3.3.18" },
+                { id: "Microsoft.Rest.ClientRuntime.Azure.Authentication", version: "2.4.0" },
+
+                // Azure Management SDK
+                { id: "Microsoft.Azure.Management.AppService.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.BatchAI.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Cdn.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Compute.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.ContainerInstance.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.ContainerRegistry.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.ContainerService.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.CosmosDB.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Dns.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.EventHub.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Graph.RBAC.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.KeyVault.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Locks.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Msi.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Network.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.PrivateDns.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Search.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.ServiceBus.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Sql.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Storage.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.TrafficManager.Fluent", version: "1.33.0" },
+
+                // These are the ones we actually care about
+                { id: "Microsoft.Azure.Management.Redis", version: "5.0.0" },
+                { id: "Microsoft.Azure.Management.Redis.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.ResourceManager.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Monitor.Fluent", version: "1.33.0" },
+                { id: "Microsoft.Azure.Management.Monitor", version: "0.25.0-preview" },
+
                 // ANTLR
-                { id: "Antlr4.Runtime.Standard", version: "4.7.2" }
+                { id: "Antlr4.Runtime.Standard", version: "4.7.2" },
+
+                // Runtime dependencies for Linux
+                { 
+                    id: "runtime.linux-x64.BuildXL", 
+                    version: "0.0.31",
+                    osSkip: importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal 
+                        ? [] 
+                        : [ "win", "macOS", "unix" ]
+                }
             ],
 
             doNotEnforceDependencyVersions: true,
@@ -372,15 +422,21 @@ config({
 
                 // DotNet Core Runtime
                 {
-                    moduleName: "DotNet-Runtime.win-x64.3.1.0",
-                    url: "https://download.visualstudio.microsoft.com/download/pr/5e1c20ea-113f-47fd-9702-22a8bf1e3974/16bf234b587064709d8e7b58439022d4/dotnet-runtime-3.1.0-win-x64.zip",
-                    hash: "VSO0:EE359BDFFFED53EF3C5E76C1716AADD1567447B12A37292C075D6A26F1138C0700",
+                    moduleName: "DotNet-Runtime.win-x64.3.1.6",
+                    url: "https://download.visualstudio.microsoft.com/download/pr/f01755a3-b9cf-4d63-acdd-e331337548d6/ab5385bc8a555e741bc093b3459015b7/dotnet-runtime-3.1.6-win-x64.zip",
+                    hash: "VSO0:9757187648C77E11F41303763ED2CCD427741616EE38376C40E96827671482C500",
                     archiveType: "zip",
                 },
                 {
-                    moduleName: "DotNet-Runtime.osx-x64.3.1.0",
-                    url: "https://download.visualstudio.microsoft.com/download/pr/454ca582-64f7-4817-bbb0-34a7fb831499/1d2d5613a2d2ebb26da04471e97cb539/dotnet-runtime-3.1.0-osx-x64.tar.gz",
-                    hash: "VSO0:FCB44A9D07D3923DB197C05A710FEBBB060649555418A067E04EAE1A06CBCE4400",
+                    moduleName: "DotNet-Runtime.osx-x64.3.1.6",
+                    url: "https://download.visualstudio.microsoft.com/download/pr/d1a67dcf-12d9-4ecd-86a4-c4a659f0eebf/519db8ce56503d551d35ef9378239c70/dotnet-runtime-3.1.6-osx-x64.tar.gz",
+                    hash: "VSO0:F0FBE5172B7D57CE46EEF54BED6790EF197D841B53B83656982616DC193740D800",
+                    archiveType: "tgz",
+                },
+                {
+                    moduleName: "DotNet-Runtime.linux-x64.3.1.6",
+                    url: "https://download.visualstudio.microsoft.com/download/pr/7c2978aa-1a4c-4fb0-a7cd-1dbaf1ce405d/c54e21f55dfa49d2ccdb599fa2edb9ed/dotnet-runtime-3.1.6-linux-x64.tar.gz",
+                    hash: "VSO0:713CA0FE106D1EEE837E4595312F4771CDD429147DA2E1CB66F85E2603DD9BA900",
                     archiveType: "tgz",
                 },
                 // The following are needed for dotnet core MSBuild test deployments
@@ -403,6 +459,12 @@ config({
                     hash: "VSO0:71B123A9120E24D3AB783D277A3649AFB56C97DDB7E79C9568625D51FF29D8CD00",
                     archiveType: "tgz",
                 },
+                {
+                    moduleName: "NodeJs.linux-x64",
+                    url: "https://nodejs.org/dist/v13.3.0/node-v13.3.0-linux-x64.tar.gz",
+                    hash: "VSO0:4B63D2FDE488809E395B5E6CC0490C65A0AE7BB05C02FC9A1CD641B1C81539AC00",
+                    archiveType: "tgz",
+                },
                 // Rush tests need an LTS (older) version of NodeJs
                 {
                     moduleName: "NodeJs.ForRush.win-x64",
@@ -415,13 +477,6 @@ config({
                     url: "https://nodejs.org/dist/v12.16.1/node-v12.16.1-darwin-x64.tar.gz",
                     hash: "VSO0:A3DEEC9D7C133120F255195146072452C6D06D24E7F97754F342627C53A5008000",
                     archiveType: "tgz",
-                },
-                // Electron
-                {
-                    moduleName: "Electron.win-x64",
-                    url: "https://github.com/electron/electron/releases/download/v2.0.10/electron-v2.0.10-win32-x64.zip",
-                    hash: "VSO0:F836344F3D3FEBCD50976B5F33FC2DA64D0753C242C68F61B5908F59CD49B0AB00",
-                    archiveType: "zip",
                 }
             ],
         },
@@ -431,7 +486,9 @@ config({
         defaultQualifier: {
             configuration: "debug",
             targetFramework: "netcoreapp3.1",
-            targetRuntime: Context.getCurrentHost().os === "win" ? "win-x64" : "osx-x64",
+            targetRuntime: 
+                Context.getCurrentHost().os === "win" ? "win-x64" :
+                Context.getCurrentHost().os === "macOS" ? "osx-x64" : "linux-x64",
         },
         namedQualifiers: {
             Debug: {
@@ -565,7 +622,7 @@ config({
         dotSettingsFile: f`Public/Sdk/SelfHost/BuildXL/BuildXL.sln.DotSettings`,
     },
 
-    cacheableFileAccessWhitelist: Context.getCurrentHost().os !== "win" ? [] : [
+    cacheableFileAccessAllowlist: Context.getCurrentHost().os !== "win" ? [] : [
         // Allow the debugger to be able to be launched from BuildXL Builds
         {
             name: "JitDebugger",

@@ -159,9 +159,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public bool ProactiveCopyUsePreferredLocations { get; set; } = false;
 
         /// <summary>
-        /// Should only be used for testing.
+        /// Should only be used for testing to inline the operations like proactive copy.
         /// </summary>
-        public bool InlineProactiveCopies { get; set; } = false;
+        public bool InlineOperationsForTests { get; set; } = false;
 
         /// <summary>
         /// Maximum number of locations which should trigger a proactive copy.
@@ -169,14 +169,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public int ProactiveCopyLocationsThreshold { get; set; } = 3;
 
         /// <summary>
-        /// Whether to reject push copies based on whether we've evicted something youger recently.
+        /// Whether to reject push copies based on whether we've evicted something younger recently.
         /// </summary>
         public bool ProactiveCopyRejectOldContent { get; set; } = false;
-
-        /// <summary>
-        /// Whether to prioritize designated locations when copying.
-        /// </summary>
-        public bool PrioritizeDesignatedLocationsOnCopies { get; set; } = false;
 
         /// <summary>
         /// Number of copy attempts which should be restricted in its number or replicas.
@@ -199,11 +194,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public bool EnableProactiveReplication { get; set; } = false;
 
         /// <summary>
-        /// Whether to inline proactive replication
-        /// </summary>
-        public bool InlineProactiveReplication { get; set; } = false;
-
-        /// <summary>
         /// The interval between proactive replication interations
         /// </summary>
         public TimeSpan ProactiveReplicationInterval { get; set; } = TimeSpan.FromMinutes(10);
@@ -217,6 +207,21 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// The maximum amount of copies allowed per proactive replication invocation.
         /// </summary>
         public int ProactiveReplicationCopyLimit { get; set; } = 5;
+        
+        /// <summary>
+        /// The amount of time for nagling GetBulk (locations) for proactive copy operations
+        /// </summary>
+        public TimeSpan ProactiveCopyGetBulkInterval { get; set; } = TimeSpan.FromSeconds(10);
+
+        /// <summary>
+        /// The size of nagle batch for proactive copy get bulk
+        /// </summary>
+        public int ProactiveCopyGetBulkBatchSize { get; set; } = 20;
+
+        /// <summary>
+        /// Amount of times that a proactive copy is allowed to retry
+        /// </summary>
+        public int ProactiveCopyMaxRetries { get; set; } = 0;
 
         /// <summary>
         /// Defines pinning behavior
@@ -230,16 +235,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// Maximum number of PutFile and PlaceFile operations that can happen concurrently.
         /// </summary>
         public int MaximumConcurrentPutAndPlaceFileOperations { get; set; } = 512;
-
-        /// <summary>
-        /// Name of the blob with the snapshot of the content placement predictions.
-        /// </summary>
-        public string ContentPlacementPredictionsBlob { get; set; } // Can be null.
-
-        /// <summary>
-        /// Used in tests to inline put blob execution.
-        /// </summary>
-        public bool InlinePutBlobs { get; set; } = false;
 
         /// <summary>
         /// Indicates whether a post initialization task is set to complete after startup to force local eviction to wait
@@ -261,11 +256,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// The batch size used by the location store
         /// </summary>
         public int LocationStoreBatchSize { get; set; }
-
-        /// <summary>
-        /// The time to live after last use for content entries in Redis
-        /// </summary>
-        public TimeSpan? ContentHashBumpTime { get; set; }
 
         /// <summary>
         /// Max size for storing blobs in the ContentLocationStore

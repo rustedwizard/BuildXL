@@ -47,7 +47,7 @@ namespace ContentStoreTest.Distributed.ContentLocation
 
             if (!File.Exists(sourcePath.Path))
             {
-                return new CopyFileResult(CopyFileResult.ResultCode.SourcePathError, $"Source file {sourcePath} doesn't exist.");
+                return new CopyFileResult(CopyResultCode.FileNotFoundError, $"Source file {sourcePath} doesn't exist.");
             }
 
             using Stream s = GetStream(sourcePath, expectedContentSize);
@@ -119,14 +119,12 @@ namespace ContentStoreTest.Distributed.ContentLocation
 
         public Task<BoolResult> RequestCopyFileAsync(OperationContext context, ContentHash hash, MachineLocation targetMachine)
         {
-            return CopyHandlersByLocation[targetMachine].HandleCopyFileRequestAsync(context, hash);
+            return CopyHandlersByLocation[targetMachine].HandleCopyFileRequestAsync(context, hash, CancellationToken.None);
         }
 
-        public async Task<PushFileResult> PushFileAsync(OperationContext context, ContentHash hash, Func<Task<Result<Stream>>> source, MachineLocation targetMachine)
+        public virtual async Task<PushFileResult> PushFileAsync(OperationContext context, ContentHash hash, Stream stream, MachineLocation targetMachine)
         {
             var tempFile = AbsolutePath.CreateRandomFileName(WorkingDirectory);
-            var streamResult = await source();
-            using var stream = streamResult.Value;
             using (var file = File.OpenWrite(tempFile.Path))
             {
                 await stream.CopyToAsync(file);

@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Engine.Cache.Fingerprints;
+using BuildXL.Engine.Distribution.Grpc;
 using BuildXL.Engine.Distribution.OpenBond;
 using BuildXL.Engine.Tracing;
 using BuildXL.Pips;
@@ -87,11 +88,11 @@ namespace BuildXL.Engine.Distribution
         private readonly TaskSourceSlim<bool> m_exitCompletionSource;
         private readonly TaskSourceSlim<bool> m_attachCompletionSource;
 
-        private readonly ConcurrentDictionary<PipId, SinglePipBuildRequest> m_pendingBuildRequests =
-            new ConcurrentDictionary<PipId, SinglePipBuildRequest>();
+        private readonly ConcurrentDictionary<(PipId, PipExecutionStep), SinglePipBuildRequest> m_pendingBuildRequests =
+            new ConcurrentDictionary<(PipId, PipExecutionStep), SinglePipBuildRequest>();
 
-        private readonly ConcurrentDictionary<PipId, ExtendedPipCompletionData> m_pendingPipCompletions =
-            new ConcurrentDictionary<PipId, ExtendedPipCompletionData>();
+        private readonly ConcurrentDictionary<(PipId,PipExecutionStep), ExtendedPipCompletionData> m_pendingPipCompletions =
+            new ConcurrentDictionary<(PipId, PipExecutionStep), ExtendedPipCompletionData>();
 
         private readonly ConcurrentBigSet<int> m_handledBuildRequests = new ConcurrentBigSet<int>();
 
@@ -119,9 +120,8 @@ namespace BuildXL.Engine.Distribution
         private IPipExecutionEnvironment m_environment;
         private ForwardingEventListener m_forwardingEventListener;
         private WorkerServicePipStateManager m_workerPipStateManager;
-        private IDistributionConfiguration m_config;
+        private readonly IConfiguration m_config;
         private readonly ushort m_port;
-        private readonly int m_maxProcesses;
         private readonly WorkerRunnablePipObserver m_workerRunnablePipObserver;
         private readonly DistributionServices m_services;
         private NotifyMasterExecutionLogTarget m_notifyMasterExecutionLogTarget;
@@ -137,15 +137,13 @@ namespace BuildXL.Engine.Distribution
         /// Class constructor
         /// </summary>
         /// <param name="appLoggingContext">Application-level logging context</param>
-        /// <param name="maxProcesses">the maximum number of concurrent pips on the worker</param>
-        /// <param name="config">Distribution config</param>\
+        /// <param name="config">Build config</param>\
         /// <param name="buildId">the build id</param>
-        public WorkerService(LoggingContext appLoggingContext, int maxProcesses, IDistributionConfiguration config, string buildId)
+        public WorkerService(LoggingContext appLoggingContext, IConfiguration config, string buildId)
         {
             m_appLoggingContext = appLoggingContext;
-            m_maxProcesses = maxProcesses;
             m_config = config;
-            m_port = config.BuildServicePort;
+            m_port = config.Distribution.BuildServicePort;
             m_services = new DistributionServices(buildId);
             m_workerServer = new Grpc.GrpcWorkerServer(this, appLoggingContext, buildId);
 
@@ -238,7 +236,7 @@ namespace BuildXL.Engine.Distribution
                 var writer = pooledWriter.Instance;
                 PipId pipId = completionData.PipId;
 
-                m_resultSerializer.Serialize(writer, completionData.ExecutionResult);
+                m_resultSerializer.Serialize(writer, completionData.ExecutionResult, completionData.PreservePathSetCasing);
 
                 // TODO: ToArray is expensive here. Think about alternatives.
                 var dataByte = ((MemoryStream)writer.BaseStream).ToArray();
@@ -297,9 +295,10 @@ namespace BuildXL.Engine.Distribution
         {
             Logger.Log.DistributionWaitingForMasterAttached(m_appLoggingContext);
 
-            while (!AttachCompletion.Wait(EngineEnvironmentSettings.WorkerAttachTimeout))
+            var timeout = GrpcSettings.WorkerAttachTimeout;
+            while (!AttachCompletion.Wait(timeout))
             {
-                if ((TimestampUtilities.Timestamp - m_lastHeartbeatTimestamp) > EngineEnvironmentSettings.WorkerAttachTimeout)
+                if ((TimestampUtilities.Timestamp - m_lastHeartbeatTimestamp) > timeout)
                 {
                     Exit(failure: "Timed out waiting for attach request from master", isUnexpected: true);
                     Logger.Log.DistributionWorkerTimeoutFailure(m_appLoggingContext);
@@ -309,7 +308,7 @@ namespace BuildXL.Engine.Distribution
 
             if (!AttachCompletion.Result)
             {
-                Logger.Log.DistributionInactiveMaster(m_appLoggingContext, (int)EngineEnvironmentSettings.WorkerAttachTimeout.Value.TotalMinutes);
+                Logger.Log.DistributionInactiveMaster(m_appLoggingContext, (int)timeout.TotalMinutes);
                 return false;
             }
 
@@ -435,7 +434,8 @@ namespace BuildXL.Engine.Distribution
             var attachCompletionInfo = new AttachCompletionInfo
             {
                 WorkerId = WorkerId,
-                MaxConcurrency = m_maxProcesses,
+                MaxProcesses = m_config.Schedule.MaxProcesses,
+                MaxMaterialize = m_config.Schedule.MaxMaterialize,
                 AvailableRamMb = m_scheduler.LocalWorker.TotalRamMb,
                 AvailableCommitMb = m_scheduler.LocalWorker.TotalCommitMb,
                 WorkerCacheValidationContentHash = cacheValidationContentHash.ToBondContentHash(),
@@ -484,32 +484,51 @@ namespace BuildXL.Engine.Distribution
                 // Start the pip. Handle the case of a retry - the pip may be already started by a previous call.
                 if (m_handledBuildRequests.Add(pipBuildRequest.SequenceNumber))
                 {
-                    HandlePipStepAsync(pipBuildRequest, reportInputsResult).Forget();
+
+                    var pipId = new PipId(pipBuildRequest.PipIdValue);
+                    var pip = m_pipTable.HydratePip(pipId, PipQueryContext.HandlePipStepOnWorker);
+                    var pipIdStepTuple = (pipId, (PipExecutionStep)pipBuildRequest.Step);
+                    m_pendingBuildRequests[pipIdStepTuple] = pipBuildRequest;
+                    var pipCompletionData = new ExtendedPipCompletionData(new PipCompletionData() { PipIdValue = pipId.Value, Step = pipBuildRequest.Step })
+                    {
+                        SemiStableHash = m_pipTable.GetPipSemiStableHash(pipId)
+                    };
+
+                    m_pendingPipCompletions[pipIdStepTuple] = pipCompletionData;
+
+                    HandlePipStepAsync(pip, pipCompletionData, pipBuildRequest, reportInputsResult).Forget((ex)=>
+                    {
+                        Scheduler.Tracing.Logger.Log.HandlePipStepOnWorkerFailed(
+                            m_appLoggingContext,
+                            pip.GetDescription(m_environment.Context),
+                            ex.ToString());
+
+                        // HandlePipStep might throw an exception after we remove pipCompletionData from m_pendingPipCompletions.
+                        // That's why, we check whether the pipCompletionData still exists there.
+                        if (m_pendingPipCompletions.ContainsKey(pipIdStepTuple))
+                        {
+                            ReportResult(
+                                pip,
+                                ExecutionResult.GetFailureNotRunResult(m_appLoggingContext),
+                                (PipExecutionStep)pipBuildRequest.Step);
+                        }
+                    });
                 }
             }
         }
 
-        private async Task HandlePipStepAsync(SinglePipBuildRequest pipBuildRequest, Possible<Unit> reportInputsResult)
+        private async Task HandlePipStepAsync(Pip pip, ExtendedPipCompletionData pipCompletionData, SinglePipBuildRequest pipBuildRequest, Possible<Unit> reportInputsResult)
         {
             // Do not block the caller.
             await Task.Yield();
 
-            var pipId = new PipId(pipBuildRequest.PipIdValue);
-            var pip = m_pipTable.HydratePip(pipId, PipQueryContext.LoggingPipFailedOnWorker);
+            var pipId = pip.PipId;
             var pipType = pip.PipType;
             var step = (PipExecutionStep)pipBuildRequest.Step;
             if (!(pipType == PipType.Process || pipType == PipType.Ipc || step == PipExecutionStep.MaterializeOutputs))
             {
                 throw Contract.AssertFailure(I($"Workers can only execute process or IPC pips for steps other than MaterializeOutputs: Step={step}, PipId={pipId}, Pip={pip.GetDescription(m_environment.Context)}"));
             }
-
-            m_pendingBuildRequests[pipId] = pipBuildRequest;
-            var pipCompletionData = new ExtendedPipCompletionData(new PipCompletionData() { PipIdValue = pipId.Value, Step = (int)step })
-            {
-                SemiStableHash = m_pipTable.GetPipSemiStableHash(pipId)
-            };
-
-            m_pendingPipCompletions[pipId] = pipCompletionData;
 
             using (var operationContext = m_operationTracker.StartOperation(PipExecutorCounter.WorkerServiceHandlePipStepDuration, pipId, pipType, m_appLoggingContext))
             using (operationContext.StartOperation(step))
@@ -519,13 +538,12 @@ namespace BuildXL.Engine.Distribution
                 if (!reportInputsResult.Succeeded)
                 {
                     // Could not report inputs due to input mismatch. Fail the pip
-                    BuildXL.Scheduler.Tracing.Logger.Log.PipMaterializeDependenciesFailureDueToVerifySourceFilesFailed(
+                    Scheduler.Tracing.Logger.Log.PipMaterializeDependenciesFailureDueToVerifySourceFilesFailed(
                         m_appLoggingContext,
                         pipInfo.Description,
                         reportInputsResult.Failure.DescribeIncludingInnerFailures());
 
                     ReportResult(
-                        operationContext,
                         pip,
                         ExecutionResult.GetFailureNotRunResult(m_appLoggingContext),
                         step);
@@ -560,19 +578,18 @@ namespace BuildXL.Engine.Distribution
                 }
 
                 ReportResult(
-                    operationContext,
                     pip,
                     executionResult,
                     step);
             }
         }
 
-        private Guid GetActivityId(PipId pipId)
+        private Guid GetActivityId(RunnablePip runnablePip)
         {
-            return new Guid(m_pendingBuildRequests[pipId].ActivityId);
+            return new Guid(m_pendingBuildRequests[(runnablePip.PipId, runnablePip.Step)].ActivityId);
         }
 
-        private void StartStep(RunnablePip runnablePip, PipExecutionStep step)
+        private void StartStep(RunnablePip runnablePip)
         {
             var pipId = runnablePip.PipId;
             var processRunnable = runnablePip as ProcessRunnablePip;
@@ -583,34 +600,36 @@ namespace BuildXL.Engine.Distribution
                 runnablePip.Description,
                 runnablePip.Step.AsString());
 
-            var completionData = m_pendingPipCompletions[pipId];
+            var pipIdStepTuple = (pipId, runnablePip.Step);
+            var completionData = m_pendingPipCompletions[pipIdStepTuple];
             completionData.StepExecutionStarted.SetResult(true);
 
-            switch (step)
+            switch (runnablePip.Step)
             {
                 case PipExecutionStep.ExecuteProcess:
                     if (runnablePip.PipType == PipType.Process)
                     {
                         SinglePipBuildRequest pipBuildRequest;
-                        bool found = m_pendingBuildRequests.TryGetValue(pipId, out pipBuildRequest);
+                        bool found = m_pendingBuildRequests.TryGetValue(pipIdStepTuple, out pipBuildRequest);
                         Contract.Assert(found, "Could not find corresponding build request for executed pip on worker");
-                        m_pendingBuildRequests[pipId] = null;
+                        m_pendingBuildRequests[pipIdStepTuple] = null;
 
                         // Set the cache miss result with fingerprint so ExecuteProcess step can use it
                         var fingerprint = pipBuildRequest.Fingerprint.ToFingerprint();
                         processRunnable.SetCacheResult(RunnableFromCacheResult.CreateForMiss(new WeakContentFingerprint(fingerprint)));
 
                         processRunnable.ExpectedMemoryCounters = ProcessMemoryCounters.CreateFromMb(
-                            peakVirtualMemoryUsageMb: pipBuildRequest.ExpectedRamUsageMb ?? 0,
-                            peakWorkingSetMb: pipBuildRequest.ExpectedRamUsageMb ?? 0,
-                            peakCommitUsageMb: pipBuildRequest.ExpectedCommitUsageMb ?? 0);
+                            peakWorkingSetMb: pipBuildRequest.ExpectedPeakWorkingSetMb,
+                            averageWorkingSetMb: pipBuildRequest.ExpectedAverageWorkingSetMb,
+                            peakCommitSizeMb: pipBuildRequest.ExpectedPeakCommitSizeMb,
+                            averageCommitSizeMb: pipBuildRequest.ExpectedAverageCommitSizeMb);
                     }
 
                     break;
             }
         }
 
-        private void EndStep(RunnablePip runnablePip, PipExecutionStep step, TimeSpan duration)
+        private void EndStep(RunnablePip runnablePip)
         {
             var pipId = runnablePip.PipId;
             var loggingContext = runnablePip.LoggingContext;
@@ -618,10 +637,13 @@ namespace BuildXL.Engine.Distribution
             var description = runnablePip.Description;
             var executionResult = runnablePip.ExecutionResult;
 
-            var completionData = m_pendingPipCompletions[pipId];
-            completionData.SerializedData.ExecuteStepTicks = duration.Ticks;
 
-            switch (step)
+            var completionData = m_pendingPipCompletions[(pipId, runnablePip.Step)];
+            completionData.SerializedData.ExecuteStepTicks = runnablePip.StepDuration.Ticks;
+            completionData.SerializedData.ThreadId = runnablePip.ThreadId;
+            completionData.SerializedData.StartTimeTicks = runnablePip.StepStartTime.Ticks;
+
+            switch (runnablePip.Step)
             {
                 case PipExecutionStep.MaterializeInputs:
                     if (!runnablePip.Result.HasValue ||
@@ -688,7 +710,6 @@ namespace BuildXL.Engine.Distribution
         }
 
         private void ReportResult(
-           OperationContext operationContext,
            Pip pip,
            ExecutionResult executionResult,
            PipExecutionStep step)
@@ -701,21 +722,29 @@ namespace BuildXL.Engine.Distribution
                 m_hasFailures = true;
             }
 
-            bool found = m_pendingPipCompletions.TryRemove(pipId, out var pipCompletion);
+            bool found = m_pendingPipCompletions.TryRemove((pipId, step), out var pipCompletion);
             Contract.Assert(found, "Could not find corresponding build completion data for executed pip on worker");
 
             pipCompletion.ExecutionResult = executionResult;
+            // To preserve the path set casing is an option only available for process pips
+            pipCompletion.PreservePathSetCasing = pip.PipType == PipType.Process ? ((Process)pip).PreservePathSetCasing : false;
 
-            if (step == PipExecutionStep.MaterializeOutputs && m_config.FireForgetMaterializeOutput)
+            if (step == PipExecutionStep.MaterializeOutputs && m_config.Distribution.FireForgetMaterializeOutput)
             {
                 // We do not report 'MaterializeOutput' step results back to master.
                 Logger.Log.DistributionWorkerFinishedPipRequest(m_appLoggingContext, pipCompletion.SemiStableHash, step.ToString());
+                return;
             }
-            else
+
+            try
             {
                 m_buildResults.Add(pipCompletion);
             }
-
+            catch (InvalidOperationException)
+            {
+                // m_buildResults is already marked as completed due to previously infrastructure errors reported (e.g., materialization errors).
+                // No need to report the other failed results as the build already failed
+            }
         }
 
         private Possible<Unit> TryReportInputs(List<FileArtifactKeyedHash> hashes)
@@ -841,14 +870,14 @@ namespace BuildXL.Engine.Distribution
                 m_workerService = workerService;
             }
 
-            public override Guid? GetActivityId(PipId pipId)
+            public override Guid? GetActivityId(RunnablePip runnablePip)
             {
-                return m_workerService.GetActivityId(pipId);
+                return m_workerService.GetActivityId(runnablePip);
             }
 
-            public override void StartStep(RunnablePip runnablePip, PipExecutionStep step)
+            public override void StartStep(RunnablePip runnablePip)
             {
-                if (step == PipExecutionStep.PostProcess)
+                if (runnablePip.Step == PipExecutionStep.PostProcess)
                 {
                     ExecutionResult executionResult;
                     var removed = m_processExecutionResult.TryRemove(runnablePip.PipId, out executionResult);
@@ -856,12 +885,12 @@ namespace BuildXL.Engine.Distribution
                     runnablePip.SetExecutionResult(executionResult);
                 }
 
-                m_workerService.StartStep(runnablePip, step);
+                m_workerService.StartStep(runnablePip);
             }
 
-            public override void EndStep(RunnablePip runnablePip, PipExecutionStep step, TimeSpan duration)
+            public override void EndStep(RunnablePip runnablePip)
             {
-                if (step == PipExecutionStep.ExecuteProcess)
+                if (runnablePip.Step == PipExecutionStep.ExecuteProcess)
                 {
                     // For successful/unsuccessful results of ExecuteProcess, store so that when master calls worker for
                     // PostProcess it can reuse the result rather than sending it unnecessarily
@@ -870,7 +899,7 @@ namespace BuildXL.Engine.Distribution
                     m_processExecutionResult[runnablePip.PipId] = runnablePip.ExecutionResult;
                 }
 
-                m_workerService.EndStep(runnablePip, step, duration);
+                m_workerService.EndStep(runnablePip);
             }
         }
 

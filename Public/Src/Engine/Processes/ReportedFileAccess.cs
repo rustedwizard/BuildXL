@@ -144,7 +144,7 @@ namespace BuildXL.Processes
             FlagsAndAttributes flagsAndAttributes,
             AbsolutePath manifestPath,
             string path,
-            string enumeratePatttern,
+            string enumeratePattern,
             FileAccessStatusMethod fileAccessStatusMethod = FileAccessStatusMethod.PolicyBased)
         {
             Contract.Requires(process != null);
@@ -161,7 +161,7 @@ namespace BuildXL.Processes
             FlagsAndAttributes = flagsAndAttributes;
             ManifestPath = manifestPath;
             Path = path;
-            EnumeratePattern = enumeratePatttern;
+            EnumeratePattern = enumeratePattern;
             Method = fileAccessStatusMethod;
         }
 
@@ -183,6 +183,27 @@ namespace BuildXL.Processes
                 ManifestPath, 
                 Path, 
                 EnumeratePattern, 
+                Method);
+        }
+
+        /// <nodoc/>
+        public ReportedFileAccess CreateWithPath(string path, AbsolutePath manifestPath)
+        {
+            return new ReportedFileAccess(
+                Operation,
+                Process,
+                RequestedAccess,
+                Status,
+                ExplicitlyReported,
+                Error,
+                Usn,
+                DesiredAccess,
+                ShareMode,
+                CreationDisposition,
+                FlagsAndAttributes,
+                manifestPath,
+                path,
+                EnumeratePattern,
                 Method);
         }
 
@@ -722,7 +743,7 @@ namespace BuildXL.Processes
                 flagsAndAttributes: (FlagsAndAttributes)reader.ReadUInt32(),
                 manifestPath: readPath != null ? readPath(reader) : reader.ReadAbsolutePath(),
                 path: reader.ReadNullableString(),
-                enumeratePatttern: reader.ReadNullableString(),
+                enumeratePattern: reader.ReadNullableString(),
                 fileAccessStatusMethod: (FileAccessStatusMethod)reader.ReadByte());
         }
 

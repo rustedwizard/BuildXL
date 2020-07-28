@@ -66,8 +66,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         internal RedisContentLocationStoreConfiguration Configuration => _configuration;
         private readonly RedisContentLocationStoreConfiguration _configuration;
 
-        internal RedisBlobAdapter BlobAdapter => _blobAdapter;
-        private readonly RedisBlobAdapter _blobAdapter;
+        internal RedisBlobAdapter PrimaryBlobAdapter => _primaryBlobAdapter;
+        private readonly RedisBlobAdapter _primaryBlobAdapter;
+        internal RedisBlobAdapter SecondaryBlobAdapter => _secondaryBlobAdapter;
+        private readonly RedisBlobAdapter _secondaryBlobAdapter;
 
         private Role? _role = null;
 
@@ -104,7 +106,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             _masterLeaseKey = new ReplicatedRedisHashKey(checkpointKeyBase + ".MasterLease", this, _clock, _raidedRedis);
             _clusterStateKey = new ReplicatedRedisHashKey(checkpointKeyBase + ".ClusterState", this, _clock, _raidedRedis);
 
-            _blobAdapter = new RedisBlobAdapter(_raidedRedis.PrimaryRedisDb, TimeSpan.FromMinutes(_configuration.BlobExpiryTimeMinutes), _configuration.MaxBlobCapacity, _clock);
+            _primaryBlobAdapter = new RedisBlobAdapter(_raidedRedis.PrimaryRedisDb, TimeSpan.FromMinutes(_configuration.BlobExpiryTimeMinutes), _configuration.MaxBlobCapacity, _clock);
+            _secondaryBlobAdapter = new RedisBlobAdapter(_raidedRedis.SecondaryRedisDb, TimeSpan.FromMinutes(_configuration.BlobExpiryTimeMinutes), _configuration.MaxBlobCapacity, _clock);
         }
 
         /// <inheritdoc />
@@ -114,7 +117,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         public CounterSet GetCounters(OperationContext context)
         {
             var counters = Counters.ToCounterSet();
-            counters.Merge(_blobAdapter.GetCounters(), "BlobAdapter.");
+            counters.Merge(_primaryBlobAdapter.GetCounters(), "PrimaryBlobAdapter.");
+            counters.Merge(_secondaryBlobAdapter.GetCounters(), "SecondaryBlobAdapter.");
             counters.Merge(_raidedRedis.GetCounters(context, _role, Counters[GlobalStoreCounters.InfoStats]));
             return counters;
         }
@@ -132,7 +136,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             ClusterState = new ClusterState(machineMappings[0].Id, machineMappings);
 
-            return await UpdateClusterStateAsync(context, ClusterState);
+            // When we start up, we don't want to modify the previous state set until we know if we need to do anything
+            // about it.
+            return await UpdateClusterStateAsync(context, ClusterState, MachineState.Unknown);
         }
 
         public async Task<MachineMapping> RegisterMachineAsync(OperationContext context, MachineLocation machineLocation)
@@ -437,32 +443,33 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         #endregion Role Management
 
         /// <inheritdoc />
-        public Task<BoolResult> UpdateClusterStateAsync(OperationContext context, ClusterState clusterState)
+        public Task<BoolResult> UpdateClusterStateAsync(OperationContext context, ClusterState clusterState, MachineState machineState = MachineState.Open)
         {
             return context.PerformOperationAsync(
                 Tracer,
-                () => UpdateClusterStateCoreAsync(context, clusterState),
+                () => UpdateClusterStateCoreAsync(context, clusterState, machineState),
                 Counters[GlobalStoreCounters.UpdateClusterState]);
         }
 
-        private async Task<BoolResult> UpdateClusterStateCoreAsync(OperationContext context, ClusterState clusterState)
+        private async Task<BoolResult> UpdateClusterStateCoreAsync(OperationContext context, ClusterState clusterState, MachineState machineState)
         {
-            (var inactiveMachineIdSet, var getUnknownMachinesResult) = await _clusterStateKey.UseReplicatedHashAsync(context, _configuration.RetryWindow, RedisOperation.UpdateClusterState, async (batch, key) =>
+            (var inactiveMachineIdSet, var closedMachineIdSet, var getUnknownMachinesResult) = await _clusterStateKey.UseReplicatedHashAsync(context, _configuration.RetryWindow, RedisOperation.UpdateClusterState, async (batch, key) =>
             {
-                var heartbeatResultTask = CallHeartbeatAsync(context, clusterState, batch, key, MachineState.Active);
+                var heartbeatResultTask = CallHeartbeatAsync(context, clusterState, batch, key, machineState);
 
                 var getUnknownMachinesTask = batch.GetUnknownMachinesAsync(
                     key,
                     clusterState.MaxMachineId);
-
 
                 await Task.WhenAll(heartbeatResultTask, getUnknownMachinesTask);
 
                 var heartbeatResult = await heartbeatResultTask;
                 var getUnknownMachinesResult = await getUnknownMachinesTask;
 
-                return (heartbeatResult, getUnknownMachinesResult);
+                return (heartbeatResult.inactiveMachineIdSet, heartbeatResult.closedMachineIdSet, getUnknownMachinesResult);
             }).ThrowIfFailureAsync();
+            Contract.Assert(inactiveMachineIdSet != null, "inactiveMachineIdSet != null");
+            Contract.Assert(closedMachineIdSet != null, "closedMachineIdSet != null");
 
             if (getUnknownMachinesResult.maxMachineId != clusterState.MaxMachineId)
             {
@@ -474,7 +481,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             }
 
             clusterState.AddUnknownMachines(getUnknownMachinesResult.maxMachineId, getUnknownMachinesResult.unknownMachines);
-            clusterState.SetInactiveMachines(inactiveMachineIdSet);
+            clusterState.SetMachineStates(inactiveMachineIdSet, closedMachineIdSet).ThrowIfFailure();
+
             Tracer.Debug(context, $"Inactive machines: Count={inactiveMachineIdSet.Count}, [{string.Join(", ", inactiveMachineIdSet)}]");
             Tracer.TrackMetric(context, "InactiveMachineCount", inactiveMachineIdSet.Count);
 
@@ -499,7 +507,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             return BoolResult.Success;
         }
 
-        private async Task<BitMachineIdSet> CallHeartbeatAsync(
+        private async Task<(MachineState priorState, BitMachineIdSet inactiveMachineIdSet, BitMachineIdSet closedMachineIdSet)> CallHeartbeatAsync(
             OperationContext context,
             ClusterState clusterState,
             RedisBatch batch,
@@ -508,28 +516,32 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             var heartbeatResults = await Task.WhenAll(clusterState.LocalMachineMappings.Select(async machineMapping =>
             {
-                (MachineState priorState, BitMachineIdSet inactiveMachineIdSet) = await batch.HeartbeatAsync(
+                (MachineState priorState, BitMachineIdSet inactiveMachineIdSet, BitMachineIdSet closedMachineIdSet) = await batch.HeartbeatAsync(
                     key,
                     machineMapping.Id.Index,
                     state,
                     _clock.UtcNow,
-                    _configuration.RecomputeInactiveMachinesExpiry,
-                    _configuration.MachineExpiry);
+                    _configuration.MachineStateRecomputeInterval,
+                    _configuration.MachineActiveToClosedInterval,
+                    _configuration.MachineActiveToExpiredInterval);
 
                 if (priorState != state)
                 {
                     Tracer.Debug(context, $"Machine {machineMapping} state changed from {priorState} to {state}");
                 }
 
-                if (priorState == MachineState.Unavailable || priorState == MachineState.Expired)
+                if (priorState == MachineState.DeadUnavailable || priorState == MachineState.DeadExpired)
                 {
                     clusterState.LastInactiveTime = _clock.UtcNow;
                 }
 
-                return inactiveMachineIdSet;
+                return (priorState, inactiveMachineIdSet, closedMachineIdSet);
             }).ToList());
 
-            return heartbeatResults.FirstOrDefault() ?? BitMachineIdSet.EmptyInstance;
+            return heartbeatResults.Any()
+                ? heartbeatResults.First()
+                : (priorState: MachineState.Unknown, inactiveMachineIdSet: BitMachineIdSet.EmptyInstance,
+                    closedMachineIdSet: BitMachineIdSet.EmptyInstance);
         }
 
         /// <inheritdoc />
@@ -566,9 +578,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                     Tracer.Debug(context, $"Getting checkpoint state: Found checkpoint '{maxCheckpoint}'");
 
-                    return Result.Success(new CheckpointState(_role.Value, new EventSequencePoint(maxCheckpoint.SequenceNumber), maxCheckpoint.CheckpointId, maxCheckpoint.CheckpointCreationTime));
+                    return Result.Success(new CheckpointState(_role.Value, new EventSequencePoint(maxCheckpoint.SequenceNumber), maxCheckpoint.CheckpointId, maxCheckpoint.CheckpointCreationTime, new MachineLocation(maxCheckpoint.MachineName)));
                 },
-                Counters[GlobalStoreCounters.GetCheckpointState]);
+                Counters[GlobalStoreCounters.GetCheckpointState],
+                // Using a timeout to make sure the operation finishes: this is important because we want for heartbeat operations
+                // that call this method to keep running to avoid stale checkpoints.
+                timeout: Configuration.GetCheckpointStateTimeout);
         }
 
         public Task<BoolResult> RegisterCheckpointAsync(OperationContext context, string checkpointId, EventSequencePoint sequencePoint)
@@ -596,19 +611,31 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        public async Task<BoolResult> InvalidateLocalMachineAsync(OperationContext context)
+        public async Task<Result<MachineState>> SetLocalMachineStateAsync(OperationContext context, MachineState state)
         {
+            var counter = state switch
+            {
+                MachineState.Unknown => GlobalStoreCounters.SetMachineStateUnknown,
+                MachineState.Open => GlobalStoreCounters.SetMachineStateOpen,
+                MachineState.DeadUnavailable => GlobalStoreCounters.SetMachineStateDeadUnavailable,
+                MachineState.Closed => GlobalStoreCounters.SetMachineStateClosed,
+                _ => throw new NotImplementedException($"Unexpected machine state transition to state: {state}"),
+            };
+
             return await context.PerformOperationAsync(
                 Tracer,
-                () =>
+                async () =>
                 {
-                    return _clusterStateKey.UseReplicatedHashAsync(
+                    var result = await _clusterStateKey.UseReplicatedHashAsync(
                         context,
                         _configuration.RetryWindow,
-                        RedisOperation.InvalidateLocalMachine,
-                        (batch, key) => CallHeartbeatAsync(context, ClusterState, batch, key, MachineState.Unavailable));
+                        RedisOperation.SetLocalMachineState,
+                        (batch, key) => CallHeartbeatAsync(context, ClusterState, batch, key, state)).ThrowIfFailureAsync();
 
-                }, Counters[GlobalStoreCounters.InvalidateLocalMachine]);
+                    return new Result<MachineState>(result.priorState);
+                },
+                counter: Counters[counter],
+                extraEndMessage: r => r.Succeeded ? $"OldState=[{r.Value}] NewState=[{state}]" : $"NewState=[{state}]");
         }
 
         /// <inheritdoc />
@@ -618,7 +645,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             return context.PerformOperationAsync(
                 Tracer,
-                () =>_blobAdapter.PutBlobAsync(context, hash, blob),
+                () => GetBlobAdapter(hash).PutBlobAsync(context, hash, blob),
                 traceOperationStarted: false,
                 counter: Counters[GlobalStoreCounters.PutBlob]);
         }
@@ -630,9 +657,20 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             return context.PerformOperationAsync(
                 Tracer,
-                () => TaskUtilities.WithTimeoutAsync(_ => _blobAdapter.GetBlobAsync(context, hash), _configuration.GetBlobTimeout, context.Token),
+                () => GetBlobAdapter(hash).GetBlobAsync(context, hash),
                 traceOperationStarted: false,
-                counter: Counters[GlobalStoreCounters.GetBlob]);
+                counter: Counters[GlobalStoreCounters.GetBlob],
+                timeout: _configuration.GetBlobTimeout);
         }
+
+        internal RedisBlobAdapter GetBlobAdapter(ContentHash hash)
+        {
+            if (!_raidedRedis.HasSecondary)
+            {
+                return _primaryBlobAdapter;
+            }
+
+            return hash[0] >= 128 ? _primaryBlobAdapter : _secondaryBlobAdapter;
+        } 
     }
 }

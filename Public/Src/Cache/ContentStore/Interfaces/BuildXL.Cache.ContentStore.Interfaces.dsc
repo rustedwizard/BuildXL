@@ -18,13 +18,13 @@ namespace Interfaces {
             UtilitiesCore.dll,
             ...addIfLazy(BuildXLSdk.isFullFramework, () => [
                 NetFx.System.Runtime.Serialization.dll,
+                NetFx.System.Linq.dll,
                 NetFx.System.Xml.dll,
             ]),
-            ...(qualifier.targetFramework !== "netstandard2.0" ? [] :
-            [
-                importFrom("System.Threading.Tasks.Dataflow").pkg,
-            ]),
-            importFrom("System.Interactive.Async").pkg,
+            ...addIf(qualifier.targetFramework === "netstandard2.0",
+                importFrom("System.Threading.Tasks.Dataflow").pkg
+            ),
+            ...BuildXLSdk.bclAsyncPackages,
             importFrom("WindowsAzure.Storage").pkg,
         ],
         nullable: true,
@@ -32,6 +32,7 @@ namespace Interfaces {
         internalsVisibleTo: [
             "BuildXL.Cache.ContentStore",
             "BuildXL.Cache.ContentStore.Distributed",
+            "BuildXL.Cache.ContentStore.Distributed.Test",
             "BuildXL.Cache.ContentStore.Interfaces.Test",
         ]
     });

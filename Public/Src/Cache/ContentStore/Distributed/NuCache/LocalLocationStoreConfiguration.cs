@@ -4,15 +4,16 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
+using System.Threading;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
+using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Utilities.Collections;
-using Microsoft.WindowsAzure.Storage;
-using Microsoft.WindowsAzure.Storage.Auth;
-using Microsoft.WindowsAzure.Storage.Blob;
 
+#nullable enable
 namespace BuildXL.Cache.ContentStore.Distributed
 {
     /// <summary>
@@ -55,7 +56,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// <summary>
         /// Interval between cluster state recomputations.
         /// </summary>
-        public TimeSpan RecomputeInactiveMachinesExpiry { get; set; } = TimeSpan.FromMinutes(1);
+        public TimeSpan MachineStateRecomputeInterval { get; set; } = TimeSpan.FromMinutes(1);
 
         /// <summary>
         /// The TTL on entries in RedisGlobalStore
@@ -66,37 +67,43 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// <summary>
         /// Configuration object for a local content location database.
         /// </summary>
-        public ContentLocationDatabaseConfiguration Database { get; set; }
+        public ContentLocationDatabaseConfiguration? Database { get; set; }
 
         /// <summary>
         /// Configuration object for a content location event store.
         /// </summary>
-        public ContentLocationEventStoreConfiguration EventStore { get; set; } = null;
+        public ContentLocationEventStoreConfiguration? EventStore { get; set; } = null;
 
         /// <summary>
         /// Configuration for NuCache checkpointing logic.
         /// </summary>
-        public CheckpointConfiguration Checkpoint { get; set; } = null;
+        public CheckpointConfiguration? Checkpoint { get; set; } = null;
 
         /// <summary>
         /// Configuration of the central store.
         /// </summary>
-        public CentralStoreConfiguration CentralStore { get; set; } = null;
+        public CentralStoreConfiguration? CentralStore { get; set; } = null;
 
         /// <summary>
         /// Configuration of the distributed central store
         /// </summary>
-        public DistributedCentralStoreConfiguration DistributedCentralStore { get; set; } = null;
+        public DistributedCentralStoreConfiguration? DistributedCentralStore { get; set; } = null;
 
         /// <summary>
         /// Gets the connection string used by the redis global store.
         /// </summary>
-        public string RedisGlobalStoreConnectionString { get; set; }
+        public string? RedisGlobalStoreConnectionString { get; set; }
 
         /// <summary>
         /// Gets the connection string used by the redis global store.
         /// </summary>
-        public string RedisGlobalStoreSecondaryConnectionString { get; set; }
+        public string? RedisGlobalStoreSecondaryConnectionString { get; set; }
+
+        /// <summary>
+        /// The Redis.StackExchange library performs its own internal logging. If the flag is not null, we pipe the
+        /// library's logging out through our own logger, at the specified severity.
+        /// </summary>
+        public Severity? RedisInternalLogSeverity { get; set; }
 
         /// <summary>
         /// Configuration of reputation tracker.
@@ -107,6 +114,12 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// Specifies whether tiered eviction comparison should be used when ordering content for eviction
         /// </summary>
         public bool UseTieredDistributedEviction { get; set; }
+
+        /// <summary>
+        /// Specifies the time period over which throttled eviction is used where last remaining replicas are
+        /// only allowed to be deleted in a throttled fashion
+        /// </summary>
+        public TimeSpan ThrottledEvictionInterval { get; set; }
 
         /// <summary>
         /// The number of buckets to offset by for important replicas. This effectively makes important replicas look younger.
@@ -206,9 +219,17 @@ namespace BuildXL.Cache.ContentStore.Distributed
 
         /// <summary>
         /// The amount of events that should be sent per reconciliation cycle if the reconciliation cycle consists only
-        /// of removes.
+        /// of at most <see cref="ReconciliationMaxRemoveHashesAddPercentage"/>
         /// </summary>
         public int? ReconciliationMaxRemoveHashesCycleSize { get; set; } = null;
+
+        /// <summary>
+        /// Maximum percentage of adds in a reconciliation cycle to use
+        /// <see cref="ReconciliationMaxRemoveHashesCycleSize"/> as the batch size.
+        ///
+        /// Defaults to 0 if <see cref="ReconciliationMaxRemoveHashesCycleSize"/> is enabled but this isn't
+        /// </summary>
+        public double? ReconciliationMaxRemoveHashesAddPercentage { get; set; } = null;
 
         /// <summary>
         /// Threshold under which proactive replication will be activated.
@@ -293,8 +314,27 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// Gets prefix used for checkpoints key which uniquely identifies a checkpoint lineage (i.e. changing this value indicates
         /// all prior checkpoints/cluster state are discarded and a new set of checkpoints is created)
         /// </summary>
-        internal string GetCheckpointPrefix() => CentralStore.CentralStateKeyBase + EventStore.Epoch;
+        internal string? GetCheckpointPrefix() => CentralStore?.CentralStateKeyBase + EventStore?.Epoch;
 
+        /// <summary>
+        /// Whether to randomize elements in machine list, while still respecting reputation and other priorizations.
+        /// </summary>
+        public bool RandomizeMachineList { get; set; }
+
+        /// <summary>
+        /// Whether to prioritize designated locations in machine lists, so that they are the first elements.
+        /// </summary>
+        public bool MachineListPrioritizeDesignatedLocations { get; set; }
+
+        /// <summary>
+        /// Whether to deprioritize the master in machine lists, so that it is the last element.
+        /// </summary>
+        public bool MachineListDeprioritizeMaster { get; set; }
+
+        /// <summary>
+        /// Indicates whether content hash lists should be touched after retrieval
+        /// </summary>
+        public bool TouchContentHashLists { get; set; }
     }
 
     /// <summary>
@@ -317,10 +357,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
     public class DistributedCentralStoreConfiguration
     {
         /// <nodoc />
-        public DistributedCentralStoreConfiguration(AbsolutePath cacheRoot)
-        {
-            CacheRoot = cacheRoot;
-        }
+        public DistributedCentralStoreConfiguration(AbsolutePath cacheRoot) => CacheRoot = cacheRoot;
 
         /// <summary>
         /// The working directory used by central store for storing 'uploaded' checkpoints.
@@ -356,7 +393,18 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// Maximum time to wait for a P2P copy to finish. When this times out, we will attempt to copy from the
         /// fallback storage.
         /// </summary>
-        public TimeSpan PeerToPeerCopyTimeout { get; set; } = TimeSpan.Zero;
+        public TimeSpan PeerToPeerCopyTimeout { get; set; } = Timeout.InfiniteTimeSpan;
+
+        /// <summary>
+        /// Optional settings for validating CAS consistency used by DistributedCentralStorage.
+        /// </summary>
+        public SelfCheckSettings? SelfCheckSettings { get; set; }
+
+        /// <summary>
+        /// When enabled, we will use our knowledge of which checkpointed files are immutable or not to optimize copy
+        /// operations into hardlinks.
+        /// </summary>
+        public bool ImmutabilityOptimizations { get; set; }
     }
 
     /// <summary>
@@ -476,6 +524,26 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// Age threshold after which we should eagerly restore checkpoint blocking the caller.
         /// </summary>
         public TimeSpan RestoreCheckpointAgeThreshold { get; set; }
+
+        /// <summary>
+        /// The interval by which LLS' heartbeat will update the cluster state. Default is to do it on every heartbeat.
+        /// </summary>
+        public TimeSpan? UpdateClusterStateInterval { get; set; }
+
+        /// <summary>
+        /// Whether to enable the ability of machines to restore at a given interval.
+        /// </summary>
+        public bool PacemakerEnabled { get; set; } = false;
+
+        /// <summary>
+        /// Exact number of buckets to use. Allows us to skew the distribution.
+        /// </summary>
+        public uint? PacemakerNumberOfBuckets { get; set; } = null;
+
+        /// <summary>
+        /// Whether to use a random identifier at every heartbeat, or to use a deterministic identifier per checkpoint.
+        /// </summary>
+        public bool PacemakerUseRandomIdentifier { get; set; } = false;
 
         /// <inheritdoc />
         public CheckpointConfiguration(AbsolutePath workingDirectory) => WorkingDirectory = workingDirectory;

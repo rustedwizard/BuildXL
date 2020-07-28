@@ -121,10 +121,10 @@ namespace BuildXL.Scheduler.Distribution
             var allowedUndeclaredSourceReads = reader.ReadReadOnlySet(ReadAbsolutePath);
             var absentPathProbesUnderOutputDirectories = reader.ReadReadOnlySet(ReadAbsolutePath);
 
-            ReportedFileAccess[] fileAccessViolationsNotWhitelisted;
-            ReportedFileAccess[] whitelistedFileAccessViolations;
+            ReportedFileAccess[] fileAccessViolationsNotAllowlisted;
+            ReportedFileAccess[] allowlistedFileAccessViolations;
             ReportedProcess[] reportedProcesses;
-            ReadReportedProcessesAndFileAccesses(reader, out fileAccessViolationsNotWhitelisted, out whitelistedFileAccessViolations, out reportedProcesses, readPath: m_readPath);
+            ReadReportedProcessesAndFileAccesses(reader, out fileAccessViolationsNotAllowlisted, out allowlistedFileAccessViolations, out reportedProcesses, readPath: m_readPath);
 
             var twoPhaseCachingInfo = ReadTwoPhaseCachingInfo(reader);
             var cacheDescriptor = ReadPipCacheDescriptor(reader);
@@ -157,7 +157,12 @@ namespace BuildXL.Scheduler.Distribution
 
             var pipProperties = ReadPipProperties(reader);
             var hasUserRetries = reader.ReadBoolean();
-            var isCancelledDueToResourceExhaustion = reader.ReadBoolean();
+
+            RetryInfo pipRetryInfo = null;
+            if (reader.ReadBoolean())
+            {
+                pipRetryInfo = RetryInfo.Deserialize(reader);
+            }
 
             var processExecutionResult = ExecutionResult.CreateSealed(
                 result,
@@ -166,8 +171,8 @@ namespace BuildXL.Scheduler.Distribution
                 directoryOutputs,
                 performanceInformation,
                 weakFingerprint,
-                fileAccessViolationsNotWhitelisted,
-                whitelistedFileAccessViolations,
+                fileAccessViolationsNotAllowlisted,
+                allowlistedFileAccessViolations,
                 mustBeConsideredPerpetuallyDirty,
                 dynamicallyObservedFiles,
                 dynamicallyProbedFiles,
@@ -181,7 +186,7 @@ namespace BuildXL.Scheduler.Distribution
                 cacheLookupCounters,
                 pipProperties,
                 hasUserRetries,
-                isCancelledDueToResourceExhaustion);
+                pipRetryInfo);
 
             return processExecutionResult;
         }
@@ -189,7 +194,7 @@ namespace BuildXL.Scheduler.Distribution
         /// <summary>
         /// Serialize result to writer
         /// </summary>
-        public void Serialize(BuildXLWriter writer, ExecutionResult result)
+        public void Serialize(BuildXLWriter writer, ExecutionResult result, bool preservePathCasing)
         {
             writer.Write(m_maxSerializableAbsolutePathIndex);
 
@@ -220,8 +225,8 @@ namespace BuildXL.Scheduler.Distribution
             writer.Write(result.AbsentPathProbesUnderOutputDirectories, WriteAbsolutePath);
             WriteReportedProcessesAndFileAccesses(
                 writer,
-                result.FileAccessViolationsNotWhitelisted,
-                result.WhitelistedFileAccessViolations,
+                result.FileAccessViolationsNotAllowlisted,
+                result.AllowlistedFileAccessViolations,
                 writePath: m_writePath);
 
             WriteTwoPhaseCachingInfo(writer, result.TwoPhaseCachingInfo);
@@ -232,7 +237,7 @@ namespace BuildXL.Scheduler.Distribution
             }
 
             writer.Write(result.PathSet.HasValue);
-            result.PathSet?.Serialize(m_executionContext.PathTable, writer, pathWriter: WriteAbsolutePath);
+            result.PathSet?.Serialize(m_executionContext.PathTable, writer, preservePathCasing, pathWriter: WriteAbsolutePath);
 
             bool sendCacheLookupCounters = result.CacheLookupPerfInfo != null;
             writer.Write(sendCacheLookupCounters);
@@ -244,7 +249,8 @@ namespace BuildXL.Scheduler.Distribution
 
             WritePipProperties(writer, result.PipProperties);
             writer.Write(result.HasUserRetries);
-            writer.Write(result.IsCancelledDueToResourceExhaustion);
+
+            writer.Write(result.RetryInfo, (w, ri) => ri.Serialize(w));
         }
 
         private static TwoPhaseCachingInfo ReadTwoPhaseCachingInfo(BuildXLReader reader)
@@ -313,7 +319,7 @@ namespace BuildXL.Scheduler.Distribution
         public static void ReadReportedProcessesAndFileAccesses(
             BuildXLReader reader,
             out ReportedFileAccess[] reportedFileAccesses,
-            out ReportedFileAccess[] whitelistedReportedFileAccesses,
+            out ReportedFileAccess[] allowlistedReportedFileAccesses,
             out ReportedProcess[] reportedProcesses,
             Func<BuildXLReader, AbsolutePath> readPath = null)
         {
@@ -325,7 +331,7 @@ namespace BuildXL.Scheduler.Distribution
             {
                 reportedProcesses = CollectionUtilities.EmptyArray<ReportedProcess>();
                 reportedFileAccesses = CollectionUtilities.EmptyArray<ReportedFileAccess>();
-                whitelistedReportedFileAccesses = CollectionUtilities.EmptyArray<ReportedFileAccess>();
+                allowlistedReportedFileAccesses = CollectionUtilities.EmptyArray<ReportedFileAccess>();
             }
             else
             {
@@ -338,11 +344,11 @@ namespace BuildXL.Scheduler.Distribution
                     reportedFileAccesses[i] = ReadReportedFileAccess(reader, reportedProcesses, readPath);
                 }
 
-                int whitelistedReportedFileAccessCount = reader.ReadInt32Compact();
-                whitelistedReportedFileAccesses = new ReportedFileAccess[whitelistedReportedFileAccessCount];
-                for (int i = 0; i < whitelistedReportedFileAccessCount; i++)
+                int allowlistedReportedFileAccessCount = reader.ReadInt32Compact();
+                allowlistedReportedFileAccesses = new ReportedFileAccess[allowlistedReportedFileAccessCount];
+                for (int i = 0; i < allowlistedReportedFileAccessCount; i++)
                 {
-                    whitelistedReportedFileAccesses[i] = ReadReportedFileAccess(reader, reportedProcesses, readPath);
+                    allowlistedReportedFileAccesses[i] = ReadReportedFileAccess(reader, reportedProcesses, readPath);
                 }
             }
         }
@@ -353,7 +359,7 @@ namespace BuildXL.Scheduler.Distribution
         public static void WriteReportedProcessesAndFileAccesses(
             BuildXLWriter writer,
             IReadOnlyCollection<ReportedFileAccess> reportedFileAccesses,
-            IReadOnlyCollection<ReportedFileAccess> whitelistedReportedFileAccesses,
+            IReadOnlyCollection<ReportedFileAccess> allowlistedReportedFileAccesses,
             IReadOnlyCollection<ReportedProcess> reportedProcesses = null,
             Action<BuildXLWriter, AbsolutePath> writePath = null)
         {
@@ -361,7 +367,7 @@ namespace BuildXL.Scheduler.Distribution
 
             bool hasReportedFileAccessesOrProcesses = (reportedFileAccesses != null && reportedFileAccesses.Count != 0)
                 || (reportedProcesses != null && reportedProcesses.Count != 0)
-                || (whitelistedReportedFileAccesses != null && whitelistedReportedFileAccesses.Count != 0);
+                || (allowlistedReportedFileAccesses != null && allowlistedReportedFileAccesses.Count != 0);
 
             if (!hasReportedFileAccessesOrProcesses)
             {
@@ -372,13 +378,13 @@ namespace BuildXL.Scheduler.Distribution
                 writer.Write(true);
 
                 reportedFileAccesses = reportedFileAccesses ?? CollectionUtilities.EmptyArray<ReportedFileAccess>();
-                whitelistedReportedFileAccesses = whitelistedReportedFileAccesses ?? CollectionUtilities.EmptyArray<ReportedFileAccess>();
+                allowlistedReportedFileAccesses = allowlistedReportedFileAccesses ?? CollectionUtilities.EmptyArray<ReportedFileAccess>();
                 reportedProcesses = reportedProcesses ?? CollectionUtilities.EmptyArray<ReportedProcess>();
 
                 using (var pooledProcessMap = s_reportedProcessMapPool.GetInstance())
                 {
                     Dictionary<ReportedProcess, int> processMap = pooledProcessMap.Instance;
-                    var allReportedProcesses = reportedProcesses.Concat(reportedFileAccesses.Select(rfa => rfa.Process)).Concat(whitelistedReportedFileAccesses.Select(rfa => rfa.Process));
+                    var allReportedProcesses = reportedProcesses.Concat(reportedFileAccesses.Select(rfa => rfa.Process)).Concat(allowlistedReportedFileAccesses.Select(rfa => rfa.Process));
 
                     foreach (var reportedProcess in allReportedProcesses)
                     {
@@ -397,10 +403,10 @@ namespace BuildXL.Scheduler.Distribution
                         WriteReportedFileAccess(writer, reportedFileAccess, processMap, writePath);
                     }
 
-                    writer.WriteCompact(whitelistedReportedFileAccesses.Count);
-                    foreach (var whitelistedReportedFileAccess in whitelistedReportedFileAccesses)
+                    writer.WriteCompact(allowlistedReportedFileAccesses.Count);
+                    foreach (var allowlistedReportedFileAccess in allowlistedReportedFileAccesses)
                     {
-                        WriteReportedFileAccess(writer, whitelistedReportedFileAccess, processMap, writePath);
+                        WriteReportedFileAccess(writer, allowlistedReportedFileAccess, processMap, writePath);
                     }
                 }
             }

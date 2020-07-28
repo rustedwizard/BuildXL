@@ -12,9 +12,11 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Hashing;
+using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Engine.Cache.Artifacts;
 using BuildXL.Engine.Cache.Fingerprints;
 using BuildXL.Engine.Cache.Fingerprints.TwoPhase;
+using BuildXL.Interop;
 using BuildXL.Ipc.Common;
 using BuildXL.Ipc.Interfaces;
 using BuildXL.Native.IO;
@@ -38,6 +40,7 @@ using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
+using JetBrains.Annotations;
 using static BuildXL.Processes.SandboxedProcessFactory;
 using static BuildXL.Utilities.FormattableStringEx;
 
@@ -52,8 +55,8 @@ namespace BuildXL.Scheduler
         /// The maximum number of times to retry running a pip due to internal sandboxed process execution failure.
         /// </summary>
         /// <remarks>
-        /// Internal failure include <see cref="SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed"/>
-        /// and <see cref="SandboxedProcessPipExecutionStatus.MismatchedMessageCount"/>.
+        /// Internal failure include <see cref="RetryReason.OutputWithNoFileAccessFailed"/>
+        /// and <see cref="RetryReason.MismatchedMessageCount"/>.
         /// </remarks>
         public const int InternalSandboxedProcessExecutionFailureRetryCountMax = 5;
 
@@ -158,28 +161,21 @@ namespace BuildXL.Scheduler
                     FileMaterializationInfo sourceMaterializationInfo = environment.State.FileContentManager.GetInputContent(pip.Source);
                     FileContentInfo sourceContentInfo = sourceMaterializationInfo.FileContentInfo;
 
-                    var symlinkTarget = environment.State.FileContentManager.TryGetRegisteredSymlinkFinalTarget(pip.Source.Path);
                     ReadOnlyArray<AbsolutePath> symlinkChain;
-                    bool isSymLink = symlinkTarget.IsValid;
-                    if (isSymLink)
+                    var symlinkTarget = AbsolutePath.Invalid;
+                    bool isSymLink = false;
+               
+                    var possibleSymlinkChain = CheckValidSymlinkChainAsync(pip.Source, environment);
+                    if (!possibleSymlinkChain.Succeeded)
                     {
-                        symlinkChain = ReadOnlyArray<AbsolutePath>.FromWithoutCopy(new[] { symlinkTarget });
+                        possibleSymlinkChain.Failure.Throw();
                     }
-                    else
-                    {
-                        // pip.Source is not a registered symlink - check if this file forms a proper symlink chain
-                        var possibleSymlinkChain = CheckValidSymlinkChainAsync(pip.Source, environment);
-                        if (!possibleSymlinkChain.Succeeded)
-                        {
-                            possibleSymlinkChain.Failure.Throw();
-                        }
 
-                        symlinkChain = possibleSymlinkChain.Result;
-                        if (symlinkChain.Length > 0)
-                        {
-                            symlinkTarget = symlinkChain[symlinkChain.Length - 1];
-                            isSymLink = true;
-                        }
+                    symlinkChain = possibleSymlinkChain.Result;
+                    if (symlinkChain.Length > 0)
+                    {
+                        symlinkTarget = symlinkChain[symlinkChain.Length - 1];
+                        isSymLink = true;
                     }
 
                     if (isSymLink && !environment.Configuration.Schedule.AllowCopySymlink)
@@ -317,7 +313,8 @@ namespace BuildXL.Scheduler
                     var possiblyTracked = await environment.LocalDiskContentStore.TryTrackAsync(
                         FileArtifact.CreateSourceFile(chainElement),
                         environment.Configuration.Sandbox.FlushPageCacheToFileSystemOnStoringOutputsToCache,
-                        ignoreKnownContentHashOnDiscoveringContent: true);
+                        ignoreKnownContentHashOnDiscoveringContent: true,
+                        isSymlink: true);
 
                     if (!possiblyTracked.Succeeded)
                     {
@@ -619,7 +616,7 @@ namespace BuildXL.Scheduler
                     PipExecutorCounter.Ipc_ResponseAfterSetTaskDurationMs,
                     (long)response_AfterSetTaskDuration.TotalMilliseconds);
 
-                if (environment.Configuration.Schedule.WriteIpcOutput)
+                if (environment.Configuration.Schedule.WriteIpcOutput || environment.State.ServiceManager.HasRealConsumers(pip))
                 {
                     // write payload to pip.OutputFile
                     Possible<PipResultStatus> writeFileStatus = await TryWriteFileAndReportOutputsAsync(
@@ -973,17 +970,17 @@ namespace BuildXL.Scheduler
                 var exclusiveOpaqueDirectories = processExecutionResult.DirectoryOutputs.Where(directoryArtifactWithContent => !directoryArtifactWithContent.directoryArtifact.IsSharedOpaque).ToReadOnlyArray();
 
                 // Regardless of if we will fail the pip or not, maybe analyze them for higher-level dependency violations.
-                if (processExecutionResult.FileAccessViolationsNotWhitelisted != null
-                    || processExecutionResult.WhitelistedFileAccessViolations != null
+                if (processExecutionResult.FileAccessViolationsNotAllowlisted != null
+                    || processExecutionResult.AllowlistedFileAccessViolations != null
                     || processExecutionResult.SharedDynamicDirectoryWriteAccesses != null
-                    || exclusiveOpaqueDirectories != null
+                    || exclusiveOpaqueDirectories.Length != 0
                     || processExecutionResult.AllowedUndeclaredReads != null
                     || processExecutionResult.AbsentPathProbesUnderOutputDirectories != null)
                 {
                     analyzePipViolationsResult = environment.FileMonitoringViolationAnalyzer.AnalyzePipViolations(
                         process,
-                        processExecutionResult.FileAccessViolationsNotWhitelisted,
-                        processExecutionResult.WhitelistedFileAccessViolations,
+                        processExecutionResult.FileAccessViolationsNotAllowlisted,
+                        processExecutionResult.AllowlistedFileAccessViolations,
                         exclusiveOpaqueDirectories,
                         processExecutionResult.SharedDynamicDirectoryWriteAccesses,
                         processExecutionResult.AllowedUndeclaredReads,
@@ -1065,7 +1062,7 @@ namespace BuildXL.Scheduler
                 {
                     using var sidebandWriter = CreateSidebandWriter(environment, pip);
                     sidebandWriter.EnsureHeaderWritten();
-                    var dynamicWrites = executionResult.SharedDynamicDirectoryWriteAccesses?.SelectMany(kvp => kvp.Value) ?? CollectionUtilities.EmptyArray<AbsolutePath>();
+                    var dynamicWrites = executionResult.SharedDynamicDirectoryWriteAccesses?.SelectMany(kvp => kvp.Value).Select(fa => fa.Path) ?? CollectionUtilities.EmptyArray<AbsolutePath>();
                     foreach (var dynamicWrite in dynamicWrites)
                     {
                         sidebandWriter.RecordFileWrite(environment.Context.PathTable, dynamicWrite, flushImmediately: false);
@@ -1102,7 +1099,12 @@ namespace BuildXL.Scheduler
                         processDescription,
                         cacheHitData.Metadata.NumberOfWarnings);
 
-                    await ReplayWarningsFromCacheAsync(operationContext, environment, state, pip, cacheHitData);
+                    if(!await ReplayWarningsFromCacheAsync(operationContext, environment, state, pip, cacheHitData))
+                    {
+                        // An error has been logged, the pip must fail
+                        return executionResult.CloneSealedWithResult(PipResultStatus.Failed);
+
+                    }
                 }
 
                 return executionResult;
@@ -1204,6 +1206,320 @@ namespace BuildXL.Scheduler
                     return ExecutionResult.GetFailureNotRunResult(operationContext);
                 }
             }
+
+            // Service related pips cannot be cancelled
+            bool allowResourceBasedCancellation = !pip.ProcessOptions.HasFlag(Process.Options.Uncancellable) && (pip.ServiceInfo == null || pip.ServiceInfo.Kind == ServicePipKind.None);
+
+            DateTime start = DateTime.UtcNow;
+
+            // Execute the process when resources are available
+            SandboxedProcessPipExecutionResult executionResult = await environment.State.ResourceManager
+                .ExecuteWithResourcesAsync(
+                    operationContext,
+                    pip,
+                    expectedMemoryCounters,
+                    allowResourceBasedCancellation,
+                    async (resourceScope) => { return await ExecutePipAndHandleRetryAsync(resourceScope, 
+                        operationContext, pip, expectedMemoryCounters, environment, state, processIdListener, detoursEventListener, start); });
+
+            processExecutionResult.ReportSandboxedExecutionResult(executionResult);
+            LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseReportingExeResult, DateTime.UtcNow.Subtract(start));
+
+            counters.AddToCounter(PipExecutorCounter.SandboxedProcessPrepDurationMs, executionResult.SandboxPrepMs);
+            counters.AddToCounter(
+                PipExecutorCounter.SandboxedProcessProcessResultDurationMs,
+                executionResult.ProcessSandboxedProcessResultMs);
+            counters.AddToCounter(PipExecutorCounter.ProcessStartTimeMs, executionResult.ProcessStartTimeMs);
+
+            // We may have some violations reported already (outright denied by the sandbox manifest).
+            FileAccessReportingContext fileAccessReportingContext = executionResult.UnexpectedFileAccesses;
+
+            if (executionResult.Status == SandboxedProcessPipExecutionStatus.PreparationFailed)
+            {
+                // Preparation failures provide minimal feedback.
+                // We do not have any execution-time information (observed accesses or file monitoring violations) to analyze.
+                processExecutionResult.SetResult(operationContext, PipResultStatus.Failed);
+
+                counters.IncrementCounter(PipExecutorCounter.PreparationFailureCount);
+                counters.IncrementCounter(PipExecutorCounter.PreparationFailurePartialCopyCount);
+
+                return processExecutionResult;
+            }
+
+            if (RetryInfo.RetryAbleOnDifferentWorker(executionResult.RetryInfo))
+            {
+                // No post processing for retryable pips
+                processExecutionResult.SetResult(operationContext, PipResultStatus.Canceled, executionResult.RetryInfo);
+
+                if (fileAccessReportingContext != null)
+                {
+                    ReportFileAccesses(processExecutionResult, fileAccessReportingContext);
+                }
+
+                if (executionResult?.PrimaryProcessTimes != null)
+                {
+                    counters.AddToCounter(
+                        PipExecutorCounter.CanceledProcessExecuteDuration,
+                        executionResult.PrimaryProcessTimes.TotalWallClockTime);
+                }
+
+                return processExecutionResult;
+            }
+
+            // These are the results we know how to handle. PreperationFailed has already been handled above.
+            if (!(executionResult.Status == SandboxedProcessPipExecutionStatus.Succeeded ||
+                executionResult.Status == SandboxedProcessPipExecutionStatus.ExecutionFailed ||
+                executionResult.Status == SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed ||
+                executionResult.Status == SandboxedProcessPipExecutionStatus.Canceled))
+            {
+                Contract.Assert(false, "Unexpected execution result " + executionResult.Status);
+            }
+
+            bool succeeded = executionResult.Status == SandboxedProcessPipExecutionStatus.Succeeded;
+
+            if (executionResult.Status == SandboxedProcessPipExecutionStatus.ExecutionFailed ||
+                executionResult.Status == SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed)
+            {
+                Contract.Assert(operationContext.LoggingContext.ErrorWasLogged, I($"Error should have been logged for '{executionResult.Status}'"));
+            }
+
+            if (executionResult.RetryInfo?.RetryReason == RetryReason.OutputWithNoFileAccessFailed ||
+                executionResult.RetryInfo?.RetryReason == RetryReason.MismatchedMessageCount ||
+                executionResult.RetryInfo?.RetryReason == RetryReason.AzureWatsonExitCode)
+            {
+                Contract.Assert(operationContext.LoggingContext.ErrorWasLogged, I($"Error should have been logged for failures after multiple retries on {executionResult.RetryInfo?.RetryLocation.ToString()} due to '{executionResult.RetryInfo?.RetryReason.ToString()}'"));
+            }
+
+            Contract.Assert(executionResult.UnexpectedFileAccesses != null, "Success / ExecutionFailed provides all execution-time fields");
+            Contract.Assert(executionResult.PrimaryProcessTimes != null, "Success / ExecutionFailed provides all execution-time fields");
+
+            counters.AddToCounter(PipExecutorCounter.ExecuteProcessDuration, executionResult.PrimaryProcessTimes.TotalWallClockTime);
+
+            using (operationContext.StartOperation(PipExecutorCounter.ProcessOutputsDuration))
+            {
+                ObservedInputProcessingResult observedInputValidationResult;
+
+                using (operationContext.StartOperation(PipExecutorCounter.ProcessOutputsObservedInputValidationDuration))
+                {
+                    // In addition, we need to verify that additional reported inputs are actually allowed, and furthermore record them.
+                    //
+                    // Don't track file changes in observed input processor when process execution failed. Running observed input processor has side effects
+                    // that some files get tracked by the file change tracker. Suppose that the process failed because it accesses paths that
+                    // are supposed to be untracked (but the user forgot to specify it in the spec). Those paths will be tracked by
+                    // file change tracker because the observed input processor may try to probe and track those paths.
+                    start = DateTime.UtcNow;
+                    observedInputValidationResult =
+                        await ValidateObservedFileAccessesAsync(
+                            operationContext,
+                            environment,
+                            state,
+                            state.GetCacheableProcess(pip, environment),
+                            fileAccessReportingContext,
+                            executionResult.ObservedFileAccesses,
+                            executionResult.SharedDynamicDirectoryWriteAccesses,
+                            trackFileChanges: succeeded);
+                    LogSubPhaseDuration(
+                        operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseValidateObservedFileAccesses, DateTime.UtcNow.Subtract(start),
+                        $"(AbsPrb: {observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories.Count}, DynFiles: {observedInputValidationResult.DynamicallyObservedFiles.Length})");
+                }
+
+                // Store the dynamically observed accesses
+                processExecutionResult.DynamicallyObservedFiles = observedInputValidationResult.DynamicallyObservedFiles;
+                processExecutionResult.DynamicallyProbedFiles = observedInputValidationResult.DynamicallyProbedFiles;
+                processExecutionResult.DynamicallyObservedEnumerations = observedInputValidationResult.DynamicallyObservedEnumerations;
+                processExecutionResult.AllowedUndeclaredReads = observedInputValidationResult.AllowedUndeclaredSourceReads;
+                processExecutionResult.AbsentPathProbesUnderOutputDirectories = observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories;
+
+                if (observedInputValidationResult.Status == ObservedInputProcessingStatus.Aborted)
+                {
+                    succeeded = false;
+                    Contract.Assume(operationContext.LoggingContext.ErrorWasLogged, "No error was logged when ValidateObservedAccesses failed");
+                }
+
+                if (pip.ProcessAbsentPathProbeInUndeclaredOpaquesMode == Process.AbsentPathProbeInUndeclaredOpaquesMode.Relaxed
+                    && observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories.Count > 0)
+                {
+                    start = DateTime.UtcNow;
+                    bool isDirty = false;
+                    foreach (var absentPathProbe in observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories)
+                    {
+                        if (!pip.DirectoryDependencies.Any(dir => absentPathProbe.IsWithin(pathTable, dir)))
+                        {
+                            isDirty = true;
+                            break;
+                        }
+                    }
+                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingIsDirty, DateTime.UtcNow.Subtract(start));
+                    processExecutionResult.MustBeConsideredPerpetuallyDirty = isDirty;
+                }
+
+                // We have all violations now.
+                UnexpectedFileAccessCounters unexpectedFilesAccesses = fileAccessReportingContext.Counters;
+                processExecutionResult.ReportUnexpectedFileAccesses(unexpectedFilesAccesses);
+
+                // Set file access violations which were not allowlisted for use by file access violation analyzer
+                processExecutionResult.FileAccessViolationsNotAllowlisted = fileAccessReportingContext.FileAccessViolationsNotAllowlisted;
+                processExecutionResult.AllowlistedFileAccessViolations = fileAccessReportingContext.AllowlistedFileAccessViolations;
+
+                // We need to update this instance so used a boxed representation
+                BoxRef<ProcessFingerprintComputationEventData> fingerprintComputation =
+                    new ProcessFingerprintComputationEventData
+                    {
+                        Kind = FingerprintComputationKind.Execution,
+                        PipId = pip.PipId,
+                        WeakFingerprint = new WeakContentFingerprint((fingerprint ?? ContentFingerprint.Zero).Hash),
+
+                        // This field is set later for successful strong fingerprint computation
+                        StrongFingerprintComputations = CollectionUtilities.EmptyArray<ProcessStrongFingerprintComputationData>(),
+                    };
+
+                bool outputHashSuccess = false;
+
+                if (succeeded)
+                {
+                    // We are now be able to store a descriptor and content for this process to cache if we wish.
+                    // But if the pip completed with (warning level) file monitoring violations (suppressed or not), there's good reason
+                    // to believe that there are missing inputs or outputs for the pip. This allows a nice compromise in which a build
+                    // author can iterate quickly on fixing monitoring errors in a large build - mostly cached except for those parts with warnings.
+                    // Of course, if the allowlist was configured to explicitly allow caching for those violations, we allow it.
+                    //
+                    // N.B. fileAccessReportingContext / unexpectedFilesAccesses accounts for violations from the execution itself as well as violations added by ValidateObservedAccesses
+                    bool skipCaching = true;
+                    ObservedInputProcessingResult? observedInputProcessingResultForCaching = null;
+
+                    if (unexpectedFilesAccesses.HasUncacheableFileAccesses)
+                    {
+                        Logger.Log.ScheduleProcessNotStoredToCacheDueToFileMonitoringViolations(operationContext, processDescription);
+                    }
+                    else if (executionResult.NumberOfWarnings > 0 &&
+                             ExtraFingerprintSalts.ArePipWarningsPromotedToErrors(configuration.Logging))
+                    {
+                        // Just like not caching errors, we also don't want to cache warnings that are promoted to errors
+                        Logger.Log.ScheduleProcessNotStoredToWarningsUnderWarnAsError(operationContext, processDescription);
+                    }
+                    else if (!fingerprint.HasValue)
+                    {
+                        Logger.Log.ScheduleProcessNotStoredToCacheDueToInherentUncacheability(operationContext, processDescription);
+                    }
+                    else
+                    {
+                        Contract.Assume(
+                            observedInputValidationResult.Status == ObservedInputProcessingStatus.Success,
+                            "Should never cache a process that failed observed file input validation (cacheable-allowlisted violations leave the validation successful).");
+
+                        // Note that we discard observed inputs if cache-ineligible (required by StoreDescriptorAndContentForProcess)
+                        observedInputProcessingResultForCaching = observedInputValidationResult;
+                        skipCaching = false;
+                    }
+
+                    // TODO: Maybe all counter updates should occur on distributed build master.
+                    if (skipCaching)
+                    {
+                        counters.IncrementCounter(PipExecutorCounter.ProcessPipsExecutedButUncacheable);
+                    }
+
+                    using (operationContext.StartOperation(PipExecutorCounter.ProcessOutputsStoreContentForProcessAndCreateCacheEntryDuration))
+                    {
+                        start = DateTime.UtcNow;
+                        outputHashSuccess = await StoreContentForProcessAndCreateCacheEntryAsync(
+                            operationContext,
+                            environment,
+                            state,
+                            pip,
+                            processDescription,
+                            observedInputProcessingResultForCaching,
+                            executionResult.EncodedStandardOutput,
+                            // Possibly null
+                            executionResult.EncodedStandardError,
+                            // Possibly null
+                            executionResult.NumberOfWarnings,
+                            processExecutionResult,
+                            enableCaching: !skipCaching,
+                            fingerprintComputation: fingerprintComputation,
+                            executionResult.ContainerConfiguration);
+                        LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringCacheContent, DateTime.UtcNow.Subtract(start));
+                    }
+
+                    if (outputHashSuccess)
+                    {
+                        processExecutionResult.SetResult(operationContext, PipResultStatus.Succeeded);
+                        processExecutionResult.MustBeConsideredPerpetuallyDirty = skipCaching;
+                    }
+                    else
+                    {
+                        // The Pip itself did not fail, but we are marking it as a failure because we could not handle the post processing.
+                        Contract.Assume(
+                            operationContext.LoggingContext.ErrorWasLogged,
+                            "Error should have been logged for StoreContentForProcessAndCreateCacheEntry() failure");
+                    }
+                }
+
+                // If there were any failures, attempt to log partial information to execution log.
+                // Only do this if the ObservedInputProcessor was able to process changes successfully. This will exclude
+                // both the Aborted and Mismatch states, which means builds with file access violations won't get their
+                // StrongFingerprint information logged. Ideally it could be logged, but there are a number of paths in
+                // the ObservedInputProcessor where the final result has invalid state if the statups wasn't Success.
+                if (!succeeded && observedInputValidationResult.Status == ObservedInputProcessingStatus.Success)
+                {
+                    start = DateTime.UtcNow;
+                    var pathSet = observedInputValidationResult.GetPathSet(state.UnsafeOptions);
+                    var pathSetHash = await environment.State.Cache.SerializePathSetAsync(pathSet, pip.PreservePathSetCasing);
+
+                    // This strong fingerprint is meaningless and not-cached, but compute it for the sake of
+                    // execution analyzer logic that rely on having a successful strong fingerprint
+                    var strongFingerprint = observedInputValidationResult.ComputeStrongFingerprint(
+                        pathTable,
+                        fingerprintComputation.Value.WeakFingerprint,
+                        pathSetHash);
+
+                    fingerprintComputation.Value.StrongFingerprintComputations = new[]
+                    {
+                        ProcessStrongFingerprintComputationData.CreateForExecution(
+                            pathSetHash,
+                            pathSet,
+                            observedInputValidationResult.ObservedInputs,
+                            strongFingerprint),
+                    };
+                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingStrongFingerprint, DateTime.UtcNow.Subtract(start), $"(ps: {pathSet.Paths.Length})");
+                }
+
+                // Log the fingerprint computation
+                start = DateTime.UtcNow;
+                if (succeeded)
+                {
+                    environment.State.ExecutionLog?.ProcessFingerprintComputation(fingerprintComputation.Value);
+                }
+
+                LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringStrongFingerprintToXlg, DateTime.UtcNow.Subtract(start));
+
+                if (!outputHashSuccess)
+                {
+                    processExecutionResult.SetResult(operationContext, PipResultStatus.Failed);
+                }
+
+                return processExecutionResult;
+            }
+        }
+
+        /// <summary>
+        /// Execute Pip and handle retries within the same worker
+        /// </summary>
+        private static async Task<SandboxedProcessPipExecutionResult> ExecutePipAndHandleRetryAsync(ProcessResourceManager.ResourceScope resourceScope,
+            OperationContext operationContext, 
+            Process pip, 
+            ProcessMemoryCounters expectedMemoryCounters, 
+            IPipExecutionEnvironment environment,
+            PipExecutionState.PipScopeState state,
+            Action<int> processIdListener,
+            IDetoursEventListener detoursEventListener,
+            DateTime start)
+        {
+            var context = environment.Context;
+            var counters = environment.Counters;
+            var configuration = environment.Configuration;
+            var pathTable = context.PathTable;
+
+            string processDescription = pip.GetDescription(context);
 
             // When preserving outputs, we need to make sure to remove any hardlinks to the cache.
             Func<string, Task<bool>> makeOutputPrivate =
@@ -1327,575 +1643,347 @@ namespace BuildXL.Scheduler
 
             var processMonitoringLogger = new ProcessExecutionMonitoringLogger(operationContext, pip, context, environment.State.ExecutionLog);
 
-            // Service related pips cannot be cancelled
-            bool allowResourceBasedCancellation = pip.ServiceInfo == null || pip.ServiceInfo.Kind == ServicePipKind.None;
-
-            DateTime start;
-
             // Delete shared opaque outputs if enabled
             var isLazySharedOpaqueOutputDeletionEnabled = environment.State.LazyDeletionOfSharedOpaqueOutputsEnabled && pip.HasSharedOpaqueDirectoryOutputs;
 
-            // Execute the process when resources are available
-            SandboxedProcessPipExecutionResult executionResult = await environment.State.ResourceManager
-                .ExecuteWithResources(
-                    operationContext,
-                    pip.PipId,
-                    expectedMemoryCounters,
-                    allowResourceBasedCancellation,
-                    async (resourceLimitCancellationToken, registerQueryRamUsageMb) =>
+            // Inner cancellation token source for tracking cancellation time
+            using (var innerResourceLimitCancellationTokenSource = new CancellationTokenSource())
+            using (var counter = operationContext.StartOperation(PipExecutorCounter.ProcessPossibleRetryWallClockDuration))
+            {
+                ProcessMemoryCountersSnapshot lastObservedMemoryCounters = default(ProcessMemoryCountersSnapshot);
+                TimeSpan? cancellationStartTime = null;
+                resourceScope.Token.Register(
+                    () =>
                     {
-                        // Inner cancellation token source for tracking cancellation time
-                        using (var innerResourceLimitCancellationTokenSource = new CancellationTokenSource())
-                        using (operationContext.StartOperation(PipExecutorCounter.ProcessPossibleRetryWallClockDuration))
+                        cancellationStartTime = TimestampUtilities.Timestamp;
+                        Logger.Log.StartCancellingProcessPipExecutionDueToResourceExhaustion(
+                            operationContext,
+                            processDescription,
+                            resourceScope.CancellationReason?.ToString() ?? "",
+                            resourceScope.ScopeId,
+                            (long)(counter.Duration?.TotalMilliseconds ?? -1),
+                            expectedMemoryCounters.PeakWorkingSetMb,
+                            lastObservedMemoryCounters.PeakWorkingSetMb,
+                            lastObservedMemoryCounters.LastWorkingSetMb,
+                            lastObservedMemoryCounters.LastCommitSizeMb);
+
+                        using (operationContext.StartAsyncOperation(PipExecutorCounter.ResourceLimitCancelProcessDuration))
                         {
-                            int lastObservedPeakRamUsage = 0;
-                            TimeSpan? cancellationStartTime = null;
-                            resourceLimitCancellationToken.Register(
-                                () =>
-                                {
-                                    cancellationStartTime = TimestampUtilities.Timestamp;
-                                    Logger.Log.StartCancellingProcessPipExecutionDueToResourceExhaustion(
-                                        operationContext,
-                                        processDescription,
-                                        (long)(operationContext.Duration?.TotalMilliseconds ?? -1),
-                                        peakMemoryMb: lastObservedPeakRamUsage,
-                                        expectedMemoryMb: expectedMemoryCounters.PeakWorkingSetMb);
-
-                                    using (operationContext.StartAsyncOperation(PipExecutorCounter.ResourceLimitCancelProcessDuration))
-                                    {
-                                        innerResourceLimitCancellationTokenSource.Cancel();
-                                    }
-                                });
-
-                            IReadOnlyList<AbsolutePath> changeAffectedInputs = pip.ChangeAffectedInputListWrittenFile.IsValid
-                                ? environment.State.FileContentManager.SourceChangeAffectedInputs.GetChangeAffectedInputs(pip)
-                                : null;
-
-                            int remainingUserRetries = pip.RetryExitCodes.Length > 0 ? configuration.Schedule.ProcessRetries : 0;
-                            int remainingInternalSandboxedProcessExecutionFailureRetries = InternalSandboxedProcessExecutionFailureRetryCountMax;
-
-                            int retryCount = 0;
-                            bool userRetry = false;
-                            SandboxedProcessPipExecutionResult result;
-                            var aggregatePipProperties = new Dictionary<string, int>();
-
-                            // Retry pip count up to limit if we produce result without detecting file access.
-                            // There are very rare cases where a child process is started not Detoured and we don't observe any file accesses from such process.
-                            while (true)
-                            {
-                                lastObservedPeakRamUsage = 0;
-
-                                var executor = new SandboxedProcessPipExecutor(
-                                    context,
-                                    operationContext.LoggingContext,
-                                    pip,
-                                    configuration.Sandbox,
-                                    configuration.Layout,
-                                    configuration.Logging,
-                                    environment.RootMappings,
-                                    environment.ProcessInContainerManager,
-                                    state.FileAccessWhitelist,
-                                    makeInputPrivate,
-                                    makeOutputPrivate,
-                                    semanticPathExpander,
-                                    configuration.Engine.DisableConHostSharing,
-                                    isLazySharedOpaqueOutputDeletionEnabled: isLazySharedOpaqueOutputDeletionEnabled,
-                                    pipEnvironment: environment.State.PipEnvironment,
-                                    validateDistribution: configuration.Distribution.ValidateDistribution,
-                                    directoryArtifactContext: new DirectoryArtifactContext(environment),
-                                    logger: processMonitoringLogger,
-                                    processIdListener: processIdListener,
-                                    pipDataRenderer: environment.PipFragmentRenderer,
-                                    buildEngineDirectory: configuration.Layout.BuildEngineDirectory,
-                                    directoryTranslator: environment.DirectoryTranslator,
-                                    remainingUserRetryCount: remainingUserRetries,
-                                    vmInitializer: environment.VmInitializer,
-                                    tempDirectoryCleaner: environment.TempCleaner,
-                                    incrementalTools: configuration.IncrementalTools,
-                                    changeAffectedInputs: changeAffectedInputs,
-                                    detoursListener: detoursEventListener);
-
-                                registerQueryRamUsageMb(
-                                    () =>
-                                    {
-                                        using (counters[PipExecutorCounter.QueryRamUsageDuration].Start())
-                                        {
-                                            lastObservedPeakRamUsage =
-                                                (int)ByteSizeFormatter.ToMegabytes(executor.GetActivePeakWorkingSet() ?? 0);
-                                        }
-
-                                        return lastObservedPeakRamUsage;
-                                    });
-
-                                // Increment the counters only on the first try.
-                                if (retryCount == 0)
-                                {
-                                    counters.IncrementCounter(PipExecutorCounter.ExternalProcessCount);
-                                    environment.SetMaxExternalProcessRan();
-                                }
-
-                                using (var sidebandWriter = CreateSidebandWriterIfNeeded(environment, pip))
-                                {
-                                    start = DateTime.UtcNow;
-                                    result = await executor.RunAsync(innerResourceLimitCancellationTokenSource.Token, sandboxConnection: environment.SandboxConnection, sidebandWriter: sidebandWriter);
-                                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseRunningPip, DateTime.UtcNow.Subtract(start));
-                                }
-
-                                ++retryCount;
-
-                                if (result.PipProperties != null)
-                                {
-                                    foreach (var kvp in result.PipProperties)
-                                    {
-                                        if (aggregatePipProperties.TryGetValue(kvp.Key, out var value))
-                                        {
-                                            aggregatePipProperties[kvp.Key] = value + kvp.Value;
-                                        }
-                                        else
-                                        {
-                                            aggregatePipProperties.Add(kvp.Key, kvp.Value);
-                                        }
-                                    }
-                                }
-
-                                lock (s_telemetryDetoursHeapLock)
-                                {
-                                    if (counters.GetCounterValue(PipExecutorCounter.MaxDetoursHeapInBytes) <
-                                        result.MaxDetoursHeapSizeInBytes)
-                                    {
-                                        // Zero out the counter first and then set the new value.
-                                        counters.AddToCounter(
-                                            PipExecutorCounter.MaxDetoursHeapInBytes,
-                                            -counters.GetCounterValue(PipExecutorCounter.MaxDetoursHeapInBytes));
-                                        counters.AddToCounter(
-                                            PipExecutorCounter.MaxDetoursHeapInBytes,
-                                            result.MaxDetoursHeapSizeInBytes);
-                                    }
-                                }
-
-                                if (result.Status == SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed ||
-                                    result.Status == SandboxedProcessPipExecutionStatus.MismatchedMessageCount ||
-                                    result.Status == SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToAzureWatsonExitCode)
-                                {
-                                    if (remainingInternalSandboxedProcessExecutionFailureRetries > 0)
-                                    {
-                                        --remainingInternalSandboxedProcessExecutionFailureRetries;
-
-                                        switch (result.Status)
-                                        {
-                                            case SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed:
-                                                counters.IncrementCounter(PipExecutorCounter.OutputsWithNoFileAccessRetriesCount);
-                                                break;
-
-                                            case SandboxedProcessPipExecutionStatus.MismatchedMessageCount:
-                                                counters.IncrementCounter(PipExecutorCounter.MismatchMessageRetriesCount);
-                                                break;
-
-                                            case SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToAzureWatsonExitCode:
-                                                counters.IncrementCounter(PipExecutorCounter.AzureWatsonExitCodeRetriesCount);
-                                                break;
-
-                                            default:
-                                                Contract.Assert(false, "Unexpected result error type.");
-                                                break;
-                                        }
-
-                                        counters.AddToCounter(PipExecutorCounter.RetriedInternalExecutionDuration, result.PrimaryProcessTimes.TotalWallClockTime);
-                                        continue;
-                                    }
-
-                                    switch (result.Status)
-                                    {
-                                        case SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed:
-                                            Logger.Log.FailPipOutputWithNoAccessed(
-                                                operationContext,
-                                                pip.SemiStableHash,
-                                                processDescription);
-                                            break;
-
-                                        case SandboxedProcessPipExecutionStatus.MismatchedMessageCount:
-                                            Logger.Log.LogMismatchedDetoursErrorCount(
-                                                operationContext,
-                                                pip.SemiStableHash,
-                                                processDescription);
-                                            break;
-
-                                        case SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToAzureWatsonExitCode:
-                                            Logger.Log.PipExitedWithAzureWatsonExitCode(
-                                                operationContext,
-                                                pip.SemiStableHash,
-                                                processDescription);
-                                            break;
-
-                                        default:
-                                            Contract.Assert(false, "Unexpected result error type gotten.");
-                                            break;
-                                    }
-
-                                    // Just break the loop below. The result is already set properly.
-                                }
-
-                                if (result.Status == SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToUserSpecifiedExitCode)
-                                {
-                                    Contract.Assert(remainingUserRetries > 0);
-
-                                    --remainingUserRetries;
-
-#pragma warning disable AsyncFixer02
-                                    var stdErr = string.Empty;
-                                    if (result.EncodedStandardError != null)
-                                    {
-                                        string path = result.EncodedStandardError.Item1.ToString(context.PathTable);
-                                        if (File.Exists(path))
-                                        {
-                                            stdErr += Environment.NewLine
-                                                     + "Standard error:"
-                                                     + Environment.NewLine
-                                                     + File.ReadAllText(path, result.EncodedStandardError.Item2);
-                                        }
-                                    }
-
-                                    var stdOut = string.Empty;
-                                    if (result.EncodedStandardOutput != null)
-                                    {
-                                        string path = result.EncodedStandardOutput.Item1.ToString(context.PathTable);
-                                        if (File.Exists(path))
-                                        {
-                                            stdOut += Environment.NewLine
-                                                     + "Standard output:"
-                                                     + Environment.NewLine
-                                                     + File.ReadAllText(path, result.EncodedStandardOutput.Item2);
-                                        }
-                                    }
-#pragma warning restore AsyncFixer02
-                                    Logger.Log.PipWillBeRetriedDueToExitCode(
-                                        operationContext,
-                                        pip.SemiStableHash,
-                                        processDescription,
-                                        result.ExitCode,
-                                        remainingUserRetries,
-                                        stdErr,
-                                        stdOut);
-                                    userRetry = true;
-                                    counters.AddToCounter(PipExecutorCounter.RetriedUserExecutionDuration, result.PrimaryProcessTimes.TotalWallClockTime);
-                                    counters.IncrementCounter(PipExecutorCounter.ProcessUserRetries);
-
-                                    continue;
-                                }
-
-                                break;
-                            }
-
-                            counters.DecrementCounter(PipExecutorCounter.ExternalProcessCount);
-
-                            result.IsCancelledDueToResourceExhaustion = resourceLimitCancellationToken.IsCancellationRequested;
-
-                            if (result.Status == SandboxedProcessPipExecutionStatus.Canceled)
-                            {
-                                if (resourceLimitCancellationToken.IsCancellationRequested)
-                                {
-                                    TimeSpan? cancelTime = TimestampUtilities.Timestamp - cancellationStartTime;
-
-                                    counters.IncrementCounter(PipExecutorCounter.ProcessRetriesDueToResourceLimits);
-                                    Logger.Log.CancellingProcessPipExecutionDueToResourceExhaustion(
-                                        operationContext,
-                                        processDescription,
-                                        (long)(operationContext.Duration?.TotalMilliseconds ?? -1),
-                                        peakMemoryMb: result.JobAccountingInformation?.MemoryCounters.PeakWorkingSetMb ?? 0,
-                                        expectedMemoryMb: expectedMemoryCounters.PeakWorkingSetMb,
-                                        peakCommitMb: result.JobAccountingInformation?.MemoryCounters.PeakCommitUsageMb ?? 0,
-                                        expectedCommitMb: expectedMemoryCounters.PeakCommitUsageMb,
-                                        cancelMilliseconds: (int)(cancelTime?.TotalMilliseconds ?? 0));
-                                }
-                            }
-
-                            if (userRetry)
-                            {
-                                counters.IncrementCounter(PipExecutorCounter.ProcessUserRetriesImpactedPipsCount);
-                                result.HadUserRetries = true;
-                            }
-
-                            if (aggregatePipProperties.Count > 0)
-                            {
-                                result.PipProperties = aggregatePipProperties;
-                            }
-
-                            return result;
+                            innerResourceLimitCancellationTokenSource.Cancel();
                         }
                     });
 
-            start = DateTime.UtcNow;
-            processExecutionResult.ReportSandboxedExecutionResult(executionResult);
-            LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseReportingExeResult, DateTime.UtcNow.Subtract(start));
+                IReadOnlyList<AbsolutePath> changeAffectedInputs = pip.ChangeAffectedInputListWrittenFile.IsValid
+                    ? environment.State.FileContentManager.SourceChangeAffectedInputs.GetChangeAffectedInputs(pip)
+                    : null;
 
-            counters.AddToCounter(PipExecutorCounter.SandboxedProcessPrepDurationMs, executionResult.SandboxPrepMs);
-            counters.AddToCounter(
-                PipExecutorCounter.SandboxedProcessProcessResultDurationMs,
-                executionResult.ProcessSandboxedProcessResultMs);
-            counters.AddToCounter(PipExecutorCounter.ProcessStartTimeMs, executionResult.ProcessStartTimeMs);
+                int remainingUserRetries = pip.RetryExitCodes.Length > 0 ? configuration.Schedule.ProcessRetries : 0;
+                int remainingInternalSandboxedProcessExecutionFailureRetries = InternalSandboxedProcessExecutionFailureRetryCountMax;
 
-            // We may have some violations reported already (outright denied by the sandbox manifest).
-            FileAccessReportingContext fileAccessReportingContext = executionResult.UnexpectedFileAccesses;
+                bool firstAttempt = true;
+                bool userRetry = false;
+                SandboxedProcessPipExecutionResult result;
+                var aggregatePipProperties = new Dictionary<string, int>();
+                IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> staleDynamicOutputs = null;
 
-            if (executionResult.Status == SandboxedProcessPipExecutionStatus.PreparationFailed)
-            {
-                // Preparation failures provide minimal feedback.
-                // We do not have any execution-time information (observed accesses or file monitoring violations) to analyze.
-                processExecutionResult.SetResult(operationContext, PipResultStatus.Failed);
-
-                counters.IncrementCounter(PipExecutorCounter.PreparationFailureCount);
-
-                if (executionResult.NumberOfProcessLaunchRetries > 0)
+                // Retry pip count up to limit if we produce result without detecting file access.
+                // There are very rare cases where a child process is started not Detoured and we don't observe any file accesses from such process.
+                while (true)
                 {
-                    counters.IncrementCounter(PipExecutorCounter.PreparationFailurePartialCopyCount);
-                }
+                    lastObservedMemoryCounters = default(ProcessMemoryCountersSnapshot);
 
-                return processExecutionResult;
-            }
+                    var executor = new SandboxedProcessPipExecutor(
+                        context,
+                        operationContext.LoggingContext,
+                        pip,
+                        configuration.Sandbox,
+                        configuration.Layout,
+                        configuration.Logging,
+                        environment.RootMappings,
+                        environment.ProcessInContainerManager,
+                        state.FileAccessAllowlist,
+                        makeInputPrivate,
+                        makeOutputPrivate,
+                        semanticPathExpander,
+                        configuration.Engine.DisableConHostSharing,
+                        isLazySharedOpaqueOutputDeletionEnabled: isLazySharedOpaqueOutputDeletionEnabled,
+                        pipEnvironment: environment.State.PipEnvironment,
+                        validateDistribution: configuration.Distribution.ValidateDistribution,
+                        directoryArtifactContext: new DirectoryArtifactContext(environment),
+                        logger: processMonitoringLogger,
+                        processIdListener: processIdListener,
+                        pipDataRenderer: environment.PipFragmentRenderer,
+                        buildEngineDirectory: configuration.Layout.BuildEngineDirectory,
+                        directoryTranslator: environment.DirectoryTranslator,
+                        remainingUserRetryCount: remainingUserRetries,
+                        vmInitializer: environment.VmInitializer,
+                        tempDirectoryCleaner: environment.TempCleaner,
+                        incrementalTools: configuration.IncrementalTools,
+                        changeAffectedInputs: changeAffectedInputs,
+                        detoursListener: detoursEventListener,
+                        symlinkedAccessResolver: environment.SymlinkedAccessResolver,
+                        staleOutputsUnderSharedOpaqueDirectories: staleDynamicOutputs);
 
-            if (executionResult.Status == SandboxedProcessPipExecutionStatus.Canceled)
-            {
-                // Don't do post processing if canceled
-                processExecutionResult.SetResult(operationContext, PipResultStatus.Canceled);
-
-                ReportFileAccesses(processExecutionResult, fileAccessReportingContext);
-
-                counters.AddToCounter(
-                    PipExecutorCounter.CanceledProcessExecuteDuration,
-                    executionResult.PrimaryProcessTimes.TotalWallClockTime);
-
-                return processExecutionResult;
-            }
-
-            // These are the results we know how to handle. PreperationFailed has already been handled above.
-            if (!(executionResult.Status == SandboxedProcessPipExecutionStatus.Succeeded ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.ExecutionFailed ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.MismatchedMessageCount))
-            {
-                Contract.Assert(false, "Unexpected execution result " + executionResult.Status);
-            }
-
-            bool succeeded = executionResult.Status == SandboxedProcessPipExecutionStatus.Succeeded;
-
-            if (executionResult.Status == SandboxedProcessPipExecutionStatus.ExecutionFailed ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.MismatchedMessageCount)
-            {
-                Contract.Assert(operationContext.LoggingContext.ErrorWasLogged, I($"Error should have been logged for '{executionResult.Status}'"));
-            }
-
-            Contract.Assert(executionResult.ObservedFileAccesses != null, "Success / ExecutionFailed provides all execution-time fields");
-            Contract.Assert(executionResult.UnexpectedFileAccesses != null, "Success / ExecutionFailed provides all execution-time fields");
-            Contract.Assert(executionResult.PrimaryProcessTimes != null, "Success / ExecutionFailed provides all execution-time fields");
-
-            counters.AddToCounter(PipExecutorCounter.ExecuteProcessDuration, executionResult.PrimaryProcessTimes.TotalWallClockTime);
-
-            using (operationContext.StartOperation(PipExecutorCounter.ProcessOutputsDuration))
-            {
-                ObservedInputProcessingResult observedInputValidationResult;
-
-                using (operationContext.StartOperation(PipExecutorCounter.ProcessOutputsObservedInputValidationDuration))
-                {
-                    // In addition, we need to verify that additional reported inputs are actually allowed, and furthermore record them.
-                    //
-                    // Don't track file changes in observed input processor when process execution failed. Running observed input processor has side effects
-                    // that some files get tracked by the file change tracker. Suppose that the process failed because it accesses paths that
-                    // are supposed to be untracked (but the user forgot to specify it in the spec). Those paths will be tracked by
-                    // file change tracker because the observed input processor may try to probe and track those paths.
-                    start = DateTime.UtcNow;
-                    observedInputValidationResult =
-                        await ValidateObservedFileAccessesAsync(
-                            operationContext,
-                            environment,
-                            state,
-                            state.GetCacheableProcess(pip, environment),
-                            fileAccessReportingContext,
-                            executionResult.ObservedFileAccesses,
-                            trackFileChanges: succeeded);
-                    LogSubPhaseDuration(
-                        operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseValidateObservedFileAccesses, DateTime.UtcNow.Subtract(start),
-                        $"(AbsPrb: {observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories.Count}, DynFiles: {observedInputValidationResult.DynamicallyObservedFiles.Length})");
-                }
-
-                // Store the dynamically observed accesses
-                processExecutionResult.DynamicallyObservedFiles = observedInputValidationResult.DynamicallyObservedFiles;
-                processExecutionResult.DynamicallyProbedFiles = observedInputValidationResult.DynamicallyProbedFiles;
-                processExecutionResult.DynamicallyObservedEnumerations = observedInputValidationResult.DynamicallyObservedEnumerations;
-                processExecutionResult.AllowedUndeclaredReads = observedInputValidationResult.AllowedUndeclaredSourceReads;
-                processExecutionResult.AbsentPathProbesUnderOutputDirectories = observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories;
-
-                if (observedInputValidationResult.Status == ObservedInputProcessingStatus.Aborted)
-                {
-                    succeeded = false;
-                    Contract.Assume(operationContext.LoggingContext.ErrorWasLogged, "No error was logged when ValidateObservedAccesses failed");
-                }
-
-                if (pip.ProcessAbsentPathProbeInUndeclaredOpaquesMode == Process.AbsentPathProbeInUndeclaredOpaquesMode.Relaxed
-                    && observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories.Count > 0)
-                {
-                    start = DateTime.UtcNow;
-                    bool isDirty = false;
-                    foreach (var absentPathProbe in observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories)
-                    {
-                        if (!pip.DirectoryDependencies.Any(dir => absentPathProbe.IsWithin(pathTable, dir)))
+                    resourceScope.RegisterQueryRamUsageMb(
+                        () =>
                         {
-                            isDirty = true;
-                            break;
+                            using (counters[PipExecutorCounter.QueryRamUsageDuration].Start())
+                            {
+                                lastObservedMemoryCounters = executor.GetMemoryCountersSnapshot() ?? default(ProcessMemoryCountersSnapshot);
+                                return lastObservedMemoryCounters;
+                            }
+                        });
+
+                    resourceScope.RegisterEmptyWorkingSet(
+                        (bool isSuspend) =>
+                        {
+                            using (counters[PipExecutorCounter.EmptyWorkingSetDuration].Start())
+                            {
+                                var result = executor.TryEmptyWorkingSet(isSuspend);
+                                if (result == EmptyWorkingSetResult.Success)
+                                {
+                                    counters.IncrementCounter(PipExecutorCounter.EmptyWorkingSetSucceeded);
+
+                                    if (resourceScope.SuspendedDurationMs > 0)
+                                    {
+                                        counters.IncrementCounter(PipExecutorCounter.EmptyWorkingSetSucceededMoreThanOnce);
+                                    }
+                                }
+
+                                return result;
+                            }
+                        });
+
+                    resourceScope.RegisterResumeProcess(
+                        () =>
+                        {
+                            using (counters[PipExecutorCounter.ResumeProcessDuration].Start())
+                            {
+                                return executor.TryResumeProcess();
+                            }
+                        });
+
+                    if (firstAttempt)
+                    {
+                        counters.IncrementCounter(PipExecutorCounter.ExternalProcessCount);
+                        environment.SetMaxExternalProcessRan();
+                        firstAttempt = false;
+                    }
+
+                    using (var sidebandWriter = CreateSidebandWriterIfNeeded(environment, pip))
+                    {
+                        staleDynamicOutputs = null;
+                        start = DateTime.UtcNow;
+                        result = await executor.RunAsync(innerResourceLimitCancellationTokenSource.Token, sandboxConnection: environment.SandboxConnection, sidebandWriter: sidebandWriter);
+                        LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseRunningPip, DateTime.UtcNow.Subtract(start));
+                    }
+
+                    if (result.PipProperties != null)
+                    {
+                        foreach (var kvp in result.PipProperties)
+                        {
+                            if (aggregatePipProperties.TryGetValue(kvp.Key, out var value))
+                            {
+                                aggregatePipProperties[kvp.Key] = value + kvp.Value;
+                            }
+                            else
+                            {
+                                aggregatePipProperties.Add(kvp.Key, kvp.Value);
+                            }
                         }
                     }
-                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingIsDirty, DateTime.UtcNow.Subtract(start));
-                    processExecutionResult.MustBeConsideredPerpetuallyDirty = isDirty;
+
+                    lock (s_telemetryDetoursHeapLock)
+                    {
+                        if (counters.GetCounterValue(PipExecutorCounter.MaxDetoursHeapInBytes) <
+                            result.MaxDetoursHeapSizeInBytes)
+                        {
+                            // Zero out the counter first and then set the new value.
+                            counters.AddToCounter(
+                                PipExecutorCounter.MaxDetoursHeapInBytes,
+                                -counters.GetCounterValue(PipExecutorCounter.MaxDetoursHeapInBytes));
+                            counters.AddToCounter(
+                                PipExecutorCounter.MaxDetoursHeapInBytes,
+                                result.MaxDetoursHeapSizeInBytes);
+                        }
+                    }
+
+                    if (result.RetryInfo != null && result.RetryInfo.RetryReason == RetryReason.UserSpecifiedExitCode)
+                    {
+                        Contract.Assert(remainingUserRetries > 0);
+                        --remainingUserRetries;
+                        LogUserSpecifiedExitCodeEvent(result, operationContext, context, pip, processDescription, remainingUserRetries);
+
+                        userRetry = true;
+                        staleDynamicOutputs = result.SharedDynamicDirectoryWriteAccesses;
+
+                        counters.AddToCounter(PipExecutorCounter.RetriedUserExecutionDuration, result.PrimaryProcessTimes.TotalWallClockTime);
+                        counters.IncrementCounter(PipExecutorCounter.ProcessUserRetries);
+                        continue;
+                    }
+
+                    if (RetryInfo.RetryAbleOnSameWorker(result.RetryInfo))
+                    {
+                        if (remainingInternalSandboxedProcessExecutionFailureRetries <= 0)
+                        {
+                            if (result.RetryInfo.RetryLocation == RetryLocation.SameWorker)
+                            {
+                                // Log errors for Retry cases on the SameWorker which have reached their local retry limit
+                                LogRetryOnSameWorkerErrors(result.RetryInfo.RetryReason, operationContext, pip, processDescription);
+                                break;
+                            }
+                            else // case: RetryLocation.Both
+                            {
+                                // Retry on different worker after failing on the same worker to be added here
+                            }
+                        }
+                        else
+                        {
+                            --remainingInternalSandboxedProcessExecutionFailureRetries;
+                            counters.AddToCounter(PipExecutorCounter.RetriedInternalExecutionDuration, result.PrimaryProcessTimes.TotalWallClockTime);
+
+                            if (!IncrementInternalErrorRetryCounters(result.RetryInfo.RetryReason, counters))
+                            {
+                                Contract.Assert(false, "Unexpected result error type.");
+                            }
+                            continue;
+                        }
+                        // Just break the loop below. The result is already set properly.
+                    }
+                    break;
                 }
 
-                // We have all violations now.
-                UnexpectedFileAccessCounters unexpectedFilesAccesses = fileAccessReportingContext.Counters;
-                processExecutionResult.ReportUnexpectedFileAccesses(unexpectedFilesAccesses);
+                counters.DecrementCounter(PipExecutorCounter.ExternalProcessCount);
 
-                // Set file access violations which were not whitelisted for use by file access violation analyzer
-                processExecutionResult.FileAccessViolationsNotWhitelisted = fileAccessReportingContext.FileAccessViolationsNotWhitelisted;
-                processExecutionResult.WhitelistedFileAccessViolations = fileAccessReportingContext.WhitelistedFileAccessViolations;
+                result.SuspendedDurationMs = resourceScope.SuspendedDurationMs;
 
-                // We need to update this instance so used a boxed representation
-                BoxRef<ProcessFingerprintComputationEventData> fingerprintComputation =
-                    new ProcessFingerprintComputationEventData
-                    {
-                        Kind = FingerprintComputationKind.Execution,
-                        PipId = pip.PipId,
-                        WeakFingerprint = new WeakContentFingerprint((fingerprint ?? ContentFingerprint.Zero).Hash),
-
-                        // This field is set later for successful strong fingerprint computation
-                        StrongFingerprintComputations = CollectionUtilities.EmptyArray<ProcessStrongFingerprintComputationData>(),
-                    };
-
-                bool outputHashSuccess = false;
-
-                if (succeeded)
+                if (result.Status == SandboxedProcessPipExecutionStatus.Canceled && resourceScope.CancellationReason.HasValue)
                 {
-                    // We are now be able to store a descriptor and content for this process to cache if we wish.
-                    // But if the pip completed with (warning level) file monitoring violations (suppressed or not), there's good reason
-                    // to believe that there are missing inputs or outputs for the pip. This allows a nice compromise in which a build
-                    // author can iterate quickly on fixing monitoring errors in a large build - mostly cached except for those parts with warnings.
-                    // Of course, if the whitelist was configured to explicitly allow caching for those violations, we allow it.
-                    //
-                    // N.B. fileAccessReportingContext / unexpectedFilesAccesses accounts for violations from the execution itself as well as violations added by ValidateObservedAccesses
-                    bool skipCaching = true;
-                    ObservedInputProcessingResult? observedInputProcessingResultForCaching = null;
+                    result.RetryInfo = RetryInfo.RetryOnDifferentWorker(RetryReason.ResourceExhaustion);
 
-                    if (unexpectedFilesAccesses.HasUncacheableFileAccesses)
-                    {
-                        Logger.Log.ScheduleProcessNotStoredToCacheDueToFileMonitoringViolations(operationContext, processDescription);
-                    }
-                    else if (executionResult.NumberOfWarnings > 0 &&
-                             ExtraFingerprintSalts.ArePipWarningsPromotedToErrors(configuration.Logging))
-                    {
-                        // Just like not caching errors, we also don't want to cache warnings that are promoted to errors
-                        Logger.Log.ScheduleProcessNotStoredToWarningsUnderWarnAsError(operationContext, processDescription);
-                    }
-                    else if (!fingerprint.HasValue)
-                    {
-                        Logger.Log.ScheduleProcessNotStoredToCacheDueToInherentUncacheability(operationContext, processDescription);
-                    }
-                    else
-                    {
-                        Contract.Assume(
-                            observedInputValidationResult.Status == ObservedInputProcessingStatus.Success,
-                            "Should never cache a process that failed observed file input validation (cacheable-whitelisted violations leave the validation successful).");
+                    counters.IncrementCounter(resourceScope.CancellationReason == ProcessResourceManager.ResourceScopeCancellationReason.ResourceLimits ?
+                        PipExecutorCounter.ProcessRetriesDueToResourceLimits :
+                        PipExecutorCounter.ProcessRetriesDueToSuspendOrResumeFailure);
 
-                        // Note that we discard observed inputs if cache-ineligible (required by StoreDescriptorAndContentForProcess)
-                        observedInputProcessingResultForCaching = observedInputValidationResult;
-                        skipCaching = false;
-                    }
+                    TimeSpan? cancelTime = TimestampUtilities.Timestamp - cancellationStartTime;
 
-                    // TODO: Maybe all counter updates should occur on distributed build master.
-                    if (skipCaching)
-                    {
-                        counters.IncrementCounter(PipExecutorCounter.ProcessPipsExecutedButUncacheable);
-                    }
-
-                    using (operationContext.StartOperation(PipExecutorCounter.ProcessOutputsStoreContentForProcessAndCreateCacheEntryDuration))
-                    {
-                        start = DateTime.UtcNow;
-                        outputHashSuccess = await StoreContentForProcessAndCreateCacheEntryAsync(
-                            operationContext,
-                            environment,
-                            state,
-                            pip,
-                            processDescription,
-                            observedInputProcessingResultForCaching,
-                            executionResult.EncodedStandardOutput,
-                            // Possibly null
-                            executionResult.EncodedStandardError,
-                            // Possibly null
-                            executionResult.NumberOfWarnings,
-                            processExecutionResult,
-                            enableCaching: !skipCaching,
-                            fingerprintComputation: fingerprintComputation,
-                            executionResult.ContainerConfiguration);
-                        LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringCacheContent, DateTime.UtcNow.Subtract(start));
-                    }
-
-                    if (outputHashSuccess)
-                    {
-                        processExecutionResult.SetResult(operationContext, PipResultStatus.Succeeded);
-                        processExecutionResult.MustBeConsideredPerpetuallyDirty = skipCaching;
-                    }
-                    else
-                    {
-                        // The Pip itself did not fail, but we are marking it as a failure because we could not handle the post processing.
-                        Contract.Assume(
-                            operationContext.LoggingContext.ErrorWasLogged,
-                            "Error should have been logged for StoreContentForProcessAndCreateCacheEntry() failure");
-                    }
+                    Logger.Log.CancellingProcessPipExecutionDueToResourceExhaustion(
+                        operationContext,
+                        processDescription,
+                        resourceScope.CancellationReason.ToString(),
+                        (long)(operationContext.Duration?.TotalMilliseconds ?? -1),
+                        peakMemoryMb: result.JobAccountingInformation?.MemoryCounters.PeakWorkingSetMb ?? 0,
+                        expectedMemoryMb: expectedMemoryCounters.PeakWorkingSetMb,
+                        peakCommitMb: result.JobAccountingInformation?.MemoryCounters.PeakCommitSizeMb ?? 0,
+                        expectedCommitMb: expectedMemoryCounters.PeakCommitSizeMb,
+                        cancelMilliseconds: (int)(cancelTime?.TotalMilliseconds ?? 0));
                 }
 
-                // If there were any failures, attempt to log partial information to execution log.
-                // Only do this if the ObservedInputProcessor was able to process changes successfully. This will exclude
-                // both the Aborted and Mismatch states, which means builds with file access violations won't get their
-                // StrongFingerprint information logged. Ideally it could be logged, but there are a number of paths in
-                // the ObservedInputProcessor where the final result has invalid state if the statups wasn't Success.
-                if (!succeeded && observedInputValidationResult.Status == ObservedInputProcessingStatus.Success)
+                if (result.TimedOut && result.SuspendedDurationMs > 0)
                 {
-                    start = DateTime.UtcNow;
-                    var pathSet = observedInputValidationResult.GetPathSet(state.UnsafeOptions);
-                    var pathSetHash = await environment.State.Cache.SerializePathSetAsync(pathSet);
-
-                    // This strong fingerprint is meaningless and not-cached, but compute it for the sake of
-                    // execution analyzer logic that rely on having a successful strong fingerprint
-                    var strongFingerprint = observedInputValidationResult.ComputeStrongFingerprint(
-                        pathTable,
-                        fingerprintComputation.Value.WeakFingerprint,
-                        pathSetHash);
-
-                    fingerprintComputation.Value.StrongFingerprintComputations = new[]
-                    {
-                        ProcessStrongFingerprintComputationData.CreateForExecution(
-                            pathSetHash,
-                            pathSet,
-                            observedInputValidationResult.ObservedInputs,
-                            strongFingerprint),
-                    };
-                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingStrongFingerprint, DateTime.UtcNow.Subtract(start), $"(ps: {pathSet.Paths.Length})");
+                    Logger.Log.PipTimedOutDueToSuspend(operationContext, pip.SemiStableHash, processDescription, result.SuspendedDurationMs, result.ProcessSandboxedProcessResultMs);
                 }
 
-                // Log the fingerprint computation
-                start = DateTime.UtcNow;
-                if (succeeded)
+                if (userRetry)
                 {
-                    environment.State.ExecutionLog?.ProcessFingerprintComputation(fingerprintComputation.Value);
+                    counters.IncrementCounter(PipExecutorCounter.ProcessUserRetriesImpactedPipsCount);
+                    result.HadUserRetries = true;
                 }
 
-                LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseStoringStrongFingerprintToXlg, DateTime.UtcNow.Subtract(start));
-
-                if (!outputHashSuccess)
+                if (aggregatePipProperties.Count > 0)
                 {
-                    processExecutionResult.SetResult(operationContext, PipResultStatus.Failed);
+                    result.PipProperties = aggregatePipProperties;
                 }
 
-                return processExecutionResult;
+                return result;
             }
+        }
+
+        private static bool IncrementInternalErrorRetryCounters(RetryReason retryReason, CounterCollection<PipExecutorCounter> counters)
+        {
+            // Retrun true to break the caller's loop
+            switch (retryReason)
+            {
+                case RetryReason.OutputWithNoFileAccessFailed:
+                    counters.IncrementCounter(PipExecutorCounter.OutputsWithNoFileAccessRetriesCount);
+                    return true;
+
+                case RetryReason.MismatchedMessageCount:
+                    counters.IncrementCounter(PipExecutorCounter.MismatchMessageRetriesCount);
+                    return true;
+
+                case RetryReason.AzureWatsonExitCode:
+                    counters.IncrementCounter(PipExecutorCounter.AzureWatsonExitCodeRetriesCount);
+                    return true;
+            }
+
+            return false; // Unhandled case, needs to be handled by the caller
+        }
+
+        private static void LogRetryOnSameWorkerErrors(RetryReason retryReason, OperationContext operationContext, Process pip, string processDescription)
+        {
+            switch (retryReason)
+            {
+                case RetryReason.OutputWithNoFileAccessFailed:
+                    Logger.Log.FailPipOutputWithNoAccessed(
+                        operationContext,
+                        pip.SemiStableHash,
+                        processDescription);
+                    return;
+
+                case RetryReason.MismatchedMessageCount:
+                    Logger.Log.LogMismatchedDetoursErrorCount(
+                        operationContext,
+                        pip.SemiStableHash,
+                        processDescription);
+                    return;
+
+                case RetryReason.AzureWatsonExitCode:
+                    Logger.Log.PipExitedWithAzureWatsonExitCode(
+                        operationContext,
+                        pip.SemiStableHash,
+                        processDescription);
+                    return;
+            }
+        }
+
+        private static void LogUserSpecifiedExitCodeEvent(SandboxedProcessPipExecutionResult result, OperationContext operationContext, PipExecutionContext context, Process pip, string processDescription, int remainingUserRetries)
+        {
+#pragma warning disable AsyncFixer02
+            var stdErr = string.Empty;
+            if (result.EncodedStandardError != null)
+            {
+                string path = result.EncodedStandardError.Item1.ToString(context.PathTable);
+                if (File.Exists(path))
+                {
+                    stdErr += Environment.NewLine
+                             + "Standard error:"
+                             + Environment.NewLine
+                             + File.ReadAllText(path, result.EncodedStandardError.Item2);
+                }
+            }
+
+            var stdOut = string.Empty;
+            if (result.EncodedStandardOutput != null)
+            {
+                string path = result.EncodedStandardOutput.Item1.ToString(context.PathTable);
+                if (File.Exists(path))
+                {
+                    stdOut += Environment.NewLine
+                             + "Standard output:"
+                             + Environment.NewLine
+                             + File.ReadAllText(path, result.EncodedStandardOutput.Item2);
+                }
+            }
+#pragma warning restore AsyncFixer02
+            Logger.Log.PipWillBeRetriedDueToExitCode(
+                operationContext,
+                pip.SemiStableHash,
+                processDescription,
+                result.ExitCode,
+                remainingUserRetries,
+                stdErr,
+                stdOut);
         }
 
         /// <summary>
@@ -1906,10 +1994,10 @@ namespace BuildXL.Scheduler
         /// </summary>
         private static bool PipNeedsSidebandFile(IPipExecutionEnvironment env, Process pip)
         {
-            return 
+            return
                 env.Configuration.Layout.SharedOpaqueSidebandDirectory.IsValid
                 && env.Configuration.Schedule.UnsafeLazySODeletion
-                && pip.SemiStableHash != 0 
+                && pip.SemiStableHash != 0
                 && pip.HasSharedOpaqueDirectoryOutputs;
         }
 
@@ -1949,9 +2037,9 @@ namespace BuildXL.Scheduler
             UnexpectedFileAccessCounters unexpectedFilesAccesses = fileAccessReportingContext.Counters;
             processExecutionResult.ReportUnexpectedFileAccesses(unexpectedFilesAccesses);
 
-            // Set file access violations which were not whitelisted for use by file access violation analyzer
-            processExecutionResult.FileAccessViolationsNotWhitelisted = fileAccessReportingContext.FileAccessViolationsNotWhitelisted;
-            processExecutionResult.WhitelistedFileAccessViolations = fileAccessReportingContext.WhitelistedFileAccessViolations;
+            // Set file access violations which were not allowlisted for use by file access violation analyzer
+            processExecutionResult.FileAccessViolationsNotAllowlisted = fileAccessReportingContext.FileAccessViolationsNotAllowlisted;
+            processExecutionResult.AllowlistedFileAccessViolations = fileAccessReportingContext.AllowlistedFileAccessViolations;
         }
 
         /// <summary>
@@ -2078,7 +2166,7 @@ namespace BuildXL.Scheduler
             var result = await innerCheckRunnableFromCacheAsync();
 
             // Update the strong fingerprint computations list
-            
+
             processRunnable.CacheLookupPerfInfo.LogCounters(pipCacheMiss.Value.CacheMissType, numPathSetsDownloaded, numCacheEntriesVisited);
 
             Logger.Log.PipCacheLookupStats(
@@ -2525,7 +2613,7 @@ namespace BuildXL.Scheduler
                         var minPathCount = strongFingerprintComputationList.Select(s => s.Value.PathSet.Paths.Length).Min();
                         var maxPathCount = strongFingerprintComputationList.Select(s => s.Value.PathSet.Paths.Length).Max();
 
-                        var weakAugmentingPathSetHashResult = await cache.TryStorePathSetAsync(weakAugmentingPathSet);
+                        var weakAugmentingPathSetHashResult = await cache.TryStorePathSetAsync(weakAugmentingPathSet, processRunnable.Process.PreservePathSetCasing);
                         string addAugmentingPathSetResultDescription;
 
                         if (weakAugmentingPathSetHashResult.Succeeded)
@@ -2534,7 +2622,7 @@ namespace BuildXL.Scheduler
 
                             // Optional (not currently implemented): If augmenting path set already exists (race condition), we
                             // could compute augmented weak fingerprint and perform the cache lookup as above
-                            (ObservedInputProcessingResult observedInputProcessingResult, StrongContentFingerprint computedStrongFingerprint) = 
+                            (ObservedInputProcessingResult observedInputProcessingResult, StrongContentFingerprint computedStrongFingerprint) =
                                 await TryComputeStrongFingerprintBasedOnPriorObservedPathSetAsync(
                                     operationContext,
                                     environment,
@@ -3259,7 +3347,7 @@ namespace BuildXL.Scheduler
                 pipEnvironment: environment.State.PipEnvironment,
                 validateDistribution: configuration.Distribution.ValidateDistribution,
                 directoryArtifactContext: new DirectoryArtifactContext(environment),
-                whitelist: null,
+                allowlist: null,
                 makeInputPrivate: null,
                 makeOutputPrivate: null,
                 semanticPathExpander: semanticPathExpander,
@@ -3268,7 +3356,8 @@ namespace BuildXL.Scheduler
                 directoryTranslator: environment.DirectoryTranslator,
                 vmInitializer: environment.VmInitializer,
                 tempDirectoryCleaner: environment.TempCleaner,
-                incrementalTools: configuration.IncrementalTools);
+                incrementalTools: configuration.IncrementalTools,
+                symlinkedAccessResolver: environment.SymlinkedAccessResolver);
 
             if (!await executor.TryInitializeWarningRegexAsync())
             {
@@ -3283,6 +3372,10 @@ namespace BuildXL.Scheduler
             if (success)
             {
                 environment.ReportWarnings(fromCache: true, count: cacheHitData.Metadata.NumberOfWarnings);
+            }
+            else
+            {
+                return false;
             }
 
             return true;
@@ -3544,7 +3637,7 @@ namespace BuildXL.Scheduler
 
             public ObservedInputAccessCheckFailureAction OnAccessCheckFailure(ObservedPathEntry assertion, bool fromTopLevelDirectory)
             {
-                // The path can't be accessed. Note that we don't apply a whitelist here (that only applies to process execution).
+                // The path can't be accessed. Note that we don't apply a allowlist here (that only applies to process execution).
                 // We let this cause overall failure (i.e., a failed ObservedInputProcessingResult, and an undefined StrongContentFingerprint).
                 if (!BuildXL.Scheduler.ETWLogger.Log.IsEnabled(EventLevel.Verbose, Keywords.Diagnostics))
                 {
@@ -3571,16 +3664,12 @@ namespace BuildXL.Scheduler
 
             public void ReportUnexpectedAccess(ObservedPathEntry assertion, ObservedInputType observedInputType)
             {
-                if (m_environment.Configuration.Schedule.UnexpectedSymlinkAccessReportingMode == UnexpectedSymlinkAccessReportingMode.All)
-                {
-                    m_environment.State.FileContentManager.ReportUnexpectedSymlinkAccess(m_operationContext, m_pipDescription, assertion.Path, observedInputType, reportedAccesses: default(CompactSet<ReportedFileAccess>));
-                }
+                // noop
             }
 
             public bool IsReportableUnexpectedAccess(AbsolutePath path)
             {
-                return m_environment.Configuration.Schedule.UnexpectedSymlinkAccessReportingMode == UnexpectedSymlinkAccessReportingMode.All &&
-                    m_environment.State.FileContentManager.TryGetSymlinkPathKind(path, out var kind);
+                return false;
             }
         }
 
@@ -3625,33 +3714,24 @@ namespace BuildXL.Scheduler
 
             public void ReportUnexpectedAccess(ObservedFileAccess observation, ObservedInputType observedInputType)
             {
-                if (m_environment.Configuration.Schedule.UnexpectedSymlinkAccessReportingMode != UnexpectedSymlinkAccessReportingMode.None)
-                {
-                    m_environment.State.FileContentManager.ReportUnexpectedSymlinkAccess(
-                        m_operationContext,
-                        m_processDescription,
-                        observation.Path,
-                        observedInputType,
-                        observation.Accesses);
-                }
+                // noop
             }
 
             public bool IsReportableUnexpectedAccess(AbsolutePath path)
             {
-                return m_environment.Configuration.Schedule.UnexpectedSymlinkAccessReportingMode != UnexpectedSymlinkAccessReportingMode.None &&
-                    m_environment.State.FileContentManager.TryGetSymlinkPathKind(path, out var kind);
+                return false;
             }
 
             public ObservedInputAccessCheckFailureAction OnAccessCheckFailure(ObservedFileAccess observation, bool fromTopLevelDirectory)
             {
                 // TODO: Should be able to log provenance of the sealed directory here (we don't even know which directory artifact corresponds).
                 //       This is a fine argument to move this function into the execution environment.
-                if (m_fileAccessReportingContext.MatchAndReportUnexpectedObservedFileAccess(observation) != FileAccessWhitelist.MatchType.NoMatch)
+                if (m_fileAccessReportingContext.MatchAndReportUnexpectedObservedFileAccess(observation) != FileAccessAllowlist.MatchType.NoMatch)
                 {
                     return ObservedInputAccessCheckFailureAction.SuppressAndIgnorePath;
                 }
 
-                // If the access was whitelisted, some whitelist-related events will have been reported.
+                // If the access was allowlisted, some allowlist-related events will have been reported.
                 // Otherwise, error or warning level events for the unexpected accesses will have been reported; in
                 // that case we will additionally log a final message specific to this being a sealed directory
                 // related issue (see/* TODO:above about logging provenance of a containing seal).
@@ -3797,6 +3877,7 @@ namespace BuildXL.Scheduler
             CacheablePip pip,
             FileAccessReportingContext fileAccessReportingContext,
             SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> observedFileAccesses,
+            [CanBeNull] IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> sharedDynamicDirectoryWriteAccesses,
             bool trackFileChanges = true)
         {
             Contract.Requires(environment != null);
@@ -3817,6 +3898,7 @@ namespace BuildXL.Scheduler
                 target,
                 pip,
                 observedFileAccesses,
+                sharedDynamicDirectoryWriteAccesses,
                 trackFileChanges);
 
             LogInputAssertions(
@@ -4052,7 +4134,7 @@ namespace BuildXL.Scheduler
             }
         }
 
-        private static bool CheckForAllowedDirectorySymlinkOrJunctionProduction(AbsolutePath outputPath, OperationContext operationContext, string description, PathTable pathTable, ExecutionResult processExecutionResult)
+        private static bool CheckForAllowedJunctionProduction(AbsolutePath outputPath, OperationContext operationContext, string description, PathTable pathTable, ExecutionResult processExecutionResult)
         {
             if (OperatingSystemHelper.IsUnixOS)
             {
@@ -4060,12 +4142,13 @@ namespace BuildXL.Scheduler
             }
 
             var pathstring = outputPath.ToString(pathTable);
-            if (FileUtilities.IsDirectorySymlinkOrJunction(pathstring))
+            var possibleReparsePointType = FileUtilities.TryGetReparsePointType(pathstring);
+            if (possibleReparsePointType.Succeeded && possibleReparsePointType.Result == ReparsePointType.MountPoint)
             {
                 // We don't support storing directory symlinks/junctions to the cache in Windows right now.
                 // We won't fail the pip
                 // We won't cache it either
-                Logger.Log.StorageSymlinkDirInOutputDirectoryWarning(
+                Logger.Log.StorageJunctionInOutputDirectoryWarning(
                     operationContext,
                     description,
                     pathstring);
@@ -4169,7 +4252,7 @@ namespace BuildXL.Scheduler
                 {
                     FileOutputData.UpdateFileData(allOutputData, output.Path, OutputFlags.DeclaredFile);
 
-                    if (!CheckForAllowedDirectorySymlinkOrJunctionProduction(output.Path, operationContext, description, pathTable, processExecutionResult))
+                    if (!CheckForAllowedJunctionProduction(output.Path, operationContext, description, pathTable, processExecutionResult))
                     {
                         enableCaching = false;
                         continue;
@@ -4203,7 +4286,7 @@ namespace BuildXL.Scheduler
                             directoryArtifact,
                             handleFile: fileArtifact =>
                             {
-                                if (!CheckForAllowedDirectorySymlinkOrJunctionProduction(fileArtifact.Path, operationContext, description, pathTable, processExecutionResult))
+                                if (!CheckForAllowedJunctionProduction(fileArtifact.Path, operationContext, description, pathTable, processExecutionResult))
                                 {
                                     enableCaching = false;
                                     return;
@@ -4240,50 +4323,19 @@ namespace BuildXL.Scheduler
                         var writeAccessesByPath = processExecutionResult.SharedDynamicDirectoryWriteAccesses;
                         if (!writeAccessesByPath.TryGetValue(directoryArtifactPath, out var accesses))
                         {
-                            accesses = CollectionUtilities.EmptyArray<AbsolutePath>();
+                            accesses = CollectionUtilities.EmptyArray<FileArtifactWithAttributes>();
                         }
 
-                        // So we know that all accesses here were write accesses, but we don't actually know if in the end the corresponding file
-                        // still exists (the tool could have created it and removed it right after). So we only add existing files.
                         foreach (var access in accesses)
                         {
-                            var maybeResult = FileUtilities.TryProbePathExistence(access.ToString(pathTable), followSymlink: false);
-                            if (!maybeResult.Succeeded)
-                            {
-                                Logger.Log.ProcessingPipOutputDirectoryFailed(
-                                    operationContext,
-                                    description,
-                                    directoryArtifactPath.ToString(pathTable),
-                                    maybeResult.Failure.DescribeIncludingInnerFailures());
-                                return false;
-                            }
+                            fileList.Add(access.ToFileArtifact());
+                            FileOutputData.UpdateFileData(allOutputData, access.Path, OutputFlags.DynamicFile, index);
 
-                            // TODO: directories are not reported as explicit content, since we don't have the functionality today to persist them in the cache.
-                            // But we could do this here in the future
-                            if (maybeResult.Result == PathExistence.ExistsAsDirectory)
-                            {
-                                continue;
-                            }
-
-                            if (!CheckForAllowedDirectorySymlinkOrJunctionProduction(access, operationContext, description, pathTable, processExecutionResult))
-                            {
-                                enableCaching = false;
-                                continue;
-                            }
-
-                            var fileArtifact = FileArtifact.CreateOutputFile(access);
-                            fileList.Add(fileArtifact);
-                            FileOutputData.UpdateFileData(allOutputData, fileArtifact.Path, OutputFlags.DynamicFile, index);
-
-                            var fileArtifactWithAttributes = fileArtifact.WithAttributes(
-                                maybeResult.Result == PathExistence.Nonexistent
-                                ? FileExistence.Temporary
-                                : FileExistence.Required);
-                            allOutputs.Add(fileArtifactWithAttributes);
+                            allOutputs.Add(access);
 
                             if (sharedOutputDirectoriesAreRedirected)
                             {
-                                PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, fileArtifactWithAttributes, allRedirectedOutputs);
+                                PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, access, allRedirectedOutputs);
                             }
                         }
                     }
@@ -4588,8 +4640,7 @@ namespace BuildXL.Scheduler
                     !isRewrittenOutputFile;
 
                 var reparsePointType = FileUtilities.TryGetReparsePointType(outputArtifact.Path.ToString(environment.Context.PathTable));
-
-                bool isSymlink = reparsePointType.Succeeded && reparsePointType.Result == ReparsePointType.SymLink;
+                bool isSymlink = reparsePointType.Succeeded && FileUtilities.IsReparsePointSymbolicLink(reparsePointType.Result);
 
                 bool shouldStoreOutputToCache =
                     ((environment.Configuration.Schedule.StoreOutputsToCache && !shouldOutputBePreserved) ||
@@ -4737,7 +4788,7 @@ namespace BuildXL.Scheduler
             var weakFingerprint = fingerprintComputation.Value.WeakFingerprint;
 
             var pathSet = observedInputProcessingResult.GetPathSet(state.UnsafeOptions);
-            Possible<ContentHash> maybePathSetStored = await environment.State.Cache.TryStorePathSetAsync(pathSet);
+            Possible<ContentHash> maybePathSetStored = await environment.State.Cache.TryStorePathSetAsync(pathSet, process.PreservePathSetCasing);
             if (!maybePathSetStored.Succeeded)
             {
                 Logger.Log.TwoPhaseFailedToStoreMetadataForCacheEntry(
@@ -5048,7 +5099,8 @@ namespace BuildXL.Scheduler
                 // Moreover, FileContentTable can enable so-called path mapping optimization that allows one to avoid opening handles and by-passing checking
                 // of the USN. However, here we are tracking a produced output. Thus, the known content hash should be ignored.
                 ignoreKnownContentHashOnDiscoveringContent: true,
-                createHandleWithSequentialScan: createHandleWithSequentialScan);
+                createHandleWithSequentialScan: createHandleWithSequentialScan,
+                isSymlink: isSymlink);
 
             if (!possiblyTracked.Succeeded)
             {

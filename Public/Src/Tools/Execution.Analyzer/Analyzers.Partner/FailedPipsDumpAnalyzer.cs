@@ -278,8 +278,8 @@ namespace BuildXL.Execution.Analyzer
                         WritePropertyAndValue(writer, "NumberOfProcesses", pipPerformance.NumberOfProcesses.ToString());
                         WritePropertyAndValue(
                             writer,
-                            "FileMonitoringViolationsNotWhitelisted",
-                            pipPerformance.FileMonitoringViolations.NumFileAccessViolationsNotWhitelisted.ToString());
+                            "FileMonitoringViolationsNotAllowlisted",
+                            pipPerformance.FileMonitoringViolations.NumFileAccessViolationsNotAllowlisted.ToString());
 
                         if (isDiff)
                         {
@@ -712,7 +712,7 @@ namespace BuildXL.Execution.Analyzer
             }
 
             // Contains : ReportedProcesses (process chain), 
-            //            ReportedFileAccesses, WhitelistedReportedFileAccesses, ProcessDetouringStatuses
+            //            ReportedFileAccesses, AllowlistedReportedFileAccesses, ProcessDetouringStatuses
             m_pipProcessExecutionMonitoringReported.Add(data.PipId, data);
         }
 
@@ -725,7 +725,7 @@ namespace BuildXL.Execution.Analyzer
             }
 
             // Contains : ReportedProcesses (process chain), 
-            //            ReportedFileAccesses, WhitelistedReportedFileAccesses, ProcessDetouringStatuses
+            //            ReportedFileAccesses, AllowlistedReportedFileAccesses, ProcessDetouringStatuses
             if (m_pipDependencyViolationEventData.TryGetValue(data.ViolatorPipId, out var entry))
             {
                 entry.Add(data);
@@ -944,7 +944,7 @@ namespace BuildXL.Execution.Analyzer
                 }
 
                 // Contains : ReportedProcesses (process chain), 
-                //            ReportedFileAccesses, WhitelistedReportedFileAccesses, ProcessDetouringStatuses
+                //            ReportedFileAccesses, AllowlistedReportedFileAccesses, ProcessDetouringStatuses
                 m_pipProcessExecutionMonitoringReported.Add(data.PipId, data);
             }
 

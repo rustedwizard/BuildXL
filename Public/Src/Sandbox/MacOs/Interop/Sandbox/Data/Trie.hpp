@@ -4,8 +4,12 @@
 #ifndef Trie_hpp
 #define Trie_hpp
 
-#include <sys/types.h>
+#include "stdafx.h"
+
+#include <atomic>
 #include <memory>
+#include <limits.h>
+#include <sys/types.h>
 
 template <typename T> class Trie;
 
@@ -14,14 +18,14 @@ template <typename T> class Trie;
  * Only accessible to its friend class Trie.
  */
 template <typename T>
-class Node
+class Node final
 {
 private:
 
     friend class Trie<T>;
 
-    _Atomic static uint s_numUintNodes;
-    _Atomic static uint s_numPathNodes;
+    static std::atomic<uint> s_numUintNodes;
+    static std::atomic<uint> s_numPathNodes;
 
     /*!
      * The value 65 is chosen so that all ASCII characters between 32 (' ') and 122 ('z')
@@ -84,7 +88,7 @@ typedef enum {
  * Thread-safe.  Non-blocking.
  */
 template <typename T>
-class Trie
+class Trie final
 {
 public:
 
@@ -106,7 +110,7 @@ private:
 
     static const uint BytesInAMegabyte = 1 << 20;
 
-    static void getNodeCounts(uint count, uint numChildren, uint *outCount, double *outSizeMB)
+    inline static void getNodeCounts(uint count, uint numChildren, uint *outCount, double *outSizeMB)
     {
         *outCount = count;
         *outSizeMB = (1.0 * count * (sizeof(Node<T>) + numChildren * sizeof(Node<T>*))) / BytesInAMegabyte;
@@ -122,7 +126,7 @@ private:
     TrieKind kind_;
 
     /*! This is the size of the tree (i.e., number of values stored) and not the number of nodes in the tree. */
-    _Atomic uint size_;
+    std::atomic<uint> size_;
 
     /*! Callback function (and associated payload) to call whenever count changes. */
     on_change_fn onChangeCallback_;
@@ -230,10 +234,10 @@ private:
     Node<T>* findUintNode(uint64_t key, bool createIfMissing);
 
     /*! Calls 'findUintNode' with 'createIfMissing' set to true. */
-    Node<T>* findOrCreateNodeForUint(uint64_t key) { return findUintNode(key, true); }
+    inline Node<T>* findOrCreateNodeForUint(uint64_t key) { return findUintNode(key, true); }
 
     /*! Calls 'findUintNode' with 'createIfMissing' set to false. */
-    Node<T>* findExistingNodeForUint(uint64_t key) { return findUintNode(key, false); }
+    inline Node<T>* findExistingNodeForUint(uint64_t key) { return findUintNode(key, false); }
 
     /*!
      * When 'createIfMissing' is true:
@@ -246,13 +250,13 @@ private:
     Node<T>* findPathNode(const char *key, bool createIfMissing);
 
     /*! Calls 'findPathNode' with 'createIfMissing' set to true. */
-    Node<T>* findOrCreateNodeForPath(const char *key) { return findPathNode(key, true); }
+    inline Node<T>* findOrCreateNodeForPath(const char *key) { return findPathNode(key, true); }
 
     /*! Calls 'findPathNode' with 'createIfMissing' set to false. */
-    Node<T>* findExistingNodeForPath(const char *key) { return findPathNode(key, false); }
+    inline Node<T>* findExistingNodeForPath(const char *key) { return findPathNode(key, false); }
 
     /*! Creates either a Uint or a Path node, based on the kind of this trie. */
-    Node<T>* createNode()
+    inline Node<T>* createNode()
     {
         return kind_ == kUintTrie ? Node<T>::createUintNode() :
                kind_ == kPathTrie ? Node<T>::createPathNode() :

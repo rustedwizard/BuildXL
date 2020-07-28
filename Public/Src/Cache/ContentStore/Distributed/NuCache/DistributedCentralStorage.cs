@@ -7,12 +7,10 @@ using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.Stores;
 using BuildXL.Cache.ContentStore.Extensions;
-using BuildXL.Cache.ContentStore.FileSystem;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
@@ -91,7 +89,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     ConfigurationSelection.RequireAndUseInProcessConfiguration),
                 settings: new ContentStoreSettings()
                 {
-                    TraceFileSystemContentStoreDiagnosticMessages = _configuration.TraceFileSystemContentStoreDiagnosticMessages
+                    TraceFileSystemContentStoreDiagnosticMessages = _configuration.TraceFileSystemContentStoreDiagnosticMessages,
+                    SelfCheckSettings = _configuration.SelfCheckSettings,
                 });
         }
 
@@ -103,14 +102,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             // Don't report reputation as this component modifies machine locations so they won't be recognized
             // by the machine reputation tracker
-        }
-
-        private readonly Result<MachineLocation[]> _notSupportedDesignatedLocationsResult = new Result<MachineLocation[]>("Not supported for distributed central storage");
-
-        Result<MachineLocation[]> IDistributedContentCopierHost.GetDesignatedLocations(ContentHash hash)
-        {
-            // Designated locations are not supported for distributed central storage
-            return _notSupportedDesignatedLocationsResult;
         }
 
         #endregion IDistributedContentCopierHost Members
@@ -134,15 +125,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        protected override async Task<BoolResult> TouchBlobCoreAsync(OperationContext context, AbsolutePath file, string storageId, bool isUploader)
+        protected override async Task<BoolResult> TouchBlobCoreAsync(OperationContext context, AbsolutePath file, string storageId, bool isUploader, bool isImmutable)
         {
             var (hash, fallbackStorageId) = ParseCompositeStorageId(storageId);
 
             // Need to touch in fallback storage as well so it knows the content is still in use
-            var touchTask = _fallbackStorage.TouchBlobAsync(context, file, fallbackStorageId, isUploader).ThrowIfFailure();
+            var touchTask = _fallbackStorage.TouchBlobAsync(context, file, fallbackStorageId, isUploader, isImmutable).ThrowIfFailure();
 
             // Ensure content is present in private CAS and registered
-            var registerTask = PutAndRegisterFileAsync(context, file, hash);
+            var registerTask = PutAndRegisterFileAsync(context, file, hash, isImmutable);
 
             await Task.WhenAll(touchTask, registerTask);
 
@@ -150,10 +141,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        protected override async Task<BoolResult> TryGetFileCoreAsync(OperationContext context, string storageId, AbsolutePath targetFilePath)
+        protected override async Task<BoolResult> TryGetFileCoreAsync(OperationContext context, string storageId, AbsolutePath targetFilePath, bool isImmutable)
         {
             // Get the content from peers or fallback
-            var contentHashWithSize = await TryGetAndPutFileAsync(context, storageId, targetFilePath).ThrowIfFailureAsync();
+            var contentHashWithSize = await TryGetAndPutFileAsync(context, storageId, targetFilePath, isImmutable).ThrowIfFailureAsync();
 
             // Register that the machine now has the content
             await RegisterContent(context, contentHashWithSize);
@@ -164,7 +155,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <inheritdoc />
         protected override async Task<Result<string>> UploadFileCoreAsync(OperationContext context, AbsolutePath file, string blobName, bool garbageCollect = false)
         {
-            // Add the file to CAS and register with global content location store
+            // Add the file to CAS and register with global content location store.
             var hashTask = PutAndRegisterFileAsync(context, file, hash: null);
 
             // Upload to fallback storage so file is available if needed from there
@@ -178,13 +169,16 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             return CreateCompositeStorageId(hash, innerStorageId);
         }
 
-        private async Task<Result<ContentHashWithSize>> TryGetAndPutFileAsync(OperationContext context, string storageId, AbsolutePath targetFilePath)
+        private async Task<Result<ContentHashWithSize>> TryGetAndPutFileAsync(OperationContext context, string storageId, AbsolutePath targetFilePath, bool isImmutable)
         {
             var (hash, fallbackStorageId) = ParseCompositeStorageId(storageId);
             if (hash != null)
             {
+                var fileAccessMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileAccessMode.ReadOnly : FileAccessMode.Write;
+                var fileRealizationMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileRealizationMode.Any : FileRealizationMode.Copy;
+                
                 // First attempt to place file from content store
-                var placeResult = await _privateCas.PlaceFileAsync(context, hash.Value, targetFilePath, FileAccessMode.Write, FileReplacementMode.ReplaceExisting, FileRealizationMode.Copy, pinRequest: null);
+                var placeResult = await _privateCas.PlaceFileAsync(context, hash.Value, targetFilePath, fileAccessMode, FileReplacementMode.ReplaceExisting, fileRealizationMode, pinRequest: null);
                 if (placeResult.IsPlaced())
                 {
                     return Result.Success(new ContentHashWithSize(hash.Value, placeResult.FileSize));
@@ -195,7 +189,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 if (putResult.Succeeded)
                 {
                     // Lastly, try to place again now that file is copied to CAS
-                    placeResult = await _privateCas.PlaceFileAsync(context, hash.Value, targetFilePath, FileAccessMode.Write, FileReplacementMode.ReplaceExisting, FileRealizationMode.Copy, pinRequest: null).ThrowIfFailure();
+                    placeResult = await _privateCas.PlaceFileAsync(context, hash.Value, targetFilePath, fileAccessMode, FileReplacementMode.ReplaceExisting, fileRealizationMode, pinRequest: null).ThrowIfFailure();
 
                     Counters[CentralStorageCounters.TryGetFileFromPeerSucceeded].Increment();
                     return Result.Success(new ContentHashWithSize(hash.Value, placeResult.FileSize));
@@ -207,7 +201,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             }
 
             Counters[CentralStorageCounters.TryGetFileFromFallback].Increment();
-            return await TryGetFromFallbackAndPutAsync(context, targetFilePath, fallbackStorageId);
+            return await TryGetFromFallbackAndPutAsync(context, targetFilePath, fallbackStorageId, isImmutable);
         }
 
         private string CreateCompositeStorageId(ContentHash hash, string fallbackStorageId)
@@ -238,7 +232,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             var context = operationContext;
             CancellationTokenSource? copyCancellationTokenSource = null;
-            if (_configuration.PeerToPeerCopyTimeout > TimeSpan.Zero)
+            if (_configuration.PeerToPeerCopyTimeout != Timeout.InfiniteTimeSpan)
             {
                 // We need to construct a new one because we just want to cancel this copy. Tracing will happen under
                 // the same context.
@@ -248,44 +242,52 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             try
             {
-                var startedCopyHash = ComputeStartedCopyHash(hash);
-                await RegisterContent(context, new ContentHashWithSize(startedCopyHash, -1));
-
-                for (int i = 0; i < _configuration.PropagationIterations; i++)
-                {
-                    // If initial place fails, try to copy the content from remote locations
-                    var (hashInfo, pendingCopyCount) = await GetFileLocationsAsync(context, hash, startedCopyHash);
-
-                    var machineId = _locationStore.ClusterState.PrimaryMachineId.Index;
-                    int machineNumber = GetMachineNumber();
-                    var requiredReplicas = ComputeRequiredReplicas(machineNumber);
-
-                    var actualReplicas = hashInfo.Locations?.Count ?? 0;
-
-                    // Copy from peers if:
-                    // The number of pending copies is known to be less that the max allowed copies
-                    // OR the number replicas exceeds the number of required replicas computed based on the machine index
-                    bool shouldCopy = pendingCopyCount < _configuration.MaxSimultaneousCopies || actualReplicas >= requiredReplicas;
-
-                    Tracer.OperationDebug(context, $"{i} (ShouldCopy={shouldCopy}): Id={machineId}" +
-                        $", Replicas={actualReplicas}, RequiredReplicas={requiredReplicas}, Pending={pendingCopyCount}, Max={_configuration.MaxSimultaneousCopies}");
-
-                    if (shouldCopy)
+                return await context.PerformOperationAsync(
+                    Tracer,
+                    async () =>
                     {
-                        var putResult = await _copier.TryCopyAndPutAsync(
-                            context,
-                            this,
-                            hashInfo,
-                            args => _privateCas.PutFileAsync(context, args.tempLocation, FileRealizationMode.Move, hash, pinRequest: null));
+                        var startedCopyHash = ComputeStartedCopyHash(hash);
+                        await RegisterContent(context, new ContentHashWithSize(startedCopyHash, -1));
 
-                        return putResult;
-                    }
+                        for (int i = 0; i < _configuration.PropagationIterations; i++)
+                        {
+                            // If initial place fails, try to copy the content from remote locations
+                            var (hashInfo, pendingCopyCount) = await GetFileLocationsAsync(context, hash, startedCopyHash);
 
-                    // Wait for content to propagate to more machines
-                    await Task.Delay(_configuration.PropagationDelay, context.Token);
-                }
+                            var machineId = _locationStore.ClusterState.PrimaryMachineId.Index;
+                            int machineNumber = GetMachineNumber();
+                            var requiredReplicas = ComputeRequiredReplicas(machineNumber);
 
-                return new ErrorResult("Insufficient replicas").AsResult<PutResult>();
+                            var actualReplicas = hashInfo.Locations?.Count ?? 0;
+
+                            // Copy from peers if:
+                            // The number of pending copies is known to be less that the max allowed copies
+                            // OR the number replicas exceeds the number of required replicas computed based on the machine index
+                            bool shouldCopy = pendingCopyCount < _configuration.MaxSimultaneousCopies || actualReplicas >= requiredReplicas;
+
+                            Tracer.OperationDebug(context, $"{i} (ShouldCopy={shouldCopy}): Id={machineId}" +
+                                $", Replicas={actualReplicas}, RequiredReplicas={requiredReplicas}, Pending={pendingCopyCount}, Max={_configuration.MaxSimultaneousCopies}");
+
+                            if (shouldCopy)
+                            {
+                                var putResult = await _copier.TryCopyAndPutAsync(
+                                    context,
+                                    this,
+                                    hashInfo,
+                                    CopyReason.CentralStorage,
+                                    args => _privateCas.PutFileAsync(context, args.tempLocation, FileRealizationMode.Move, hash, pinRequest: null));
+
+                                return putResult;
+                            }
+
+                            // Wait for content to propagate to more machines
+                            await Task.Delay(_configuration.PropagationDelay, context.Token);
+                        }
+
+                        return new PutResult(hash, "Insufficient replicas");
+                    },
+                    traceErrorsOnly: true,
+                    extraEndMessage: _ => $"ContentHash=[{hash}]");
             }
             finally
             {
@@ -296,26 +298,29 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <summary>
         /// Try to get from the fallback and put in the CAS
         /// </summary>
-        private async Task<ContentHashWithSize> TryGetFromFallbackAndPutAsync(OperationContext context, AbsolutePath targetFilePath, string fallbackStorageId)
+        private async Task<ContentHashWithSize> TryGetFromFallbackAndPutAsync(OperationContext context, AbsolutePath targetFilePath, string fallbackStorageId, bool isImmutable)
         {
             // In the success case the content will be put at targetFilePath
-            await _fallbackStorage.TryGetFileAsync(context, fallbackStorageId, targetFilePath).ThrowIfFailure();
+            await _fallbackStorage.TryGetFileAsync(context, fallbackStorageId, targetFilePath, isImmutable).ThrowIfFailure();
 
-            var putResult = await _privateCas.PutFileAsync(context, targetFilePath, FileRealizationMode.Copy, _hashType, pinRequest: null).ThrowIfFailure();
+            var placementFileRealizationMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileRealizationMode.Any : FileRealizationMode.Copy;
+            var putResult = await _privateCas.PutFileAsync(context, targetFilePath, placementFileRealizationMode, _hashType, pinRequest: null).ThrowIfFailure();
 
             return new ContentHashWithSize(putResult.ContentHash, putResult.ContentSize);
         }
 
-        private async Task<ContentHash> PutAndRegisterFileAsync(OperationContext context, AbsolutePath file, ContentHash? hash)
+        private async Task<ContentHash> PutAndRegisterFileAsync(OperationContext context, AbsolutePath file, ContentHash? hash, bool isImmutable = false)
         {
+            var putFileRealizationMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileRealizationMode.Any : FileRealizationMode.Copy;
+
             PutResult putResult;
             if (hash != null)
             {
-                putResult = await _privateCas.PutFileAsync(context, file, FileRealizationMode.Copy, hash.Value, pinRequest: null).ThrowIfFailure();
+                putResult = await _privateCas.PutFileAsync(context, file, putFileRealizationMode, hash.Value, pinRequest: null).ThrowIfFailure();
             }
             else
             {
-                putResult = await _privateCas.PutFileAsync(context, file, FileRealizationMode.Copy, _hashType, pinRequest: null).ThrowIfFailure();
+                putResult = await _privateCas.PutFileAsync(context, file, putFileRealizationMode, _hashType, pinRequest: null).ThrowIfFailure();
             }
 
             var contentInfo = new ContentHashWithSize(putResult.ContentHash, putResult.ContentSize);

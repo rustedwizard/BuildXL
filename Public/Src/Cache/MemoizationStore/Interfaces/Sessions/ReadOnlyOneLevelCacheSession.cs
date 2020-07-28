@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-extern alias Async;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
@@ -22,7 +21,7 @@ namespace BuildXL.Cache.MemoizationStore.Interfaces.Sessions
     /// <summary>
     ///     An IReadOnlyCacheSession implemented with one level of content and memoization.
     /// </summary>
-    public class ReadOnlyOneLevelCacheSession : IReadOnlyCacheSessionWithLevelSelectors, IHibernateContentSession
+    public class ReadOnlyOneLevelCacheSession : IReadOnlyCacheSessionWithLevelSelectors, IHibernateContentSession, IConfigurablePin
     {
         /// <summary>
         ///     Auto-pinning behavior configuration.
@@ -171,7 +170,7 @@ namespace BuildXL.Cache.MemoizationStore.Interfaces.Sessions
 
 
         /// <inheritdoc />
-        public Async::System.Collections.Generic.IAsyncEnumerable<GetSelectorResult> GetSelectors(Context context, Fingerprint weakFingerprint, CancellationToken cts, UrgencyHint urgencyHint = UrgencyHint.Nominal)
+        public System.Collections.Generic.IAsyncEnumerable<GetSelectorResult> GetSelectors(Context context, Fingerprint weakFingerprint, CancellationToken cts, UrgencyHint urgencyHint = UrgencyHint.Nominal)
         {
             return this.GetSelectorsAsAsyncEnumerable(context, weakFingerprint, cts, urgencyHint);
         }
@@ -198,6 +197,12 @@ namespace BuildXL.Cache.MemoizationStore.Interfaces.Sessions
         public Task<PinResult> PinAsync(Context context, ContentHash contentHash, CancellationToken cts, UrgencyHint urgencyHint)
         {
             return _contentReadOnlySession.PinAsync(context, contentHash, cts, urgencyHint);
+        }
+
+        /// <inheritdoc />
+        public Task<IEnumerable<Task<Indexed<PinResult>>>> PinAsync(Context context, IReadOnlyList<ContentHash> contentHashes, PinOperationConfiguration configuration)
+        {
+            return _contentReadOnlySession.PinAsync(context, contentHashes, configuration);
         }
 
         /// <inheritdoc />
@@ -253,6 +258,14 @@ namespace BuildXL.Cache.MemoizationStore.Interfaces.Sessions
             return _contentReadOnlySession is IHibernateContentSession session
                 ? session.PinBulkAsync(context, contentHashes)
                 : Task.FromResult(0);
+        }
+
+        /// <inheritdoc />
+        public Task<BoolResult> ShutdownEvictionAsync(Context context)
+        {
+            return _contentReadOnlySession is IHibernateContentSession session
+                ? session.ShutdownEvictionAsync(context)
+                : BoolResult.SuccessTask;
         }
     }
 }

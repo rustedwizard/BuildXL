@@ -11,6 +11,7 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Extensions;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
@@ -50,7 +51,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
         /// <remarks>
         /// The <paramref name="logger"/> is optional.
         /// </remarks>
-        public PassThroughFileSystem(ILogger logger)
+        public PassThroughFileSystem(ILogger? logger)
         {
             if (GetSequentialScanOnOpenStreamThresholdEnvVariable(out _sequentialScanOnOpenThreshold))
             {
@@ -130,7 +131,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                     throw possiblyDeleteExistingDestination.Failure.CreateException();
                 }
 
-                CreateDirectory(destinationPath.Parent);
+                CreateDirectory(destinationPath.GetParent());
 
                 var possiblyCreateCopyOnWrite = FileUtilities.TryCreateCopyOnWrite(sourcePath.Path, destinationPath.Path, followSymlink: false);
 
@@ -349,7 +350,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
         }
 
         /// <inheritdoc />
-        public async Task<Stream> OpenAsync(AbsolutePath path, FileAccess fileAccess, FileMode fileMode, FileShare share, FileOptions options, int bufferSize)
+        public async Task<StreamWithLength?> OpenAsync(AbsolutePath path, FileAccess fileAccess, FileMode fileMode, FileShare share, FileOptions options, int bufferSize)
         {
             path.ThrowIfPathTooLong();
 
@@ -358,14 +359,14 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                 throw new NotImplementedException($"The mode '{fileMode}' is not supported by the {nameof(PassThroughFileSystem)}.");
             }
 
-            using (await ConcurrentAccess.WaitToken())
+            using (await ConcurrentAccess.WaitTokenAsync())
             {
                 return TryOpenFile(path, fileAccess, fileMode, share, options, bufferSize);
             }
         }
 
         /// <inheritdoc />
-        public Task<Stream> OpenReadOnlyAsync(AbsolutePath path, FileShare share)
+        public Task<StreamWithLength?> OpenReadOnlyAsync(AbsolutePath path, FileShare share)
         {
             return this.OpenAsync(path, FileAccess.Read, FileMode.Open, share);
         }
@@ -416,7 +417,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                     }
                 }
 
-                CreateDirectory(destinationPath.Parent);
+                CreateDirectory(destinationPath.GetParent());
 
                 var possiblyCreateCopyOnWrite = FileUtilities.TryCreateCopyOnWrite(sourcePath.Path, destinationPath.Path, followSymlink: false);
 
@@ -428,7 +429,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
         {
             // It is very important to call OpenInternal and not to call OpenAsync method that will re-acquire the semaphore once again.
             // Violating this rule may cause a deadlock.
-            using (var readStream = TryOpenFile(
+            using (Stream? readStream = TryOpenFile(
                 sourcePath, FileAccess.Read, FileMode.Open, FileShare.Read | FileShare.Delete, FileOptions.None, AbsFileSystemExtension.DefaultFileStreamBufferSize))
             {
                 if (readStream == null)
@@ -437,11 +438,13 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                     throw new FileNotFoundException(message, sourcePath.Path);
                 }
 
-                CreateDirectory(destinationPath.Parent);
+                CreateDirectory(destinationPath.GetParent());
 
-                var mode = replaceExisting ? FileMode.OpenOrCreate : FileMode.CreateNew;
+                // If asked to replace the file Create mode must be use to truncate the content of the file
+                // if the target file larger than the source.
+                var mode = replaceExisting ? FileMode.Create : FileMode.CreateNew;
 
-                using (var writeStream = TryOpenFile(
+                using (Stream? writeStream = TryOpenFile(
                     destinationPath, FileAccess.Write, mode, FileShare.Delete, FileOptions.None, AbsFileSystemExtension.DefaultFileStreamBufferSize))
                 {
                     if (writeStream == null)
@@ -455,7 +458,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
             }
         }
 
-        private Stream TryOpenFile(AbsolutePath path, FileAccess accessMode, FileMode mode, FileShare share, FileOptions options, int bufferSize)
+        private StreamWithLength? TryOpenFile(AbsolutePath path, FileAccess accessMode, FileMode mode, FileShare share, FileOptions options, int bufferSize)
         {
             try
             {
@@ -475,7 +478,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
             }
         }
 
-        private Stream TryOpenFileUnix(AbsolutePath path, FileAccess accessMode, FileMode mode, FileShare share, FileOptions options, int bufferSize)
+        private FileStream? TryOpenFileUnix(AbsolutePath path, FileAccess accessMode, FileMode mode, FileShare share, FileOptions options, int bufferSize)
         {
             if (DirectoryExists(path))
             {
@@ -499,7 +502,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
         /// <remarks>
         /// The method throws similar exception that <see cref="FileStream"/> constructor.
         /// </remarks>
-        private Stream TryOpenFileWin(AbsolutePath path, FileAccess accessMode, FileMode mode, FileShare share, FileOptions options, int bufferSize)
+        private FileStream? TryOpenFileWin(AbsolutePath path, FileAccess accessMode, FileMode mode, FileShare share, FileOptions options, int bufferSize)
         {
             options = GetOptions(path, options);
 
@@ -527,7 +530,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                 {
                     case ERROR_FILE_NOT_FOUND:
                     case ERROR_PATH_NOT_FOUND:
-                        return (Stream)null;
+                        return (FileStream?)null;
                     default:
                         throw ThrowLastWin32Error(
                             path.Path,
@@ -543,7 +546,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
 
             return result;
 
-            (FileStream fileStream, Exception Exception) tryOpenFile()
+            (FileStream? fileStream, Exception? Exception) tryOpenFile()
             {
                 try
                 {
@@ -586,7 +589,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
             sourcePath.ThrowIfPathTooLong();
             destinationPath.ThrowIfPathTooLong();
 
-            using (await ConcurrentAccess.WaitToken())
+            using (await ConcurrentAccess.WaitTokenAsync())
             {
                 if (FileUtilities.IsCopyOnWriteSupportedByEnlistmentVolume)
                 {
@@ -774,63 +777,62 @@ namespace BuildXL.Cache.ContentStore.FileSystem
 
         private CreateHardLinkResult CreateHardLinkUnix(AbsolutePath sourceFileName, AbsolutePath destinationFileName, bool replaceExisting)
         {
-            var createOrOpenResult = FileUtilities.TryCreateOrOpenFile(sourceFileName.ToString(), 0,
-                            FileShare.ReadWrite | FileShare.Delete, FileMode.Open, FileFlagsAndAttributes.FileFlagOverlapped, out var sourceFileHandle);
-
-            using (sourceFileHandle)
+            var createHardLinkStatus = FileUtilities.TryCreateHardLink(destinationFileName.Path, sourceFileName.Path);
+            var createHardLinkResult = createHardLinkStatus switch
             {
-                if (!createOrOpenResult.Succeeded)
+                CreateHardLinkStatus.Success                                   => CreateHardLinkResult.Success,
+                CreateHardLinkStatus.FailedAccessDenied                        => CreateHardLinkResult.FailedAccessDenied,
+                CreateHardLinkStatus.FailedDueToPerFileLinkLimit               => CreateHardLinkResult.FailedMaxHardLinkLimitReached,
+                CreateHardLinkStatus.FailedSinceNotSupportedByFilesystem       => CreateHardLinkResult.FailedNotSupported,
+                CreateHardLinkStatus.FailedSinceDestinationIsOnDifferentVolume => CreateHardLinkResult.FailedSourceAndDestinationOnDifferentVolumes,
+                CreateHardLinkStatus.FailedDestinationExists                   => CreateHardLinkResult.FailedDestinationExists,
+                CreateHardLinkStatus.Failed                                    => CreateHardLinkResult.Unknown,
+                _                                                              => CreateHardLinkResult.Unknown
+            };
+
+            if (createHardLinkResult == CreateHardLinkResult.FailedDestinationExists)
+            {
+                if (!replaceExisting)
                 {
-                    switch (createOrOpenResult.Status)
-                    {
-                        case OpenFileStatus.Success:
-                            break;
-                        case OpenFileStatus.FileNotFound:
-                        case OpenFileStatus.PathNotFound:
-                            return CreateHardLinkResult.FailedSourceDoesNotExist;
-                        case OpenFileStatus.Timeout:
-                        case OpenFileStatus.AccessDenied:
-                        case OpenFileStatus.UnknownError:
-                        default:
-                            throw ThrowLastWin32Error(destinationFileName.Path, $"Failed to create or open file {sourceFileName.Path} to create hard link. Status: {createOrOpenResult.Status}");
-                    }
+                    // this will indicate a hard failure
+                    return CreateHardLinkResult.FailedDestinationExists;
+                }
+                else
+                {
+                    // instead of deleting the destination file and trying again, return AccessDenied
+                    // which gets appropriately handled up the stack
+                    return CreateHardLinkResult.FailedAccessDenied;
                 }
             }
 
-            if (!replaceExisting && FileExists(destinationFileName))
+            // try to get more information if failed with unknown reason
+            if (createHardLinkResult == CreateHardLinkResult.Unknown)
             {
-                return CreateHardLinkResult.FailedDestinationExists;
+                var createOrOpenResult = FileUtilities.TryCreateOrOpenFile(
+                    sourceFileName.Path,
+                    FileDesiredAccess.None,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    FileMode.Open,
+                    FileFlagsAndAttributes.FileFlagOverlapped,
+                    out var sourceFileHandle);
+                using (sourceFileHandle)
+                switch (createOrOpenResult.Status)
+                {
+                    case OpenFileStatus.Success:
+                        break;
+                    case OpenFileStatus.FileNotFound:
+                    case OpenFileStatus.PathNotFound:
+                        createHardLinkResult = CreateHardLinkResult.FailedSourceDoesNotExist;
+                        break;
+                    case OpenFileStatus.Timeout:
+                    case OpenFileStatus.AccessDenied:
+                    case OpenFileStatus.UnknownError:
+                    default:
+                        throw ThrowLastWin32Error(destinationFileName.Path, $"Failed to create or open file {sourceFileName.Path} to create hard link. Status: {createOrOpenResult.Status}");
+                }
             }
 
-            var createHardLinkResult = FileUtilities.TryCreateHardLink(destinationFileName.ToString(), sourceFileName.ToString());
-            if (createHardLinkResult.HasFlag(CreateHardLinkStatus.FailedAccessDenied))
-            {
-                return CreateHardLinkResult.FailedAccessDenied;
-            }
-            else if (createHardLinkResult.HasFlag(CreateHardLinkStatus.FailedDueToPerFileLinkLimit))
-            {
-                return CreateHardLinkResult.FailedMaxHardLinkLimitReached;
-            }
-            else if (createHardLinkResult.HasFlag(CreateHardLinkStatus.FailedSinceDestinationIsOnDifferentVolume))
-            {
-                return CreateHardLinkResult.FailedSourceAndDestinationOnDifferentVolumes;
-            }
-            else if (createHardLinkResult.HasFlag(CreateHardLinkStatus.FailedSinceNotSupportedByFilesystem))
-            {
-                return CreateHardLinkResult.FailedNotSupported;
-            }
-            else if (createHardLinkResult.HasFlag(CreateHardLinkStatus.Failed))
-            {
-                return CreateHardLinkResult.Unknown;
-            }
-            else if (createHardLinkResult.HasFlag(CreateHardLinkStatus.Success))
-            {
-                return CreateHardLinkResult.Success;
-            }
-            else
-            {
-                throw ThrowLastWin32Error(sourceFileName.Path, $"Failed to create hard link for file {sourceFileName.Path} with unknown error: {createHardLinkResult.ToString()}");
-            }
+            return createHardLinkResult;
         }
 
         private CreateHardLinkResult CreateHardLinkWin(AbsolutePath sourceFileName, AbsolutePath destinationFileName, bool replaceExisting)
@@ -878,11 +880,26 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                     // Access denied status can be returned by two reasons:
                     // 1. Something went wrong with the source path
                     // 2. Something went wrong with the destination path.
-                    // The second case is potentially recoverable: so, we'll check the destination's file attribute
+
+                    var retry = false;
+
+                    // For case 1: we'll make sure that the source file allows attribute writes.
+                    if (!FileUtilities.HasWritableAttributeAccessControl(sourceFileName.Path))
+                    {
+                        AllowAttributeWrites(sourceFileName);
+                        retry = true;
+                    }
+
+                    // For case 2: we'll check the destination's file attribute
                     // and if the file has readonly attributes, then we'll remove them and will try to create hardlink one more time.
                     if (this.TryGetFileAttributes(destinationFileName, out var attributes) && (attributes & FileAttributes.ReadOnly) != 0)
                     {
                         SetFileAttributes(destinationFileName, FileAttributes.Normal);
+                        retry = true;
+                    }
+
+                    if (retry)
+                    {
                         status = setLink(sourceFileHandle, linkInfo);
                     }
                 }
@@ -1073,7 +1090,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
             FileUtilities.SetFileAccessControl(path.Path, fileSystemRights, accessControlType == AccessControlType.Allow);
         }
 
-        private static Exception ThrowLastWin32Error(string path, string message, int? lastErrorArg = null)
+        private static Exception ThrowLastWin32Error(string? path, string message, int? lastErrorArg = null)
         {
             var lastError = lastErrorArg ?? Marshal.GetLastWin32Error();
             if (OperatingSystemHelper.IsUnixOS)

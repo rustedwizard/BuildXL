@@ -19,7 +19,7 @@ namespace BuildXL.Scheduler.Tracing
         PipCopyFileFailed = 8,
         CacheFingerprintHitSources = 47,
         ProcessingPipOutputFileFailed = 52,
-        
+
         PipInputAssertion = 67,
         PipIpcFailedDueToInvalidInput = 77,
 
@@ -76,7 +76,7 @@ namespace BuildXL.Scheduler.Tracing
         DisallowedFileAccessInSealedDirectory = 277,
         StartSchedulingPipsWithFilter = 280,
         EndSchedulingPipsWithFilter = 281,
-        
+
         PipSemaphoreQueued = 288,
         PipSemaphoreDequeued = 289,
         CopyingPipInputToLocalStorage = 294,
@@ -184,9 +184,9 @@ namespace BuildXL.Scheduler.Tracing
         PipExitedWithAzureWatsonExitCode = 2924,
         OutputFileHashingStats = 2929,
 
-        RunningTimeStats = 3110,
-        RunningTimeAdded = 3111,
-        RunningTimeUpdated = 3112,
+        HistoricPerfDataStats = 3110,
+        HistoricPerfDataAdded = 3111,
+        HistoricPerfDataUpdated = 3112,
         StartAssigningPriorities = 3113,
         EndAssigningPriorities = 3114,
         StartSettingPipStates = 3115,
@@ -210,13 +210,13 @@ namespace BuildXL.Scheduler.Tracing
         PipInputVerificationUntrackedInput = 3613,
         StorageRemoveAbsentFileOutputWarning = 3614,
         StorageCacheCleanDirectoryOutputError = 3615,
-        StorageSymlinkDirInOutputDirectoryWarning = 3616,
+        StorageJunctionInOutputDirectoryWarning = 3616,
 
         PipInputVerificationMismatchRecovery = 3617,
         PipInputVerificationMismatchRecoveryExpectedExistence = 3618,
         PipInputVerificationMismatchRecoveryExpectedNonExistence = 3619,
         UnexpectedlySmallObservedInputCount = 3620,
-        PerformanceDataCacheTrace = 3621,
+        HistoricPerfDataCacheTrace = 3621,
         CancellingProcessPipExecutionDueToResourceExhaustion = 3622,
         StartCancellingProcessPipExecutionDueToResourceExhaustion = 3623,
 
@@ -233,11 +233,11 @@ namespace BuildXL.Scheduler.Tracing
         PipIsIncrementallySkippedDueToCleanMaterialized = 3631,
 
         // Symlink file.
-        FailedToCreateSymlinkFromSymlinkMap = 3632,
-        FailedLoadSymlinkFile = 3633,
-        CreateSymlinkFromSymlinkMap = 3634,
-        SymlinkFileTraceMessage = 3635,
-        UnexpectedAccessOnSymlinkPath = 3636,
+        // was FailedToCreateSymlinkFromSymlinkMap = 3632,
+        // was FailedLoadSymlinkFile = 3633,
+        // was CreateSymlinkFromSymlinkMap = 3634,
+        // was SymlinkFileTraceMessage = 3635,
+        // was UnexpectedAccessOnSymlinkPath = 3636,
 
         // Preserved outputs tracker.
         // Reserved = 3640,
@@ -263,6 +263,7 @@ namespace BuildXL.Scheduler.Tracing
         PipCacheMetadataBelongToAnotherPip = 3700,
 
         PipIpcFailedDueToInfrastructureError = 3701,
+        PipTimedOutDueToSuspend = 3702,
 
         // RESERVED TO [5000, 5050] (BuildXL.Scheduler.dll)
 
@@ -311,6 +312,8 @@ namespace BuildXL.Scheduler.Tracing
         FingerprintStoreUnableToOpen = 5030,
         FingerprintStoreUnableToCopyOnWriteLogFile = 5031, // was FingerprintStoreFormatVersionChangeDetected = 5031,
 
+        DependencyViolationTheSameTempFileProducedByIndependentPips = 5032,
+
         MovingCorruptFile = 5040,
         FailedToMoveCorruptFile = 5041,
         FailedToDeleteCorruptFile = 5042,
@@ -354,7 +357,7 @@ namespace BuildXL.Scheduler.Tracing
         IncrementalSchedulingDirtyPipChanges = 8060,
         IncrementalSchedulingProcessGraphChange = 8061,
 
-        // FREE SLOT 8062
+        IncrementalSchedulingDisabledDueToGvfsProjectionChanges = 8062,
         JournalProcessingStatisticsForSchedulerTelemetry = 8063,
 
         IncrementalSchedulingPreciseChange = 8064,
@@ -457,6 +460,15 @@ namespace BuildXL.Scheduler.Tracing
         OperationTrackerAssert = 14506,
 
         ExcessivePipRetriesDueToLowMemory = 14507,
+        TopPipsPerformanceInfo = 14508,
+
+        CompositeSharedOpaqueContentDetermined = 14509,
+        PipRetryDueToLowMemory = 14510,
+        EmptyWorkingSet = 14511,
+        ResumeProcess = 14512,
+        HandlePipStepOnWorkerFailed = 14513,
+        ExcessivePipRetriesDueToRetryableFailures = 14514,
+        PipRetryDueToRetryableFailures = 14515,
 
         // was DependencyViolationGenericWithRelatedPip_AsError = 25000,
         // was DependencyViolationGeneric_AsError = 25001,

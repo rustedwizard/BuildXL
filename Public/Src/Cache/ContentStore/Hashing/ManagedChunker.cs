@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics.ContractsLight;
 using System.Linq;
 using System.Security.Cryptography;
 using BuildXL.Cache.ContentStore.Hashing.Chunking;
@@ -18,7 +19,18 @@ namespace BuildXL.Cache.ContentStore.Hashing
     /// </remarks>
     public sealed class ManagedChunker : IChunker
     {
-        private readonly DeterministicChunker _inner = new DeterministicChunker(new ManagedChunkerNonDeterministic());
+        private readonly DeterministicChunker _inner;
+
+        /// <inheritdoc/>
+        public ChunkerConfiguration Configuration => _inner.Configuration;
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public ManagedChunker(ChunkerConfiguration configuration)
+        {
+            _inner = new DeterministicChunker(configuration, new ManagedChunkerNonDeterministic(configuration));
+        }
 
         /// <inheritdoc/>
         public IChunkerSession BeginChunking(Action<ChunkInfo> chunkCallback)
@@ -31,11 +43,23 @@ namespace BuildXL.Cache.ContentStore.Hashing
         {
             _inner.Dispose();
         }
+
+        /// <inheritdoc/>
+        public Pool<byte[]>.PoolHandle GetBufferFromPool()
+        {
+            return _inner.GetBufferFromPool();
+        }
     }
 
-    internal sealed class ManagedChunkerNonDeterministic : IChunker
+    internal sealed class ManagedChunkerNonDeterministic : INonDeterministicChunker
     {
+        public ChunkerConfiguration Configuration { get; }
         private readonly SHA512Managed _shaHasher = new SHA512Managed();
+
+        public ManagedChunkerNonDeterministic(ChunkerConfiguration configuration)
+        {
+            Configuration = configuration;
+        }
 
         /// <summary>
         /// Creates a session for chunking a stream from a series of buffers.
@@ -67,7 +91,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
             public Session(ManagedChunkerNonDeterministic chunker, Action<ChunkInfo> chunkCallback)
             {
                 _parent = chunker;
-                _regressionChunker = new RegressionChunking(ChunkTranslate);
+                _regressionChunker = new RegressionChunking(_parent.Configuration, ChunkTranslate);
                 _chunkCallback = chunkCallback;
             }
 
@@ -77,6 +101,8 @@ namespace BuildXL.Cache.ContentStore.Hashing
                 {
                     return;
                 }
+
+                Contract.Assert(_currentBuffer != null);
 
                 byte[] hash = _parent._shaHasher.ComputeHash(
                     _currentBuffer.Value.Array,
@@ -102,7 +128,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
             }
 
             /// <inheritdoc/>
-            public override bool Equals(object obj)
+            public override bool Equals(object? obj)
             {
                 throw new InvalidOperationException();
             }

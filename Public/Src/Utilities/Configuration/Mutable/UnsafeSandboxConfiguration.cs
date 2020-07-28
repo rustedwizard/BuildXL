@@ -13,6 +13,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MonitorNtCreateFile = true;
             UnexpectedFileAccessesAreErrors = true;
             IgnoreReparsePoints = false;
+            IgnoreFullSymlinkResolving = true;
             IgnorePreloadedDlls = false;
             SandboxKind = SandboxKind.Default;
 
@@ -62,6 +63,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             IgnoreNonCreateFileReparsePoints = template.IgnoreNonCreateFileReparsePoints;
             IgnoreSetFileInformationByHandle = template.IgnoreSetFileInformationByHandle;
             IgnoreReparsePoints = template.IgnoreReparsePoints;
+            IgnoreFullSymlinkResolving = template.IgnoreFullSymlinkResolving;
             IgnorePreloadedDlls = template.IgnorePreloadedDlls;
             SandboxKind = template.SandboxKind;
             ExistingDirectoryProbesAsEnumerations = template.ExistingDirectoryProbesAsEnumerations;
@@ -73,6 +75,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             IgnoreUndeclaredAccessesUnderSharedOpaques = template.IgnoreUndeclaredAccessesUnderSharedOpaques;
             IgnoreCreateProcessReport = template.IgnoreCreateProcessReport;
             ProbeDirectorySymlinkAsDirectory = template.ProbeDirectorySymlinkAsDirectory;
+            ProcessSymlinkedAccesses = template.ProcessSymlinkedAccesses;
         }
 
         /// <inheritdoc />
@@ -98,6 +101,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public bool IgnoreReparsePoints { get; set; }
+        
+        /// <inheritdoc />
+        public bool IgnoreFullSymlinkResolving { get; set; }
 
         /// <inheritdoc />
         public bool IgnorePreloadedDlls { get; set; }
@@ -134,5 +140,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public bool ProbeDirectorySymlinkAsDirectory { get; set; }
+
+        /// <inheritdoc />
+        public bool? ProcessSymlinkedAccesses { get; set; }
+
     }
 }

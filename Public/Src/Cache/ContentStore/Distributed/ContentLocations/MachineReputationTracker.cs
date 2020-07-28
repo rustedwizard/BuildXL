@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Concurrent;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
+using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 
@@ -104,10 +105,10 @@ namespace BuildXL.Cache.ContentStore.Distributed
             if (reputation == MachineReputation.Good
                 && _clusterState != null
                 && _clusterState.TryResolveMachineId(location, out var machineId)
-                && _clusterState.IsMachineMarkedInactive(machineId))
+                && (_clusterState.IsMachineMarkedInactive(machineId) || _clusterState.IsMachineMarkedClosed(machineId)))
             {
                 _context.Debug($"Marked machine {machineId}='{location}' active due to report of good reputation.");
-                _clusterState.MarkMachineActive(machineId);
+                _clusterState.MarkMachineActive(machineId).IgnoreFailure();
             }
 
             var reputationState = _reputations.GetOrAdd(location, _ => new ReputationState());
@@ -134,7 +135,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
             if (_clusterState != null 
                 && _clusterState.TryResolveMachineId(machine, out var machineId))
             {
-                if (_clusterState.IsMachineMarkedInactive(machineId))
+                if (_clusterState.IsMachineMarkedInactive(machineId) || _clusterState.IsMachineMarkedClosed(machineId))
                 {
                     return MachineReputation.Inactive;
                 }

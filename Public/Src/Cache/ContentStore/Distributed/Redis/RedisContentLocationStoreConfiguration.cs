@@ -3,13 +3,13 @@
 
 using System;
 using System.Threading;
-using BuildXL.Cache.ContentStore.Interfaces.Distributed;
+using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Utils;
 
 namespace BuildXL.Cache.ContentStore.Distributed.Redis
 {
     /// <summary>
-    /// Configuration properties for <see cref="RedisContentLocationStore"/>
+    /// Configuration properties for <see cref="RedisGlobalStore"/>
     /// </summary>
     public class RedisContentLocationStoreConfiguration : LocalLocationStoreConfiguration
     {
@@ -24,24 +24,19 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         public int RedisBatchPageSize { get; set; } = RedisContentLocationStoreConstants.DefaultBatchSize;
 
         /// <summary>
-        /// Gets or sets minimum replica count to determine safe eviction during distributed eviction.
+        /// The time before a machine is marked as closed from its last heartbeat as open.
         /// </summary>
-        public int MinReplicaCountToSafeEvict { get; set; } = RedisContentLocationStoreConstants.DefaultMinReplicaCountToSafeEvict;
-
-        /// <summary>
-        /// Gets or sets minimum replica count to determine immediate eviction during distributed eviction.
-        /// </summary>
-        public int MinReplicaCountToImmediateEvict { get; set; } = RedisContentLocationStoreConstants.DefaultMinReplicaCountToImmediateEvict;
+        public TimeSpan MachineActiveToClosedInterval { get; set; } = TimeSpan.FromMinutes(10);
 
         /// <summary>
         /// The time before machines are marked as expired and locations are eligible for garbage collection from the local database
         /// </summary>
-        public TimeSpan MachineExpiry { get; set; } = TimeSpan.FromHours(1);
+        public TimeSpan MachineActiveToExpiredInterval { get; set; } = TimeSpan.FromHours(1);
 
         /// <summary>
         /// The interval at which cluster state should be mirror by master machine
         /// </summary>
-        public TimeSpan ClusterStateMirrorInterval => MachineExpiry.Multiply(0.5);
+        public TimeSpan ClusterStateMirrorInterval => MachineActiveToExpiredInterval.Multiply(0.5);
 
         /// <summary>
         /// Indicates whether cluster state should be mirrored to secondary redis
@@ -62,14 +57,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         {
             Keyspace = "Default:"
         };
-
-        /// <summary>
-        /// Configuration of redis garbage collection.
-        /// </summary>
-        public RedisGarbageCollectionConfiguration GarbageCollectionConfiguration { get; set; }
-
-        /// <nodoc />
-        public bool GarbageCollectionEnabled => GarbageCollectionConfiguration != null;
 
         /// <summary>
         /// Expiry time for all blobs stored in Redis.
@@ -101,6 +88,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         public int RedisConnectionErrorLimit { get; set; } = int.MaxValue;
 
         /// <summary>
+        /// The number of consecutive reconnection events that will trigger a service shutdown.
+        /// </summary>
+        public int RedisReconnectionLimitBeforeServiceRestart { get; set; } = int.MaxValue;
+
+        /// <summary>
         /// Whether to trace failures in redis access layer.
         /// </summary>
         public bool TraceRedisFailures { get; set; } = false;
@@ -111,78 +103,18 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         public bool TraceRedisTransientFailures { get; set; } = false;
 
         /// <summary>
+        /// Gets a minimal time between reconnecting to a redis instance.
+        /// </summary>
+        public TimeSpan MinRedisReconnectInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+        /// <summary>
         /// Timeout for GetBlob operations.
         /// </summary>
         public TimeSpan GetBlobTimeout { get; set; } = Timeout.InfiniteTimeSpan;
 
         /// <summary>
-        /// Indicates the mode used when writing content locations
+        /// Timeout for getting checkpoint information from redis.
         /// </summary>
-        public ContentLocationMode WriteMode { get; set; } = ContentLocationMode.Redis;
-
-        /// <summary>
-        /// Indicates the mode used when reading content locations
-        /// </summary>
-        public ContentLocationMode ReadMode { get; set; } = ContentLocationMode.Redis;
-
-        /// <nodoc />
-        public bool HasWriteMode(ContentLocationMode mode)
-        {
-            return (WriteMode & mode) == mode;
-        }
-
-        /// <nodoc />
-        public bool HasReadMode(ContentLocationMode mode)
-        {
-            return (ReadMode & mode) == mode;
-        }
-
-        /// <nodoc />
-        public bool HasReadOrWriteMode(ContentLocationMode mode)
-        {
-            return HasReadMode(mode) || HasWriteMode(mode);
-        }
-    }
-
-    /// <summary>
-    /// Configuration class for redis garbage collection process.
-    /// </summary>
-    public class RedisGarbageCollectionConfiguration
-    {
-        /// <summary>
-        /// Time between garbage collections.
-        /// </summary>
-        public TimeSpan GarbageCollectionInterval { get; set; } = TimeSpan.FromHours(1);
-
-        /// <summary>
-        /// Gets the name of the key which controls the least for redis garbage collection
-        /// </summary>
-        public string GarbageCollectionLeaseKey { get; set; } = "RedisGcRoleLeaseKey";
-
-        /// <summary>
-        /// Number of iterations between throttling and progress reporting.
-        /// </summary>
-        public int IterationsInBatch { get; set; } = 50;
-
-        /// <summary>
-        /// The delay between GC batches.
-        /// </summary>
-        public TimeSpan DelayBetweenBatches { get; set; } = TimeSpan.FromMilliseconds(250);
-
-        /// <summary>
-        /// Number of entries retrieved during one scan redis call.
-        /// </summary>
-        public int ScanBatchSize { get; set; } = 1000;
-
-        /// <summary>
-        /// The delay between entries last access time and the GC time when an empty entry is considered eligible for garbage collection.
-        /// </summary>
-        /// <remarks>
-        /// Non-zero time here is important for work-arounding the issue with distributed eviction.
-        /// Currently, the client may clear the last bit of the entry and later during distributed eviction process it may decided to add the bit back.
-        /// If we'll remove the entry in that time window, the entry will be lost forever.
-        /// To avoid this race condition, only empty records that were accessed longer than 5 minutes are considered eligible for deletion.
-        /// </remarks>
-        public TimeSpan MaximumEntryLastAccessTime { get; set; } = TimeSpan.FromMinutes(5);
+        public TimeSpan GetCheckpointStateTimeout { get; set; } = TimeSpan.FromMinutes(5);
     }
 }

@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-extern alias Async;
 using System;
 using System.Diagnostics.ContractsLight;
 using System.Text;
@@ -23,6 +22,8 @@ using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
 using BuildXL.Cache.MemoizationStore.Tracing;
 
+#nullable enable
+
 namespace BuildXL.Cache.MemoizationStore.Sessions
 {
     /// <summary>
@@ -33,12 +34,12 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         /// <summary>
         ///     Exposes the ContentStore to subclasses. NOTE: Only available after calling <see cref="CreateAndStartStoresAsync(OperationContext)"/>
         /// </summary>
-        protected IContentStore ContentStore { get; set; }
+        protected IContentStore? ContentStore { get; set; }
 
         /// <summary>
         ///     Exposes the MemoizationStore to subclasses. NOTE: Only available after calling <see cref="CreateAndStartStoresAsync(OperationContext)"/>
         /// </summary>
-        protected IMemoizationStore MemoizationStore { get; set; }
+        protected IMemoizationStore? MemoizationStore { get; set; }
 
         /// <inheritdoc />
         protected override Tracer Tracer => CacheTracer;
@@ -49,10 +50,17 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         /// <summary>
         ///     Determines if the content session will be passed to the memoization store when constructing a non-readonly session.
         /// </summary>
-        private readonly bool _passContentToMemoization = true;
+        private readonly bool _passContentToMemoization;
+
+        /// <summary>
+        /// Gets whether stats should be from only content store.
+        /// This is to avoid aggregating equivalent stats when content and memoization
+        /// are backed by the same instance.
+        /// </summary>
+        protected virtual bool UseOnlyContentStats => false;
 
         /// <nodoc />
-        public OneLevelCacheBase(Guid id, bool passContentToMemoization)
+        protected OneLevelCacheBase(Guid id, bool passContentToMemoization)
         {
             _passContentToMemoization = passContentToMemoization;
             Id = id;
@@ -76,63 +84,53 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         /// <inheritdoc />
         protected override async Task<BoolResult> StartupCoreAsync(OperationContext context)
         {
-            (var contentStoreResult, var memoizationStoreResult) = await CreateAndStartStoresAsync(context);
+            var (contentStoreResult, memoizationStoreResult) = await CreateAndStartStoresAsync(context);
 
-            Contract.Assert(ContentStore != null, "Content store must be initialized");
-            Contract.Assert(MemoizationStore != null, "Memoization store must be initialized");
-            Contract.Assert(!ReferenceEquals(ContentStore, MemoizationStore));
-
-            BoolResult result;
-
-            if (!contentStoreResult.Succeeded || !memoizationStoreResult.Succeeded)
+            if (contentStoreResult.Succeeded && memoizationStoreResult.Succeeded)
             {
-                var sb = new StringBuilder();
+                // The properties must be initialized but only when the startup succeeded.
+                Contract.Assert(ContentStore != null, "Content store must be initialized");
+                Contract.Assert(MemoizationStore != null, "Memoization store must be initialized");
+                Contract.Assert(!ReferenceEquals(ContentStore, MemoizationStore), "ContentStore and MemoizationStore should not be the same.");
 
-                if (contentStoreResult.Succeeded)
-                {
-                    var r = await ContentStore.ShutdownAsync(context).ConfigureAwait(false);
-                    if (!r.Succeeded)
-                    {
-                        sb.Append($"Content store shutdown failed, error=[{r}]");
-                    }
-                }
-                else
-                {
-                    sb.Append($"Content store startup failed, error=[{contentStoreResult}]");
-                }
-
-                if (memoizationStoreResult.Succeeded)
-                {
-                    var r = await MemoizationStore.ShutdownAsync(context).ConfigureAwait(false);
-                    if (!r.Succeeded)
-                    {
-                        sb.Append(sb.Length > 0 ? ", " : string.Empty);
-                        sb.Append($"Memoization store shutdown failed, error=[{memoizationStoreResult}]");
-                    }
-                }
-                else
-                {
-                    sb.Append(sb.Length > 0 ? ", " : string.Empty);
-                    sb.Append($"Memoization store startup failed, error=[{memoizationStoreResult}]");
-                }
-
-                result = new BoolResult(sb.ToString());
+                return BoolResult.Success;
             }
             else
             {
-                result = BoolResult.Success;
-            }
+                // One of the startup operations failed.
+                var sb = new StringBuilder();
 
-            return result;
+                AppendIfError(sb, "Content store startup", contentStoreResult);
+
+                if (contentStoreResult)
+                {
+                    Contract.Assert(ContentStore != null, "Content store must be initialized");
+                    var r = await ContentStore.ShutdownAsync(context).ConfigureAwait(false);
+                    AppendIfError(sb, "Content store shutdown", r);
+                }
+
+                AppendIfError(sb, "Memoization store startup", memoizationStoreResult);
+                if (memoizationStoreResult)
+                {
+                    Contract.Assert(MemoizationStore != null, "Memoization store must be initialized");
+                    var r = await MemoizationStore.ShutdownAsync(context).ConfigureAwait(false);
+                    AppendIfError(sb, "Memoization store shutdown", r);
+                }
+
+                return new BoolResult(sb.ToString());
+            }
         }
 
         /// <inheritdoc />
         protected override async Task<BoolResult> ShutdownCoreAsync(OperationContext context)
         {
-            var statsResult = await StatsAsync(context).ConfigureAwait(false);
+            await LogStatsAsync(context);
 
-            var contentStoreTask = Task.Run(() => ContentStore.ShutdownAsync(context));
-            var memoizationStoreResult = await MemoizationStore.ShutdownAsync(context).ConfigureAwait(false);
+            var contentStoreTask = IfNotNull(ContentStore, store => Task.Run(() => store.ShutdownIfStartedAsync(context)));
+
+            // This code potentially may cause unobserved task exception, but this is possible only when the callback
+            // provided into Task.Run fails (like with NRE). But this should not be happening (anymore at least).
+            var memoizationStoreResult = await IfNotNull(MemoizationStore, store => store.ShutdownIfStartedAsync(context)).ConfigureAwait(false);
             var contentStoreResult = await contentStoreTask.ConfigureAwait(false);
 
             BoolResult result;
@@ -143,48 +141,58 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
             else
             {
                 var sb = new StringBuilder();
-                if (!contentStoreResult.Succeeded)
-                {
-                    sb.Append($"Content store shutdown failed, error=[{contentStoreResult}]");
-                }
-
-                if (!memoizationStoreResult.Succeeded)
-                {
-                    sb.Append(sb.Length > 0 ? ", " : string.Empty);
-                    sb.Append($"Memoization store shutdown failed, error=[{memoizationStoreResult}]");
-                }
-
+                AppendIfError(sb, "Content store shutdown", contentStoreResult);
+                AppendIfError(sb, "Memoization store shutdown", memoizationStoreResult);
                 result = new BoolResult(sb.ToString());
             }
+
+            return result;
+        }
+
+        private static void AppendIfError(StringBuilder sb, string operation, BoolResult result)
+        {
+            if (!result)
+            {
+                sb.Append(sb.Length > 0 ? ", " : string.Empty);
+                sb.Append($"{operation} failed, error=[{result}]");
+            }
+        }
+
+        private async Task LogStatsAsync(OperationContext context)
+        {
+            var statsResult = await GetStatsCoreAsync(context).ConfigureAwait(false);
 
             if (statsResult.Succeeded)
             {
 #if NET_FRAMEWORK
                 LocalCacheStatsEventSource.Instance.Stats(statsResult.CounterSet);
 #endif
-                statsResult.CounterSet.LogOrderedNameValuePairs(s => Tracer.Debug(context, s));
+                Tracer.TraceStatisticsAtShutdown(context, statsResult.CounterSet!, prefix: "OneLevelCacheStats");
             }
-
-            return result;
         }
 
         /// <inheritdoc />
         public CreateSessionResult<IReadOnlyCacheSession> CreateReadOnlySession(Context context, string name, ImplicitPin implicitPin)
         {
+            Contract.Requires(ContentStore != null);
+            Contract.Requires(MemoizationStore != null);
+
             return Tracing.CreateReadOnlySessionCall.Run(CacheTracer, context, name, () =>
             {
                 var createContentResult = ContentStore.CreateReadOnlySession(context, name, implicitPin);
-                if (!createContentResult.Succeeded)
+                if (!createContentResult)
                 {
                     return new CreateSessionResult<IReadOnlyCacheSession>(createContentResult, "Content session creation failed");
                 }
+                
                 var contentReadOnlySession = createContentResult.Session;
 
                 var createMemoizationResult = MemoizationStore.CreateReadOnlySession(context, name);
-                if (!createMemoizationResult.Succeeded)
+                if (!createMemoizationResult)
                 {
                     return new CreateSessionResult<IReadOnlyCacheSession>(createMemoizationResult, "Memoization session creation failed");
                 }
+
                 var memoizationReadOnlySession = createMemoizationResult.Session;
 
                 var session = new ReadOnlyOneLevelCacheSession(name, implicitPin, memoizationReadOnlySession, contentReadOnlySession);
@@ -195,23 +203,28 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         /// <inheritdoc />
         public CreateSessionResult<ICacheSession> CreateSession(Context context, string name, ImplicitPin implicitPin)
         {
+            Contract.Requires(ContentStore != null);
+            Contract.Requires(MemoizationStore != null);
+
             return Tracing.CreateSessionCall.Run(CacheTracer, context, name, () =>
             {
                 var createContentResult = ContentStore.CreateSession(context, name, implicitPin);
-                if (!createContentResult.Succeeded)
+                if (!createContentResult)
                 {
                     return new CreateSessionResult<ICacheSession>(createContentResult, "Content session creation failed");
                 }
+
                 var contentSession = createContentResult.Session;
 
                 var createMemoizationResult = _passContentToMemoization
                     ? MemoizationStore.CreateSession(context, name, contentSession)
                     : MemoizationStore.CreateSession(context, name);
 
-                if (!createMemoizationResult.Succeeded)
+                if (!createMemoizationResult)
                 {
                     return new CreateSessionResult<ICacheSession>(createMemoizationResult, "Memoization session creation failed");
                 }
+
                 var memoizationSession = createMemoizationResult.Session;
 
                 var session = new OneLevelCacheSession(name, implicitPin, memoizationSession, contentSession);
@@ -222,10 +235,21 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         /// <inheritdoc />
         public Task<GetStatsResult> GetStatsAsync(Context context)
         {
-            return GetStatsCall<Tracer>.RunAsync(Tracer, new OperationContext(context), () => StatsAsync(context));
+            return GetStatsCall<Tracer>.RunAsync(Tracer, new OperationContext(context), () => GetStatsCoreAsync(context));
         }
 
-        private Task<GetStatsResult> GetStatsResultCoreAsync<T>(T source, Func<T, Task<GetStatsResult>> getStats) where T : class
+        private Task<BoolResult> IfNotNull<T>(T? source, Func<T, Task<BoolResult>> func)
+            where T : class
+        {
+            if (source is null)
+            {
+                return BoolResult.SuccessTask;
+            }
+
+            return func(source);
+        }
+
+        private Task<GetStatsResult> GetStatsResultCoreAsync<T>(T? source, Func<T, Task<GetStatsResult>> getStats) where T : class
         {
             if (source is null)
             {
@@ -235,24 +259,23 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
             return getStats(source);
         }
 
-        private async Task<GetStatsResult> StatsAsync(Context context)
+        private async Task<GetStatsResult> GetStatsCoreAsync(Context context)
         {
-            var counters = new CounterSet();
-
             // Both ContentStore and MemoizationStore may be null if startup failed.
             // Using a helper function to avoid NRE.
             var statsResult = await GetStatsResultCoreAsync(ContentStore, store => store.GetStatsAsync(context)).ConfigureAwait(false);
 
-            if (!statsResult.Succeeded)
+            if (!statsResult || UseOnlyContentStats)
             {
                 return statsResult;
             }
 
+            var counters = new CounterSet();
             counters.Merge(statsResult.CounterSet);
 
             statsResult = await GetStatsResultCoreAsync(MemoizationStore, store => store.GetStatsAsync(context)).ConfigureAwait(false);
 
-            if (!statsResult.Succeeded)
+            if (!statsResult)
             {
                 return statsResult;
             }
@@ -263,8 +286,9 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         }
 
         /// <inheritdoc />
-        public Async::System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
+        public System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
         {
+            Contract.Assert(MemoizationStore != null, "Memoization store must be initialized");
             return MemoizationStore.EnumerateStrongFingerprints(context);
         }
 
@@ -302,11 +326,11 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         }
 
         /// <inheritdoc />
-        public async Task<BoolResult> HandleCopyFileRequestAsync(Context context, ContentHash hash)
+        public async Task<BoolResult> HandleCopyFileRequestAsync(Context context, ContentHash hash, CancellationToken token)
         {
             if (ContentStore is ICopyRequestHandler innerCopyStore)
             {
-                return await innerCopyStore.HandleCopyFileRequestAsync(context, hash);
+                return await innerCopyStore.HandleCopyFileRequestAsync(context, hash, token);
             }
 
             return new BoolResult($"{ContentStore} does not implement {nameof(ICopyRequestHandler)} in {nameof(OneLevelCache)}.");
@@ -323,14 +347,15 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         }
 
         /// <inheritdoc />
-        public Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions = null)
+        public Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions? deleteOptions = null)
         {
-            return ContentStore.DeleteAsync(context, contentHash, deleteOptions);
+            return ContentStore!.DeleteAsync(context, contentHash, deleteOptions);
         }
 
         /// <inheritdoc />
         public void PostInitializationCompleted(Context context, BoolResult result)
         {
+            Contract.Requires(ContentStore != null, "ContentStore must be initialized here.");
             ContentStore.PostInitializationCompleted(context, result);
         }
 

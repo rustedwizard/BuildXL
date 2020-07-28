@@ -120,9 +120,9 @@ namespace BuildXL.Execution.Analyzer
 
                 processPipExecPerformance.FileMonitoringViolationCounters = new Xldb.Proto.FileMonitoringViolationCounters()
                 {
-                    NumFileAccessesWhitelistedAndCacheable = performance.FileMonitoringViolations.NumFileAccessesWhitelistedAndCacheable,
-                    NumFileAccessesWhitelistedButNotCacheable = performance.FileMonitoringViolations.NumFileAccessesWhitelistedButNotCacheable,
-                    NumFileAccessViolationsNotWhitelisted = performance.FileMonitoringViolations.NumFileAccessViolationsNotWhitelisted
+                    NumFileAccessesAllowlistedAndCacheable = performance.FileMonitoringViolations.NumFileAccessesAllowlistedAndCacheable,
+                    NumFileAccessesAllowlistedButNotCacheable = performance.FileMonitoringViolations.NumFileAccessesAllowlistedButNotCacheable,
+                    NumFileAccessViolationsNotAllowlisted = performance.FileMonitoringViolations.NumFileAccessViolationsNotAllowlisted
                 };
 
                 processPipExecPerformance.Fingerprint = performance.Fingerprint.ToFingerprint();
@@ -175,9 +175,9 @@ namespace BuildXL.Execution.Analyzer
                 data.ReportedProcesses.Select(rp => rp.ToReportedProcess()));
             processExecutionMonitoringReportedEvent.ReportedFileAccesses.AddRange(
                 data.ReportedFileAccesses.Select(reportedFileAccess => reportedFileAccess.ToReportedFileAccess(pathTable, nameExpander)));
-            processExecutionMonitoringReportedEvent.WhitelistedReportedFileAccesses.AddRange(
-                data.WhitelistedReportedFileAccesses.Select(
-                    whiteListReportedFileAccess => whiteListReportedFileAccess.ToReportedFileAccess(pathTable, nameExpander)));
+            processExecutionMonitoringReportedEvent.AllowlistedReportedFileAccesses.AddRange(
+                data.AllowlistedReportedFileAccesses.Select(
+                    allowListReportedFileAccess => allowListReportedFileAccess.ToReportedFileAccess(pathTable, nameExpander)));
 
             foreach (var processDetouringStatus in data.ProcessDetouringStatuses)
             {
@@ -189,6 +189,10 @@ namespace BuildXL.Execution.Analyzer
                     StartApplicationName = processDetouringStatus.StartApplicationName,
                     StartCommandLine = processDetouringStatus.StartCommandLine,
                     NeedsInjection = processDetouringStatus.NeedsInjection,
+                    IsCurrent64BitProcess = processDetouringStatus.IsCurrent64BitProcess,
+                    IsCurrentWow64Process = processDetouringStatus.IsCurrentWow64Process,
+                    IsProcessWow64 = processDetouringStatus.IsProcessWow64,
+                    NeedsRemoteInjection = processDetouringStatus.NeedsRemoteInjection,
                     Job = processDetouringStatus.Job,
                     DisableDetours = processDetouringStatus.DisableDetours,
                     CreationFlags = processDetouringStatus.CreationFlags,
@@ -268,6 +272,7 @@ namespace BuildXL.Execution.Analyzer
                 WorkerID = workerID,
                 DisableDetours = data.DisableDetours,
                 IgnoreReparsePoints = data.IgnoreReparsePoints,
+                IgnoreFullSymlinkResolving = data.IgnoreFullSymlinkResolving,
                 IgnorePreloadedDlls = data.IgnorePreloadedDlls,
                 ExistingDirectoryProbesAsEnumerations = data.ExistingDirectoryProbesAsEnumerations,
                 NtFileCreateMonitored = data.NtFileCreateMonitored,
@@ -456,6 +461,7 @@ namespace BuildXL.Execution.Analyzer
                     IgnoreNonCreateFileReparsePoints = unsafeOption.UnsafeConfiguration.IgnoreNonCreateFileReparsePoints,
                     IgnoreSetFileInformationByHandle = unsafeOption.UnsafeConfiguration.IgnoreSetFileInformationByHandle,
                     IgnoreReparsePoints = unsafeOption.UnsafeConfiguration.IgnoreReparsePoints,
+                    IgnoreFullSymlinkResolving = unsafeOption.UnsafeConfiguration.IgnoreFullSymlinkResolving,
                     IgnorePreloadedDlls = unsafeOption.UnsafeConfiguration.IgnorePreloadedDlls,
                     ExistingDirectoryProbesAsEnumerations = unsafeOption.UnsafeConfiguration.ExistingDirectoryProbesAsEnumerations,
                     MonitorNtCreateFile = unsafeOption.UnsafeConfiguration.MonitorNtCreateFile,
@@ -728,6 +734,8 @@ namespace BuildXL.Execution.Analyzer
                 Provenance = pip.Provenance.ToPipProvenance(pathTable),
             };
 
+            xldbProcessPip.OutputDirectoryExclusions.AddRange(pip.OutputDirectoryExclusions.Select(p => p.ToAbsolutePath(pathTable, nameExpander)));
+
             if (pip.ServiceInfo.IsValid)
             {
                 var serviceInfo = new ServiceInfo
@@ -761,7 +769,7 @@ namespace BuildXL.Execution.Analyzer
             }));
             xldbProcessPip.DirectoryOutputs.AddRange(pip.DirectoryOutputs.Select(dir => dir.ToDirectoryArtifact(pathTable, nameExpander)));
             xldbProcessPip.AdditionalTempDirectories.AddRange(pip.AdditionalTempDirectories.Select(dir => dir.ToAbsolutePath(pathTable, nameExpander)));
-            xldbProcessPip.PreserveOutputWhitelist.AddRange(pip.PreserveOutputWhitelist.Select(path => path.ToAbsolutePath(pathTable, nameExpander)));
+            xldbProcessPip.PreserveOutputAllowlist.AddRange(pip.PreserveOutputAllowlist.Select(path => path.ToAbsolutePath(pathTable, nameExpander)));
 
             if (pip.Tags.IsValid)
             {
@@ -811,7 +819,7 @@ namespace BuildXL.Execution.Analyzer
                 FileCount = pipGraph.FileCount,
                 ContentCount = pipGraph.ContentCount,
                 ArtifactContentCount = pipGraph.ArtifactContentCount,
-                ApiServerMoniker = pipGraph.ApiServerMoniker.ToString(pathTable)
+                ApiServerMoniker = pipGraph.ApiServerMoniker.ToString(pathTable),
             };
 
             xldbPipGraph.AllSealDirectoriesAndProducers.AddRange(pipGraph.AllSealDirectoriesAndProducers.Select(kvp => new DirectoryArtifactMap()
@@ -819,6 +827,10 @@ namespace BuildXL.Execution.Analyzer
                 Artifact = kvp.Key.ToDirectoryArtifact(pathTable, nameExpander),
                 PipId = kvp.Value.Value
             }));
+
+            xldbPipGraph.OutputDirectoryExclusions.AddRange(
+                pipGraph.OutputDirectoryExclusions.UnsafeGetList().Select(p => p.ToAbsolutePath(pathTable, nameExpander)));
+
             xldbPipGraph.StableKeys.AddRange(pipTable.StableKeys.Select(stableKey => stableKey.Value));
 
             foreach (var kvp in pipGraph.Modules)

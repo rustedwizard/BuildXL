@@ -19,7 +19,7 @@ namespace BuildXL.Cache.ContentStore.Stores
         /// <summary>
         ///     Default interval, in seconds, between client retries.
         /// </summary>
-        public const int DefaultRetryIntervalSeconds = 5;
+        public const int DefaultRetryIntervalSeconds = 10;
 
         /// <summary>
         ///     Default number of client retries to attempt before giving up.
@@ -39,7 +39,7 @@ namespace BuildXL.Cache.ContentStore.Stores
         public uint RetryCount { get; set; } = DefaultRetryCount;
 
         /// <nodoc />
-        public string Scenario { get; }
+        public string? Scenario { get; }
 
         /// <nodoc />
         public RetryPolicy RetryPolicy => _retryPolicy.Value;
@@ -48,7 +48,7 @@ namespace BuildXL.Cache.ContentStore.Stores
         public ServiceClientContentStoreConfiguration(
             string cacheName,
             ServiceClientRpcConfiguration rpcConfiguration,
-            string scenario = null)
+            string? scenario = null)
         {
             Contract.Requires(cacheName != null);
             CacheName = cacheName;

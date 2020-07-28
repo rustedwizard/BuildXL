@@ -245,7 +245,7 @@ namespace BuildXL
             // We store this to log it once the appropriate listeners are set up
             m_serverModeStatusAndPerf = serverModeStatusAndPerf;
 
-            m_crashCollector = OperatingSystemHelper.IsUnixOS
+            m_crashCollector = OperatingSystemHelper.IsMacOS
                 ? new CrashCollectorMacOS(new[] { CrashType.BuildXL, CrashType.Kernel })
                 : null;
 
@@ -287,6 +287,11 @@ namespace BuildXL
                     mutableConfig.Logging.EnableAsyncLogging = true;
                 }
 
+                if (!mutableConfig.Logging.SaveFingerprintStoreToLogs.HasValue)
+                {
+                    mutableConfig.Logging.SaveFingerprintStoreToLogs = true;
+                }
+
                 var logPath = mutableConfig.Logging.Log;
 
                 // NOTE: We rely on explicit exclusion of pip output messages in CloudBuild rather than turning them off by default.
@@ -310,17 +315,15 @@ namespace BuildXL
                         (int)SchedulerLogEventId.CriticalPathChain,
                         (int)EngineLogEventId.HistoricMetadataCacheLoaded,
                         (int)EngineLogEventId.HistoricMetadataCacheSaved,
-                        (int)EngineLogEventId.RunningTimesLoaded,
-                        (int)EngineLogEventId.RunningTimesSaved,
-                        (int)SchedulerLogEventId.CreateSymlinkFromSymlinkMap,
-                        (int)SchedulerLogEventId.SymlinkFileTraceMessage,
+                        (int)EngineLogEventId.HistoricPerfDataLoaded,
+                        (int)EngineLogEventId.HistoricPerfDataSaved,
                         (int)SharedLogEventId.StartEngineRun,
                         (int)EngineLogEventId.StartCheckingForPipGraphReuse,
                         (int)EngineLogEventId.EndCheckingForPipGraphReuse,
                         (int)EngineLogEventId.GraphNotReusedDueToChangedInput,
 
-                        (int)EngineLogEventId.StartLoadingRunningTimes,
-                        (int)EngineLogEventId.EndLoadingRunningTimes,
+                        (int)EngineLogEventId.StartLoadingHistoricPerfData,
+                        (int)EngineLogEventId.EndLoadingHistoricPerfData,
                         (int)EngineLogEventId.StartSerializingPipGraph,
                         (int)EngineLogEventId.EndSerializingPipGraph,
                         (int)EngineLogEventId.ScrubbingStarted,
@@ -630,6 +633,13 @@ namespace BuildXL
                         appLoggers.ConfigureStatusLogFile(m_configuration.Logging.StatusLog);
                     }
 
+                    if (m_configuration.Logging.TraceLog.IsValid)
+                    {
+                        appLoggers.ConfigureTraceLogFile(m_configuration.Logging.TraceLog);
+                        Tracing.Logger.Log.TracerStartEvent(pm.LoggingContext);
+                        Tracing.Logger.Log.TracerSignalEvent(pm.LoggingContext, "Start", timeStamp: DateTime.UtcNow.Ticks);
+                    }
+
                     try
                     {
                         Contract.Assume(m_initialConfiguration == m_configuration, "Expect the initial configuration to still match the updatable configuration object.");
@@ -712,6 +722,12 @@ namespace BuildXL
                         {
                             // Reset the ExecutionState
                             NativeMethods.SetThreadExecutionState(NativeMethods.EXECUTION_STATE.ES_CONTINUOUS);
+                        }
+
+                        if (m_configuration.Logging.TraceLog.IsValid)
+                        {
+                            Tracing.Logger.Log.TracerSignalEvent(pm.LoggingContext, "Stop", timeStamp: DateTime.UtcNow.Ticks);
+                            Tracing.Logger.Log.TracerStopEvent(pm.LoggingContext);
                         }
                     }
                 }
@@ -920,8 +936,7 @@ namespace BuildXL
             LoggingContext topLevelContext = new LoggingContext(
                 relatedActivityId,
                 Branding.ProductExecutableName,
-                new LoggingContext.SessionInfo(sessionId.ToString(), ComputeEnvironment(m_configuration), relatedActivityId),
-                logger: new AppLogger());
+                new LoggingContext.SessionInfo(sessionId.ToString(), ComputeEnvironment(m_configuration), relatedActivityId));
 
             using (PerformanceMeasurement pm = PerformanceMeasurement.StartWithoutStatistic(
                 topLevelContext,
@@ -1313,6 +1328,7 @@ namespace BuildXL
             private readonly bool m_displayWarningErrorTime;
             private TextWriterEventListener m_defaultFileListener;
             private TextWriterEventListener m_statusFileListener;
+            private TextWriterEventListener m_tracerFileListener;
 
             private readonly WarningManager m_warningManager;
             private readonly EventMask m_noLogMask;
@@ -1580,6 +1596,22 @@ namespace BuildXL
                     (writer) =>
                     {
                         var listener = new StatusEventListener(
+                            Events.Log,
+                            writer,
+                            m_baseTime,
+                            onDisabledDueToDiskWriteFailure: OnListenerDisabledDueToDiskWriteFailure);
+                        listener.EnableTaskDiagnostics(Tasks.CommonInfrastructure);
+                        return listener;
+                    });
+            }
+
+            public void ConfigureTraceLogFile(AbsolutePath logFilePath)
+            {
+                m_tracerFileListener = AddFileBasedListener(
+                    logFilePath,
+                    (writer) =>
+                    {
+                        var listener = new TracerEventListener(
                             Events.Log,
                             writer,
                             m_baseTime,
@@ -2075,7 +2107,7 @@ namespace BuildXL
 
 
             var loggingQueue = m_configuration.Logging.EnableAsyncLogging.GetValueOrDefault() ? new LoggingQueue() : null;
-            var asyncLoggingContext = new LoggingContext(loggingContext.ActivityId, loggingContext.LoggerComponentInfo, loggingContext.Session, loggingContext, loggingQueue, loggingContext.Logger);
+            var asyncLoggingContext = new LoggingContext(loggingContext.ActivityId, loggingContext.LoggerComponentInfo, loggingContext.Session, loggingContext, loggingQueue);
 
             BuildXLEngineResult result = null;
             // All async logging needs to complete before code that checks the state of logging contexts or tracking event listeners.

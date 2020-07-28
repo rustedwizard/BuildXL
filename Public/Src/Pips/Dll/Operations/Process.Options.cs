@@ -24,6 +24,11 @@ namespace BuildXL.Pips.Operations
         public static int DefaultAugmentWeakFingerprintPathSetThreshold = 5;
 
         /// <summary>
+        /// Indicate whether the pip is used for integration test purposes.
+        /// </summary>
+        public const int IntegrationTestPriority = 99;
+
+        /// <summary>
         /// Flag options controlling process pip behavior.
         /// </summary>
         [Flags]
@@ -112,9 +117,9 @@ namespace BuildXL.Pips.Operations
             RequiresAdmin = 1 << 11,
 
             /// <summary>
-            /// Whether this process using non-empty <see cref="Process.PreserveOutputWhitelist"/>
+            /// Whether this process using non-empty <see cref="Process.PreserveOutputAllowlist"/>
             /// </summary>
-            HasPreserveOutputWhitelist = 1 << 12,
+            HasPreserveOutputAllowlist = 1 << 12,
 
             /// <summary>
             /// Incremental tool is superset of <see cref="AllowPreserveOutputs"/> and is only active when preserve output is active.
@@ -147,6 +152,26 @@ namespace BuildXL.Pips.Operations
             /// statically specified inputs are used instead.
             /// </remarks>
             TrustStaticallyDeclaredAccesses = 1 << 16,
+
+            /// <summary>
+            /// When this option is set, the scheduler will not be able to cancel the specified pip for perforance purposes.
+            /// </summary>
+            Uncancellable = 1 << 17,
+
+            /// <summary>
+            /// When set, the serialized path set of this process is not normalized wrt casing
+            /// </summary>
+            /// <remarks>
+            /// This is already the behavior when running in a non-Windows OS, therefore this option only has a effect on Windows systems.
+            /// Setting this option increases the chance BuildXL will preserve path casing on Windows, at the cost of less efficient
+            /// caching, where the same weak fingerprint may have different path sets that only differ in casing.
+            /// </remarks>
+            PreservePathSetCasing = 1 << 18,
+
+            /// <summary>
+            /// When set, the pip is considered to have failed executing if it writes to standard error, regardless of the pip exit code.
+            /// </summary>
+            WritingToStandardErrorFailsExecution = 1 << 19,
         }
     }
 }

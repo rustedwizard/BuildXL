@@ -76,8 +76,7 @@ namespace BuildXL.Pips.Graph
                 }
             }
             else if (pip is SealDirectory sealDirectory 
-                && sealDirectory.Kind == SealDirectoryKind.SharedOpaque 
-                && !sealDirectory.IsComposite)
+                && sealDirectory.Kind == SealDirectoryKind.SharedOpaque)
             {
                 if (!sealDirectory.IsComposite)
                 {
@@ -106,6 +105,8 @@ namespace BuildXL.Pips.Graph
                             "ComposedDirectoryFingerprints",
                             sealDirectory.ComposedDirectories,
                             (fp, d) => fp.Add(d.Path, m_sealDirectoryFingerprintLookup(d).Hash));
+                        hasher.Add("ContentFilter", 
+                            sealDirectory.ContentFilter.HasValue ? $"{sealDirectory.ContentFilter.Value.Kind} {sealDirectory.ContentFilter.Value.Regex}" : "");
                         completeFingerprint = new ContentFingerprint(hasher.GenerateHash());
                         completeFingerprintText = FingerprintTextEnabled
                             ? completeFingerprintText + Environment.NewLine + hasher.FingerprintInputText

@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using BuildXL.Pips;
 using BuildXL.Pips.Builders;
@@ -12,6 +13,7 @@ using BuildXL.Scheduler;
 using BuildXL.Scheduler.Fingerprints;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Configuration;
 using Test.BuildXL.Executables.TestProcess;
 using Test.BuildXL.Scheduler;
 using Test.BuildXL.TestUtilities;
@@ -113,7 +115,9 @@ namespace IntegrationTest.BuildXL.Scheduler
                 GenerateSyntheticMachinePerfInfo = (lc, s) => new PerformanceCollector.MachinePerfInfo()
                 {
                     AvailableRamMb = 100,
+                    EffectiveAvailableRamMb = 100,
                     RamUsagePercentage = 99,
+                    EffectiveRamUsagePercentage = 99,
                     TotalRamMb = 10000,
                     CommitUsedMb = 10000,
                     CommitUsagePercentage = 10,
@@ -146,7 +150,9 @@ namespace IntegrationTest.BuildXL.Scheduler
                 GenerateSyntheticMachinePerfInfo = (lc, s) => new PerformanceCollector.MachinePerfInfo()
                 {
                     AvailableRamMb = 9000,
+                    EffectiveAvailableRamMb = 9000,
                     RamUsagePercentage = 10,
+                    EffectiveRamUsagePercentage = 10,
                     TotalRamMb = 10000,
                     CommitUsedMb = 99000,
                     CommitUsagePercentage = 99,
@@ -241,7 +247,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             var builder = CreatePipBuilder(operations);
             SchedulePipBuilder(builder);
 
-            using (PerformanceCollector performanceCollector = new PerformanceCollector(System.TimeSpan.FromMilliseconds(10), isUnitTest: true))
+            using (PerformanceCollector performanceCollector = new PerformanceCollector(System.TimeSpan.FromMilliseconds(10), testHooks: new PerformanceCollector.TestHooks(){ AvailableDiskSpace = 0 }))
             {
                 RunScheduler(performanceCollector: performanceCollector).AssertFailure();
                 IgnoreWarnings();
@@ -370,6 +376,26 @@ namespace IntegrationTest.BuildXL.Scheduler
             RunScheduler().AssertFailure();
             AssertVerboseEventLogged(ProcessesLogEventId.PipProcessMissingExpectedOutputOnCleanExit);
             AssertErrorEventLogged(global::BuildXL.Processes.Tracing.LogEventId.PipProcessExpectedMissingOutputs);
+            AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
+        }
+
+        [Fact]
+        public void WritingToStandardErrorFailsExecution()
+        {
+            // Schedule a pip that succeeds but writes to standard error
+            var pipBuilder = CreatePipBuilder(new Operation[]
+            {
+                Operation.WriteFile(CreateOutputFileArtifact()),
+                Operation.Echo("some message", useStdErr: true)
+            });
+
+            pipBuilder.Options |= Process.Options.WritingToStandardErrorFailsExecution;
+
+            Process pip = SchedulePipBuilder(pipBuilder).Process;
+
+            // Should fail since stderr was written
+            RunScheduler().AssertFailure();
+            AssertErrorEventLogged(ProcessesLogEventId.PipProcessWroteToStandardErrorOnCleanExit);
             AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
         }
 
@@ -1391,24 +1417,25 @@ namespace IntegrationTest.BuildXL.Scheduler
         [Theory]
         [InlineData(true)]
         [InlineData(false)]
+        [Trait("Category", "SkipLinux")] // TODO(BUG): flaky
         public void RetryPipOnHighMemoryUsage(bool allowLowMemoryRetry)
         {
             Configuration.Schedule.MinimumTotalAvailableRamMb = 10000;
             Configuration.Schedule.MaximumRamUtilizationPercentage = 95;
             Configuration.Distribution.NumRetryFailedPipsOnAnotherWorker = 5;
+            Configuration.Schedule.ManageMemoryMode = ManageMemoryMode.CancellationRam;
+            Configuration.Schedule.MaxRetriesDueToLowMemory = allowLowMemoryRetry ? 2 : 0;
 
-            Configuration.Schedule.NumRetryFailedPipsDueToLowMemory = allowLowMemoryRetry ? 2 : 0;
-
-            var processA = CreateAndSchedulePipBuilder(new Operation[]
+            CreateAndSchedulePipBuilder(new Operation[]
             {
                 Operation.Block(),
-                Operation.WriteFile(CreateOutputFileArtifact(CreateOutputFileArtifact())),
+                Operation.WriteFile(CreateOutputFileArtifact()),
             });
 
-            var processB = CreateAndSchedulePipBuilder(new Operation[]
+            CreateAndSchedulePipBuilder(new Operation[]
             {
                 Operation.Block(),
-                Operation.WriteFile(CreateOutputFileArtifact(CreateOutputFileArtifact())),
+                Operation.WriteFile(CreateOutputFileArtifact()),
             });
 
             bool triggeredCancellation = false;
@@ -1430,7 +1457,9 @@ namespace IntegrationTest.BuildXL.Scheduler
                         return new PerformanceCollector.MachinePerfInfo()
                         {
                             AvailableRamMb = 100,
+                            EffectiveAvailableRamMb = 100,
                             RamUsagePercentage = 99,
+                            EffectiveRamUsagePercentage = 99,
                             TotalRamMb = 10000,
                             CommitUsedMb = 5000,
                             CommitUsagePercentage = 50,
@@ -1441,7 +1470,98 @@ namespace IntegrationTest.BuildXL.Scheduler
                     return new PerformanceCollector.MachinePerfInfo()
                     {
                         AvailableRamMb = 9000,
+                        EffectiveAvailableRamMb = 9000,
                         RamUsagePercentage = 10,
+                        EffectiveRamUsagePercentage = 10,
+                        TotalRamMb = 10000,
+                        CommitUsedMb = 5000,
+                        CommitUsagePercentage = 50,
+                        CommitLimitMb = 10000,
+                    };
+                }
+            };
+
+            RunScheduler(testHooks: testHook, updateStatusTimerEnabled: true, cancellationToken: tokenSource.Token).AssertFailure();
+
+            AllowErrorEventLoggedAtLeastOnce(global::BuildXL.App.Tracing.LogEventId.CancellationRequested);
+            AssertVerboseEventLogged(LogEventId.StoppingProcessExecutionDueToMemory);
+            AssertVerboseEventLogged(LogEventId.CancellingProcessPipExecutionDueToResourceExhaustion);
+            AssertVerboseEventLogged(LogEventId.StartCancellingProcessPipExecutionDueToResourceExhaustion);
+
+            if (!allowLowMemoryRetry)
+            {
+                AssertErrorEventLogged(LogEventId.ExcessivePipRetriesDueToLowMemory);
+            }
+        }
+
+        [FactIfSupported(requiresWindowsBasedOperatingSystem: true)] // suspend/resume is not available on macOS
+        public void SuspendResumePipOnHighMemoryUsage()
+        {
+            Configuration.Schedule.MinimumTotalAvailableRamMb = 10000;
+            Configuration.Schedule.MaximumRamUtilizationPercentage = 95;
+            Configuration.Schedule.ManageMemoryMode = ManageMemoryMode.Suspend;
+
+            CreateAndSchedulePipBuilder(new Operation[]
+            {
+                Operation.Block(),
+                Operation.WriteFile(CreateOutputFileArtifact()),
+            });
+
+            CreateAndSchedulePipBuilder(new Operation[]
+            {
+                Operation.Block(),
+                Operation.WriteFile(CreateOutputFileArtifact()),
+            });
+
+            bool triggeredResume = false;
+            CancellationTokenSource tokenSource = new CancellationTokenSource();
+            var testHook = new SchedulerTestHooks()
+            {
+                GenerateSyntheticMachinePerfInfo = (loggingContext, scheduler) =>
+                {
+                    if (triggeredResume)
+                    {
+                        global::BuildXL.App.Tracing.Logger.Log.CancellationRequested(loggingContext);
+                        tokenSource.Cancel();
+                    }
+
+                    if (scheduler.State.ResourceManager.NumSuspended > 0)
+                    {
+                        triggeredResume = true;
+                        return new PerformanceCollector.MachinePerfInfo()
+                        {
+                            AvailableRamMb = 9000,
+                            EffectiveAvailableRamMb = 9000,
+                            RamUsagePercentage = 10,
+                            EffectiveRamUsagePercentage = 10,
+                            TotalRamMb = 10000,
+                            CommitUsedMb = 5000,
+                            CommitUsagePercentage = 50,
+                            CommitLimitMb = 10000,
+                        };
+                    }
+
+                    if (scheduler.MaxExternalProcessesRan == 2)
+                    {
+                        return new PerformanceCollector.MachinePerfInfo()
+                        {
+                            AvailableRamMb = 100,
+                            EffectiveAvailableRamMb = 100,
+                            RamUsagePercentage = 99,
+                            EffectiveRamUsagePercentage = 99,
+                            TotalRamMb = 10000,
+                            CommitUsedMb = 5000,
+                            CommitUsagePercentage = 50,
+                            CommitLimitMb = 10000,
+                        };
+                    }
+
+                    return new PerformanceCollector.MachinePerfInfo()
+                    {
+                        AvailableRamMb = 9000,
+                        EffectiveAvailableRamMb = 9000,
+                        RamUsagePercentage = 10,
+                        EffectiveRamUsagePercentage = 10,
                         TotalRamMb = 10000,
                         CommitUsedMb = 5000,
                         CommitUsagePercentage = 50,
@@ -1453,14 +1573,36 @@ namespace IntegrationTest.BuildXL.Scheduler
             RunScheduler(testHooks: testHook, updateStatusTimerEnabled: true, cancellationToken: tokenSource.Token).AssertFailure();
 
             AssertErrorEventLogged(global::BuildXL.App.Tracing.LogEventId.CancellationRequested);
-            AssertVerboseEventLogged(LogEventId.StoppingProcessExecutionDueToMemory);
-            AssertWarningEventLogged(LogEventId.CancellingProcessPipExecutionDueToResourceExhaustion);
-            AssertWarningEventLogged(LogEventId.StartCancellingProcessPipExecutionDueToResourceExhaustion);
+            AssertVerboseEventLogged(LogEventId.EmptyWorkingSet);
+            AssertVerboseEventLogged(LogEventId.ResumeProcess);
+        }
 
-            if (!allowLowMemoryRetry)
+        [Fact]
+        public void SurvivingChildProcessesNotReportedOnCancelation()
+        {
+            var processA = CreateAndSchedulePipBuilder(new Operation[]
             {
-                AssertWarningEventLogged(LogEventId.ExcessivePipRetriesDueToLowMemory);
-            }
+                Operation.Spawn(Context.PathTable, waitToFinish: true, Operation.Block()),
+                Operation.WriteFile(CreateOutputFileArtifact()),
+            });
+
+            CancellationTokenSource tokenSource = new CancellationTokenSource();
+            var testHook = new SchedulerTestHooks()
+            {
+                GenerateSyntheticMachinePerfInfo = (loggingContext, scheduler) =>
+                {
+                    if (scheduler.RetrieveExecutingProcessPips().Count() > 0)
+                    {
+                        global::BuildXL.App.Tracing.Logger.Log.CancellationRequested(loggingContext);
+                        tokenSource.Cancel();
+                    }
+
+                    return new PerformanceCollector.MachinePerfInfo();
+                },
+            };
+
+            RunScheduler(testHooks: testHook, updateStatusTimerEnabled: true, cancellationToken: tokenSource.Token).AssertFailure();
+            AllowErrorEventLoggedAtLeastOnce(global::BuildXL.App.Tracing.LogEventId.CancellationRequested);
         }
 
         private Operation ProbeOp(string root, string relativePath = "")

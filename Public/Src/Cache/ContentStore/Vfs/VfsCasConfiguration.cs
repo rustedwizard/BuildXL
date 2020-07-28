@@ -11,14 +11,9 @@ namespace BuildXL.Cache.ContentStore.Vfs
     public class VfsCasConfiguration
     {
         /// <summary>
-        /// Grpc port exposed by VFS CAS
+        /// Indicates whether symlinks to virtual paths should be used.
         /// </summary>
-        public int ServerGrpcPort { get; }
-
-        /// <summary>
-        /// Grpc port of backing CAS service used to materialize files
-        /// </summary>
-        public int BackingGrpcPort { get; }
+        public bool UseSymlinks { get; }
 
         /// <summary>
         /// The root used by the VFS for materializing files
@@ -31,14 +26,19 @@ namespace BuildXL.Cache.ContentStore.Vfs
         public AbsolutePath DataRootPath { get; }
 
         /// <summary>
-        /// The cache root used for cache state of the VFS server
-        /// </summary>
-        public AbsolutePath ServerRootPath { get; }
-
-        /// <summary>
         /// The root virtualized directory
         /// </summary>
         public AbsolutePath VfsRootPath { get; }
+
+        /// <summary>
+        /// The root of VFS cas used for symlink targets
+        /// </summary>
+        public AbsolutePath VfsCasRootPath { get; }
+
+        /// <summary>
+        /// The root of VFS cas used for symlink targets (relative to vfs root)
+        /// </summary>
+        public RelativePath VfsCasRelativeRoot { get; }
 
         /// <summary>
         /// The root of mounted virtualized directories (i.e. {VfsRootPath}\mounts)
@@ -51,14 +51,14 @@ namespace BuildXL.Cache.ContentStore.Vfs
         public RelativePath VfsMountRelativeRoot { get; }
 
         /// <summary>
-        /// The cache name
+        /// The root of temp virtualized files (i.e. {VfsRootPath}\temp)
         /// </summary>
-        public string CacheName { get; }
+        public AbsolutePath VfsTempRootPath { get; }
 
         /// <summary>
-        /// The scenario of the backing server (defines ready event wait handle name)
+        /// The root of temp virtualized directories (relative to vfs root)
         /// </summary>
-        public string Scenario { get; }
+        public RelativePath VfsTempRelativeRoot { get; }
 
         /// <summary>
         /// Specifies folder names under the VFS which will be junctioned to given destination paths
@@ -68,46 +68,31 @@ namespace BuildXL.Cache.ContentStore.Vfs
 
         private VfsCasConfiguration(Builder builder)
         {
-            ServerGrpcPort = builder.ServerGrpcPort;
-            BackingGrpcPort = builder.BackingGrpcPort;
             RootPath = builder.RootPath;
+            UseSymlinks = builder.UseSymlinks;
             VirtualizationMounts = builder.VirtualizationMounts.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase);
-            CacheName = builder.CacheName;
-            Scenario = builder.Scenario;
 
             DataRootPath = RootPath / "data";
             VfsRootPath = RootPath / "vfs";
             VfsMountRelativeRoot = new RelativePath("mounts");
+            VfsCasRelativeRoot = new RelativePath("cas");
+            VfsTempRelativeRoot = new RelativePath("temp");
+            VfsTempRootPath = VfsRootPath / VfsTempRelativeRoot;
             VfsMountRootPath = VfsRootPath / VfsMountRelativeRoot;
-            ServerRootPath = RootPath / "server";
+            VfsCasRootPath = VfsRootPath / VfsCasRelativeRoot;
         }
 
         public class Builder
         {
             /// <summary>
-            /// Grpc port exposed by VFS CAS
+            /// Indicates whether symlinks to virtual paths should be used.
             /// </summary>
-            public int ServerGrpcPort { get; set; }
-
-            /// <summary>
-            /// Grpc port of backing CAS service used to materialize files
-            /// </summary>
-            public int BackingGrpcPort { get; set; }
+            public bool UseSymlinks { get; set; }
 
             /// <summary>
             /// The root used by the VFS for materializing files
             /// </summary>
             public AbsolutePath RootPath { get; set; }
-
-            /// <summary>
-            /// The cache name
-            /// </summary>
-            public string CacheName { get; set; }
-
-            /// <summary>
-            /// The scenario of the backing server (defines ready event wait handle name)
-            /// </summary>
-            public string Scenario { get; set; }
 
             /// <summary>
             /// Specifies folder names under the VFS which will be junctioned to given destination paths

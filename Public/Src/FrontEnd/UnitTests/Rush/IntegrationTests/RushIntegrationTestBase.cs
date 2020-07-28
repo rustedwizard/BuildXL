@@ -29,12 +29,12 @@ namespace Test.BuildXL.FrontEnd.Rush
         /// <summary>
         /// Keep in sync with deployment.
         /// </summary>
-        protected string PathToRush => Path.Combine(TestDeploymentDir, "Rush", "@microsoft", "rush", "bin", "rush").Replace("\\", "/");
+        protected string PathToRush => Path.Combine(TestDeploymentDir, "Rush", "node_modules", "@microsoft", "rush", "bin", "rush").Replace("\\", "/");
 
         /// <summary>
         /// Keep in sync with deployment.
         /// </summary>
-        protected string PathToNodeModules => Path.Combine(TestDeploymentDir, "Rush").Replace("\\", "/");
+        protected string PathToNodeModules => Path.Combine(TestDeploymentDir, "Rush", "node_modules").Replace("\\", "/");
 
         /// <summary>
         /// Keep in sync with deployment.
@@ -57,6 +57,12 @@ namespace Test.BuildXL.FrontEnd.Rush
         // By default the engine runs e2e
         protected virtual EnginePhases Phase => EnginePhases.Execute;
 
+        private string RushUserProfile => Path.Combine(TestRoot, "USERPROFILE").Replace("\\", "/");
+
+        private string RushTempFolder => Path.Combine(TestRoot, "RUSH_TEMP_FOLDER").Replace("\\", "/");
+
+        protected override bool DisableDefaultSourceResolver => true;
+
         protected RushIntegrationTestBase(ITestOutputHelper output) : base(output, true)
         {
             RegisterEventSource(global::BuildXL.Engine.ETWLogger.Log);
@@ -66,27 +72,78 @@ namespace Test.BuildXL.FrontEnd.Rush
             RegisterEventSource(global::BuildXL.FrontEnd.Core.ETWLogger.Log);
             RegisterEventSource(global::BuildXL.FrontEnd.Script.ETWLogger.Log);
             RegisterEventSource(global::BuildXL.FrontEnd.Rush.ETWLogger.Log);
+            RegisterEventSource(global::BuildXL.FrontEnd.JavaScript.ETWLogger.Log);
 
             SourceRoot = Path.Combine(TestRoot, RelativeSourceRoot);
             OutDir = "target";
+            
+            // Make sure the user profile and temp folders exist
+            Directory.CreateDirectory(RushUserProfile);
+            Directory.CreateDirectory(RushTempFolder);
         }
 
         protected SpecEvaluationBuilder Build(
-            Dictionary<string, string> environment = null)
+            Dictionary<string, string> environment = null,
+            string executeCommands = null,
+            string customRushCommands = null,
+            string rushBaseLibLocation = "",
+            string rushExports = null,
+            string moduleName = "Test",
+            bool addDScriptResolver = false,
+            string commonTempFolder = null)
         {
+            environment ??= new Dictionary<string, string> { 
+                ["PATH"] = PathToNodeFolder,
+                ["RUSH_TEMP_FOLDER"] = commonTempFolder ?? RushTempFolder,
+            };
+
             return Build(
-                environment != null? environment.ToDictionary(kvp => kvp.Key, kvp => new DiscriminatingUnion<string, UnitValue>(kvp.Value)) : null
-                );
+                environment.ToDictionary(kvp => kvp.Key, kvp => new DiscriminatingUnion<string, UnitValue>(kvp.Value)),
+                executeCommands,
+                customRushCommands,
+                rushBaseLibLocation,
+                rushExports,
+                moduleName,
+                addDScriptResolver,
+                commonTempFolder);
         }
 
         /// <inheritdoc/>
         protected SpecEvaluationBuilder Build(
-            Dictionary<string, DiscriminatingUnion<string, UnitValue>> environment)
+            Dictionary<string, DiscriminatingUnion<string, UnitValue>> environment,
+            string executeCommands = null,
+            string customRushCommands = null,
+            string rushBaseLibLocation = "",
+            string rushExports = null,
+            string moduleName = "Test",
+            bool addDScriptResolver = false,
+            string commonTempFolder = null)
         {
-            // Let's explicitly pass an empty environment, so the process environment won't affect tests by default
+            environment ??= new Dictionary<string, DiscriminatingUnion<string, UnitValue>> { 
+                ["PATH"] = new DiscriminatingUnion<string, UnitValue>(PathToNodeFolder),
+                ["RUSH_TEMP_FOLDER"] = new DiscriminatingUnion<string, UnitValue>(commonTempFolder ?? RushTempFolder),
+            };
+
+            // We reserve the null string for a true undefined.
+            // rush-lib is part of node_modules deployment, so use that by default
+            if (rushBaseLibLocation == string.Empty)
+            {
+                rushBaseLibLocation = PathToNodeModules;
+            }
+
+            // Let's explicitly pass an environment, so the process environment won't affect tests by default
             return base.Build().Configuration(
                 DefaultRushPrelude(
-                    environment: environment ?? new Dictionary<string, DiscriminatingUnion<string, UnitValue>>()));
+                    environment: environment,
+                    executeCommands: executeCommands,
+                    customRushCommands: customRushCommands,
+                    rushBaseLibLocation: rushBaseLibLocation,
+                    rushExports: rushExports,
+                    moduleName: moduleName,
+                    addDScriptResolver: addDScriptResolver,
+                    // Let's assume for simplicity that if a custom common temp folder is passed, that means
+                    // we want to use the shrinkwrap-deps file to track dependencies
+                    trackDependenciesWithShrinkwrapDepsFile: commonTempFolder != null));
         }
 
         protected BuildXLEngineResult RunRushProjects(
@@ -96,18 +153,18 @@ namespace Test.BuildXL.FrontEnd.Rush
             IDetoursEventListener detoursListener = null)
         {
             // Run 'rush init'. This bootstraps the 'repo' with rush template files, including rush.json
-            if (!RushInit(config, out var failure))
+            if (!RushInit(config))
             {
-                throw new InvalidOperationException(failure);
+                throw new InvalidOperationException("Rush init failed.");
             }
 
             // Update rush.json with the projects that need to be part of the 'repo'
             AddProjectsToRushConfig(config, rushPathAndProjectNames);
 
             // Run 'rush update' so dependencies are configured
-            if (!RushUpdate(config, out failure))
+            if (!RushUpdate(config))
             {
-                throw new InvalidOperationException(failure);
+                throw new InvalidOperationException("Rush update failed.");
             }
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TestOutputDirectory))
@@ -142,36 +199,54 @@ namespace Test.BuildXL.FrontEnd.Rush
             File.WriteAllText(pathToRushJson, updatedRushJson);
         }
 
-        public string CreatePackageJson(string projectName, string main, string[] dependencies)
+        public static string CreatePackageJson(
+            string projectName, 
+            (string, string)[] scriptCommands = null, 
+            (string dependency, string version)[] dependenciesWithVersions = null)
         {
+            scriptCommands ??= new[] { ("build", "node ./main.js") };
+            dependenciesWithVersions ??= new (string, string)[] { };
+
             return $@"
 {{
   ""name"": ""{projectName}"",
   ""version"": ""0.0.1"",
   ""description"": ""Test project {projectName}"",
   ""scripts"": {{
-        ""build"": ""node ./{main}""
+        {string.Join(",", scriptCommands.Select(kvp => $"\"{kvp.Item1}\": \"{kvp.Item2}\""))}
   }},
-  ""main"": ""{main}"",
+  ""main"": ""main.js"",
   ""dependencies"": {{
-        {string.Join(",", dependencies.Select(dep => $"\"{dep}\":\"0.0.1\""))}
+        {string.Join(",", dependenciesWithVersions.Select(depAndVer => $"\"{depAndVer.dependency}\":\"{depAndVer.version}\""))}
     }}
 }}
 ";
         }
 
         private string DefaultRushPrelude(
-            Dictionary<string, DiscriminatingUnion<string, UnitValue>> environment = null) => $@"
+            Dictionary<string, DiscriminatingUnion<string, UnitValue>> environment,
+            string executeCommands,
+            string customRushCommands,
+            string rushBaseLibLocation,
+            string rushExports,
+            string moduleName,
+            bool addDScriptResolver,
+            bool trackDependenciesWithShrinkwrapDepsFile) => $@"
 config({{
-    disableDefaultSourceResolver: true,
     resolvers: [
         {{
             kind: 'Rush',
-            moduleName: 'Test',
+            moduleName: '{moduleName}',
             root: d`.`,
             nodeExeLocation: f`{PathToNode}`,
             {DictionaryToExpression("environment", environment)}
+            {(executeCommands != null? $"execute: {executeCommands}," : string.Empty)}
+            {(customRushCommands != null ? $"customCommands: {customRushCommands}," : string.Empty)}
+            {(rushBaseLibLocation != null ? $"rushLibBaseLocation: d`{rushBaseLibLocation}`," : string.Empty)}
+            {(rushExports != null ? $"exports: {rushExports}," : string.Empty)}
+            {(trackDependenciesWithShrinkwrapDepsFile ? $"trackDependenciesWithShrinkwrapDepsFile: true," : string.Empty)}
         }},
+        {(addDScriptResolver?  "{kind: 'DScript', modules: [f`module.config.dsc`]}" : string.Empty)}
     ],
 }});";
 
@@ -182,9 +257,9 @@ config({{
                 $"{memberName}: Map.empty<string, (PassthroughEnvironmentVariable | string)>(){ string.Join(string.Empty, dictionary.Select(property => $".add('{property.Key}', {(property.Value?.GetValue() is UnitValue ? "Unit.unit()" : $"'{property.Value?.GetValue()}'")})")) },");
         }
 
-        private bool RushInit(ICommandLineConfiguration config, out string failure)
+        private bool RushInit(ICommandLineConfiguration config)
         {
-            var result = RushRun(config, "init --overwrite-existing", out failure);
+            var result = RushRun(config, "init --overwrite-existing");
 
             if (result)
             {
@@ -202,37 +277,39 @@ config({{
             return result;
         }
 
-        private bool RushUpdate(ICommandLineConfiguration config, out string failure)
+        private bool RushUpdate(ICommandLineConfiguration config)
         {
-            return RushRun(config, "update", out failure);
+             return RushRun(config, "update");
         }
 
-        private bool RushRun(ICommandLineConfiguration config, string rushArgs, out string failure)
+        private bool RushRun(ICommandLineConfiguration config, string rushArgs)
         {
             string arguments = $"{PathToRush} {rushArgs}";
             string filename = PathToNode;
 
+            // Unfortunately, capturing standard out/err non-deterministically hangs node.exe on exit when 
+            // concurrent npm install operations happen. Found reported bugs about this that look similar enough
+            // to the problem that manifested here.
+            // So we just report exit codes.
             var startInfo = new ProcessStartInfo
             {
                 FileName = filename,
                 Arguments = arguments,
                 WorkingDirectory = config.Layout.SourceDirectory.ToString(PathTable),
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
+                RedirectStandardError = false,
+                RedirectStandardOutput = false,
+                UseShellExecute = false,
             };
-
+            
             startInfo.Environment["PATH"] += $";{PathToNodeFolder}";
             startInfo.Environment["NODE_PATH"] = PathToNodeModules;
-            startInfo.Environment["USERPROFILE"] = config.Layout.RedirectedUserProfileJunctionRoot.IsValid ?
-                config.Layout.RedirectedUserProfileJunctionRoot.ToString(PathTable) :
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            startInfo.Environment["USERPROFILE"] = RushUserProfile;
             startInfo.Environment["APPDATA"] = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            startInfo.Environment["RUSH_TEMP_FOLDER"] = RushTempFolder;
+            startInfo.Environment["RUSH_ABSOLUTE_SYMLINKS"] = "true";
 
             var runRush = Process.Start(startInfo);
             runRush.WaitForExit();
-
-            // Rush does not seem pretty consistent around sending stuff to stderr vs stdout, so let's add both.
-            failure = runRush.StandardOutput.ReadToEnd() + Environment.NewLine + runRush.StandardError.ReadToEnd();
 
             return runRush.ExitCode == 0;
         }

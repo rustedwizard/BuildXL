@@ -1,4 +1,7 @@
-﻿using System;
+﻿// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+using System;
 using System.Diagnostics.ContractsLight;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 
@@ -74,6 +77,12 @@ namespace BuildXL.Cache.Logging.External
 
         /// <inheritdoc />
         public void Log(Severity severity, string correlationId, string message) => _logger.Log(severity, correlationId, message);
+
+        /// <inheritdoc />
+        public void Log(in LogMessage logMessage) => _logger.Log(logMessage);
+
+        /// <inheritdoc />
+        public void LogOperationStarted(in OperationStarted operation) => _logger.LogOperationStarted(operation);
 
         /// <inheritdoc />
         public void LogOperationFinished(in OperationResult result)

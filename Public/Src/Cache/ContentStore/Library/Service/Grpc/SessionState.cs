@@ -2,9 +2,15 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Diagnostics.ContractsLight;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
+using BuildXL.Cache.ContentStore.Tracing;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Utilities.Tasks;
+
+#nullable enable
 
 namespace BuildXL.Cache.ContentStore.Service.Grpc
 {
@@ -14,30 +20,27 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
     /// </summary>
     public class SessionState : IDisposable
     {
-        private SessionData _data;
+        private static readonly Tracer Tracer = new Tracer(nameof(SessionState));
+
+        // Tracking original id of the instance for tracing purposes because SessionData can be null.
+        private readonly int _originalId;
+
+        private SessionData? _data;
 
         private readonly SemaphoreSlim _sync = new SemaphoreSlim(1, 1);
 
-        private readonly Func<Task<ObjectResult<SessionData>>> _sessionFactory;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SessionState"/> class.
-        /// </summary>
-        /// <param name="sessionFactory">A factory method that will be called to create new sessions.</param>
-        public SessionState(Func<Task<ObjectResult<SessionData>>> sessionFactory)
-        {
-            _sessionFactory = sessionFactory;
-        }
+        private readonly Func<Task<Result<SessionData>>> _sessionFactory;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SessionState"/> class.
         /// </summary>
         /// <param name="sessionFactory">A factory method that will be called to create new sessions.</param>
         /// <param name="data">The initial session data.</param>
-        public SessionState(Func<Task<ObjectResult<SessionData>>> sessionFactory, SessionData data)
-            : this(sessionFactory)
+        public SessionState(Func<Task<Result<SessionData>>> sessionFactory, SessionData data)
         {
             _data = data;
+            _originalId = _data.SessionId;
+            _sessionFactory = sessionFactory;
         }
 
         /// <inheritdoc />
@@ -50,79 +53,78 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         /// <summary>
         /// Informs the session state that the given session ID is bad and should not be used in future.
         /// </summary>
+        /// <param name="context">A context of the operation.</param>
         /// <param name="badId">The bad session ID.</param>
-        public async Task ResetAsync(int badId)
+        public Task ResetAsync(OperationContext context, int badId)
         {
-            // To make sure a competing thread doesn't squash a newly created session Id,
-            // only squash the session ID if we are the first to discover that ours is bad.
-            await _sync.WaitAsync();
-            try
-            {
-                if ((_data != null) && (_data.SessionId == badId))
+            return context.PerformOperationAsync(
+                Tracer,
+                async () =>
                 {
-                    _data.TemporaryDirectory?.Dispose();
-                    _data = null;
-                }
-            }
-            finally
-            {
-                _sync.Release();
-            }
-        }
+                    double lockAcquisitionDurationMs = 0;
+                    // To make sure a competing thread doesn't squash a newly created session Id,
+                    // only squash the session ID if we are the first to discover that ours is bad.
+                    using (var releaser = await _sync.AcquireAsync())
+                    {
+                        if (_data != null && _data.SessionId == badId)
+                        {
+                            _data.TemporaryDirectory?.Dispose();
+                            _data = null;
+                        }
 
-        /// <summary>
-        /// Gets the currently active session ID.
-        /// </summary>
-        public async Task<StructResult<int>> GetIdAsync()
-        {
-            ObjectResult<SessionData> result = await GetDataAsync();
-            if (result.Succeeded)
-            {
-                return new StructResult<int>(result.Data.SessionId);
-            }
-            else
-            {
-                return new StructResult<int>(result);
-            }
+                        lockAcquisitionDurationMs = releaser.LockAcquisitionDuration.TotalMilliseconds;
+                    }
+
+                    return Result.Success(lockAcquisitionDurationMs);
+                },
+                extraEndMessage: r => $"LockAcquisitionDuration=[{r.ToStringWithValue()}ms]");
         }
 
         /// <summary>
         /// Gets the current active session data.
         /// </summary>
-        public async Task<ObjectResult<SessionData>> GetDataAsync()
+        public async Task<Result<SessionData>> GetDataAsync(OperationContext context)
         {
             // Use double-checked locking to ensure only one session is created,
             // in most circumstances without blocking.
-            SessionData data = _data;
+            SessionData? data = _data;
             if (data == null)
             {
-                await _sync.WaitAsync();
-                try
+                using (var releaser = await _sync.AcquireAsync())
                 {
                     if (_data == null)
                     {
-                        ObjectResult<SessionData> result = await _sessionFactory();
-                        if (!result.Succeeded)
+                        Result<SessionData> result = await context.PerformOperationAsync(
+                            Tracer,
+                            () => _sessionFactory(),
+                            extraStartMessage: $"OriginalId=[{_originalId}]",
+                            extraEndMessage: r => $"OriginalId=[{_originalId}], LockAcquisitionDuration=[{releaser.LockAcquisitionDuration.TotalMilliseconds}ms]. Result={r.ToStringWithValue()}");
+
+                        if (!result)
                         {
                             return result;
                         }
                         else
                         {
-                            _data = result.Data;
+                            _data = result.Value;
                         }
                     }
+                }
 
-                    return new ObjectResult<SessionData>(_data);
-                }
-                finally
-                {
-                    _sync.Release();
-                }
+                Contract.Assert(_data != null);
+                return new Result<SessionData>(_data);
             }
             else
             {
-                return new ObjectResult<SessionData>(data);
+                return new Result<SessionData>(data);
             }
+        }
+
+        /// <inheritdoc />
+        public override string ToString()
+        {
+            SessionData? data = _data;
+            return $"SessionId=[{data?.SessionId.ToString() ?? "Unknown"}], OriginalId=[{_originalId}]";
         }
     }
 }

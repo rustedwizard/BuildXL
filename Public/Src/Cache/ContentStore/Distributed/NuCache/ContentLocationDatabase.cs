@@ -497,32 +497,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         private ContentLocationEntry FilterInactiveMachines(ContentLocationEntry entry)
         {
             var inactiveMachines = _getInactiveMachines();
-            return entry.SetMachineExistence(inactiveMachines, exists: false);
+            return entry.SetMachineExistence(MachineIdCollection.Create(inactiveMachines), exists: false);
         }
-
-        /// <summary>
-        /// Synchronizes machine location data between the database and the given cluster state instance
-        /// </summary>
-        public void UpdateClusterState(OperationContext context, ClusterState clusterState, bool write)
-        {
-            if (!_configuration.StoreClusterState)
-            {
-                return;
-            }
-
-            context.PerformOperation(
-                Tracer,
-                () =>
-                {
-                    // TODO: Handle setting inactive machines here
-                    UpdateClusterStateCore(context, clusterState, write);
-
-                    return BoolResult.Success;
-                }).IgnoreFailure();
-        }
-
-        /// <nodoc />
-        protected abstract void UpdateClusterStateCore(OperationContext context, ClusterState clusterState, bool write);
 
         /// <summary>
         /// Gets whether the file in the database's checkpoint directory is immutable between checkpoints (i.e. files with the same name will have the same content)
@@ -607,9 +583,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     var initialEntry = entry;
 
                     // Don't update machines if entry already contains the machine
-                    var machines = machine != null && (entry.Locations[machine.Value] != existsOnMachine)
-                        ? new[] { machine.Value }
-                        : CollectionUtilities.EmptyArray<MachineId>();
+                    MachineIdCollection machines = machine != null && (entry.Locations[machine.Value] != existsOnMachine)
+                        ? MachineIdCollection.Create(machine.Value)
+                        : MachineIdCollection.Empty;
 
                     // Don't update last access time if the touch frequency interval has not elapsed since last access
                     if (lastAccessTime != null && initialEntry.LastAccessTimeUtc.ToDateTime().IsRecent(lastAccessTime.Value.ToDateTime(), _configuration.TouchFrequency))
@@ -625,14 +601,22 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         return initialEntry;
                     }
 
+                    EntryOperation entryOperation;
                     if (existsOnMachine)
                     {
-                        _nagleOperationTracer?.Enqueue((context, hash, initialEntry.Locations.Count == entry.Locations.Count ? EntryOperation.Touch : EntryOperation.AddMachine, reason));
+                        entryOperation = initialEntry.Locations.Count == entry.Locations.Count ? EntryOperation.Touch : EntryOperation.AddMachine;
                     }
                     else
                     {
-                        _nagleOperationTracer?.Enqueue((context, hash, machine == null ? EntryOperation.Touch : EntryOperation.RemoveMachine, reason));
+                        entryOperation = machine == null ? EntryOperation.Touch : EntryOperation.RemoveMachine;
                     }
+
+                    // Not tracing touches if configured.
+                    if (_configuration.TraceTouches || entryOperation != EntryOperation.Touch)
+                    {
+                        _nagleOperationTracer?.Enqueue((context, hash, entryOperation, reason));
+                    }
+
                 }
                 else
                 {
@@ -645,7 +629,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     lastAccessTime ??= Clock.UtcNow;
                     var creationTime = UnixTime.Min(lastAccessTime.Value, Clock.UtcNow.ToUnixTime());
 
-                    entry = ContentLocationEntry.Create(MachineIdSet.Empty.SetExistence(new[] { machine.Value }, existsOnMachine), size, lastAccessTime.Value, creationTime);
+                    entry = ContentLocationEntry.Create(MachineIdSet.Empty.SetExistence(MachineIdCollection.Create(machine.Value), existsOnMachine), size, lastAccessTime.Value, creationTime);
                     created = true;
                 }
 
@@ -705,12 +689,24 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             OperationContext context,
             StrongFingerprint strongFingerprint,
             ContentHashListWithDeterminism replacement,
-            Func<MetadataEntry, bool> shouldReplace);
+            Func<MetadataEntry, bool> shouldReplace,
+            DateTime? lastAccessTimeUtc);
 
         /// <summary>
         /// Load a ContentHashList.
         /// </summary>
-        public abstract GetContentHashListResult GetContentHashList(OperationContext context, StrongFingerprint strongFingerprint);
+        public abstract Result<MetadataEntry?> GetMetadataEntry(OperationContext context, StrongFingerprint strongFingerprint, bool touch);
+
+        /// <summary>
+        /// Load a ContentHashList.
+        /// </summary>
+        public GetContentHashListResult GetContentHashList(OperationContext context, StrongFingerprint strongFingerprint)
+        {
+            var result = GetMetadataEntry(context, strongFingerprint, touch: true);
+            return result.Succeeded 
+                ? new GetContentHashListResult(result.Value?.ContentHashListWithDeterminism ?? new ContentHashListWithDeterminism(null, CacheDeterminism.None))
+                : new GetContentHashListResult(result);
+        }
 
         /// <summary>
         /// Gets known selectors for a given weak fingerprint.
@@ -800,7 +796,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// </summary>
         protected ContentLocationEntry DeserializeContentLocationEntry(byte[] bytes)
         {
-            return DeserializeCore(bytes, ContentLocationEntry.Deserialize);
+            // Please do not convert the delegate to a method group, because this code is called many times
+            // and method group allocates a delegate on each conversion to a delegate.
+            return DeserializeCore(bytes, reader => ContentLocationEntry.Deserialize(reader));
         }
 
         /// <summary>

@@ -51,8 +51,7 @@ namespace BuildXL.Cache.Host.Service.Internal
         {
             Contract.Requires(!string.IsNullOrEmpty(preferredCacheDrive), "preferredCacheDrive should not be null or empty.");
             Contract.Requires(drivesWithContentStore?.Count > 0, "drivesWithContentStore should not be null or empty.");
-            Contract.Requires(drivesWithContentStore.ContainsKey(preferredCacheDrive), $"drivesWithContentStore should contain '{preferredCacheDrive}'.");
-
+            Contract.Check(drivesWithContentStore.ContainsKey(preferredCacheDrive))?.Requires($"drivesWithContentStore should contain '{preferredCacheDrive}'.");
             _drivesWithContentStore = drivesWithContentStore;
             _preferredCacheDrive = preferredCacheDrive;
             PreferredContentStore = drivesWithContentStore[preferredCacheDrive];
@@ -285,9 +284,9 @@ namespace BuildXL.Cache.Host.Service.Internal
         }
 
         /// <inheritdoc />
-        public Task<BoolResult> HandleCopyFileRequestAsync(Context context, ContentHash hash)
+        public Task<BoolResult> HandleCopyFileRequestAsync(Context context, ContentHash hash, CancellationToken token)
         {
-            return PerformStoreOperationAsync<ICopyRequestHandler, BoolResult>(store => store.HandleCopyFileRequestAsync(context, hash));
+            return PerformStoreOperationAsync<ICopyRequestHandler, BoolResult>(store => store.HandleCopyFileRequestAsync(context, hash, token));
         }
 
         private async Task<TResult> PerformStoreOperationAsync<TStore, TResult>(Func<TStore, Task<TResult>> executeAsync)
@@ -348,11 +347,30 @@ namespace BuildXL.Cache.Host.Service.Internal
         }
 
         /// <inheritdoc />
-        public async Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions = null)
+        public async Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions)
         {
+            long contentSize = 0L;
+            if (!deleteOptions.DeleteLocalOnly)
+            {
+                var mapping = new Dictionary<string, DeleteResult>();
+                foreach (var kvp in _drivesWithContentStore)
+                {
+                    var deleteResult = await kvp.Value.DeleteAsync(context, contentHash, deleteOptions);
+                    if (deleteResult is DistributedDeleteResult distributedDelete)
+                    {
+                        foreach (var pair in distributedDelete.DeleteMapping)
+                        {
+                            mapping.Add(pair.Key, pair.Value);
+                        }
+                    }
+
+                    contentSize = Math.Max(deleteResult.ContentSize, contentSize);
+                }
+
+                return new DistributedDeleteResult(contentHash, contentSize, mapping);
+            }
+
             int code = (int)DeleteResult.ResultCode.ContentNotFound;
-            long evictedSize = 0L;
-            long pinnedSize = 0L;
 
             foreach (var kvp in _drivesWithContentStore)
             {
@@ -360,8 +378,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                 if (deleteResult.Succeeded)
                 {
                     code = Math.Max(code, (int)deleteResult.Code);
-                    evictedSize += deleteResult.EvictedSize;
-                    pinnedSize += deleteResult.PinnedSize;
+                    contentSize = Math.Max(deleteResult.ContentSize, contentSize);
                 }
                 else
                 {
@@ -369,7 +386,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                 }
             }
 
-            return new DeleteResult((DeleteResult.ResultCode)code, contentHash, evictedSize, pinnedSize);
+            return new DeleteResult((DeleteResult.ResultCode)code, contentHash, contentSize);
         }
 
         /// <inheritdoc />

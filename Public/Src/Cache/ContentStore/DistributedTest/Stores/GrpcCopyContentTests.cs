@@ -4,7 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.FileSystem;
@@ -24,8 +24,8 @@ using BuildXL.Cache.ContentStore.UtilitiesCore;
 using ContentStoreTest.Extensions;
 using ContentStoreTest.Test;
 using FluentAssertions;
-using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace ContentStoreTest.Distributed.Stores
 {
@@ -37,23 +37,17 @@ namespace ContentStoreTest.Distributed.Stores
         private readonly Context _context;
         private readonly GrpcCopyClientCache _clientCache;
 
-        public GrpcCopyContentTests()
-            : base(() => new PassThroughFileSystem(TestGlobal.Logger), TestGlobal.Logger)
+        public GrpcCopyContentTests(ITestOutputHelper output)
+            : base(() => new PassThroughFileSystem(TestGlobal.Logger), TestGlobal.Logger, output)
         {
             _context = new Context(Logger);
             _clientCache = new GrpcCopyClientCache(_context, maxClientCount: 65536);
         }
 
-        /// <inheritdoc />
-        public override void Dispose()
-        {
-            _clientCache.Dispose();
-        }
-
         [Fact]
         public async Task CopyExistingFile()
         {
-            await RunTestCase(nameof(CopyExistingFile), async (rootPath, session, client) =>
+            await RunTestCase(async (rootPath, session, client) =>
             {
                 // Write a random file
                 var sourcePath = rootPath / ThreadSafeRandom.Generator.Next().ToString();
@@ -80,7 +74,7 @@ namespace ContentStoreTest.Distributed.Stores
         [Fact]
         public async Task CopyToShouldNotCloseGivenStream()
         {
-            await RunTestCase(nameof(CopyExistingFile), async (rootPath, session, client) =>
+            await RunTestCase(async (rootPath, session, client) =>
             {
                 // Write a random file
                 var sourcePath = rootPath / ThreadSafeRandom.Generator.Next().ToString();
@@ -93,7 +87,7 @@ namespace ContentStoreTest.Distributed.Stores
 
                 // Copy the file out via GRPC
                 var destinationPath = rootPath / ThreadSafeRandom.Generator.Next().ToString();
-                using (var destinationStream = await FileSystem.OpenAsync(
+                using (var destinationStream = await FileSystem.OpenSafeAsync(
                     destinationPath,
                     FileAccess.ReadWrite,
                     FileMode.CreateNew,
@@ -103,7 +97,7 @@ namespace ContentStoreTest.Distributed.Stores
                 {
                     (await client.CopyToAsync(_context, putResult.ContentHash, destinationStream, CancellationToken.None)).ShouldBeSuccess();
                     // If the stream is not disposed, the following operation should not fail.
-                    destinationStream.Position.Should().BeGreaterThan(0);
+                    destinationStream.Stream.Position.Should().BeGreaterThan(0);
                 }
                 
                 var copied = FileSystem.ReadAllBytes(destinationPath);
@@ -118,7 +112,7 @@ namespace ContentStoreTest.Distributed.Stores
         [Fact]
         public async Task CheckExistingFile()
         {
-            await RunTestCase(nameof(CheckExistingFile), async (rootPath, session, client) =>
+            await RunTestCase(async (rootPath, session, client) =>
             {
                 // Write a random file
                 var sourcePath = rootPath / ThreadSafeRandom.Generator.Next().ToString();
@@ -137,20 +131,20 @@ namespace ContentStoreTest.Distributed.Stores
         [Fact]
         public async Task CopyNonExistingFile()
         {
-            await RunTestCase(nameof(CopyNonExistingFile), async (rootPath, session, client) =>
+            await RunTestCase(async (rootPath, session, client) =>
             {
                 // Copy the file out via GRPC
                 var copyFileResult = await client.CopyFileAsync(_context, ContentHash.Random(), rootPath / ThreadSafeRandom.Generator.Next().ToString(), CancellationToken.None);
 
                 Assert.False(copyFileResult.Succeeded);
-                Assert.Equal(CopyFileResult.ResultCode.FileNotFoundError, copyFileResult.Code);
+                Assert.Equal(CopyResultCode.FileNotFoundError, copyFileResult.Code);
             });
         }
 
         [Fact]
         public async Task CheckNonExistingFile()
         {
-            await RunTestCase(nameof(CheckNonExistingFile), async (rootPath, session, client) =>
+            await RunTestCase(async (rootPath, session, client) =>
             {
                 // Check if random non-existent file exists
                 (await client.CheckFileExistsAsync(_context, ContentHash.Random())).ShouldBeError();
@@ -160,7 +154,7 @@ namespace ContentStoreTest.Distributed.Stores
         [Fact]
         public async Task WrongPort()
         {
-            await RunTestCase(nameof(WrongPort), async (rootPath, session, client) =>
+            await RunTestCase(async (rootPath, session, client) =>
             {
                 // Copy fake file out via GRPC
                 var bogusPort = PortExtensions.GetNextAvailablePort();
@@ -170,12 +164,12 @@ namespace ContentStoreTest.Distributed.Stores
                     client = clientWrapper.Value;
 
                     var copyFileResult = await client.CopyFileAsync(_context, ContentHash.Random(), rootPath / ThreadSafeRandom.Generator.Next().ToString(), CancellationToken.None);
-                    Assert.Equal(CopyFileResult.ResultCode.SourcePathError, copyFileResult.Code);
+                    Assert.Equal(CopyResultCode.ServerUnavailable, copyFileResult.Code);
                 }
             });
         }
 
-        private async Task RunTestCase(string testName, Func<AbsolutePath, IContentSession, GrpcCopyClient, Task> testAct)
+        private async Task RunTestCase(Func<AbsolutePath, IContentSession, GrpcCopyClient, Task> testAct, [CallerMemberName]string testName = null)
         {
             var cacheName = testName + "_cache";
 

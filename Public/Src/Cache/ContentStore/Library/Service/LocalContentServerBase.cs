@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Diagnostics.ContractsLight;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Net;
 using System.Threading;
@@ -59,17 +60,17 @@ namespace BuildXL.Cache.ContentStore.Service
         private const string CheckForExpiredSessionsName = "CheckUnusedSessions";
         private const int CheckForExpiredSessionsPeriodMinutes = 1;
 
-        private readonly IDisposable _portDisposer; // Null if port should not be exposed.
-        private Server _grpcServer;
+        private readonly IDisposable? _portDisposer; // Null if port should not be exposed.
+        private Server? _grpcServer;
 
         private readonly ServiceReadinessChecker _serviceReadinessChecker;
 
         private readonly ConcurrentDictionary<int, SessionHandle<TSession>> _sessionHandles;
-        private IntervalTimer _sessionExpirationCheckTimer;
-        private IntervalTimer _logIncrementalStatsTimer;
-        private IntervalTimer _logMachineStatsTimer;
+        private IntervalTimer? _sessionExpirationCheckTimer;
+        private IntervalTimer? _logIncrementalStatsTimer;
+        private IntervalTimer? _logMachineStatsTimer;
 
-        private Dictionary<string, long> _previousStatistics;
+        private Dictionary<string, long>? _previousStatistics;
 
         private readonly MachinePerformanceCollector _performanceCollector = new MachinePerformanceCollector();
 
@@ -249,6 +250,11 @@ namespace BuildXL.Cache.ContentStore.Service
             // This is a workaround to make sure hibernated sessions are fully restored
             // before FileSystemContentStore can evict the content.
             var result = await tryStartupCoreAsync();
+            if (!result)
+            {
+                // We should not be running post initialization operation if the startup operation failed.
+                return result;
+            }
 
             foreach (var store in StoresByName.Values)
             {
@@ -338,7 +344,7 @@ namespace BuildXL.Cache.ContentStore.Service
                 var stats = await GetStatsAsync(context);
                 if (stats.Succeeded)
                 {
-                    var counters = stats.Value.ToDictionaryIntegral();
+                    var counters = stats.Value!.ToDictionaryIntegral();
                     FillTrackingStreamStatistics(counters);
                     foreach (var counter in counters)
                     {
@@ -352,8 +358,8 @@ namespace BuildXL.Cache.ContentStore.Service
                             incrementalValue -= oldValue;
                         }
 
-                        Tracer.Info(context, $"IncrementalStatistic: {key}=[{incrementalValue}]");
-                        Tracer.Info(context, $"PeriodicStatistic: {key}=[{value}]");
+                        context.TracingContext.TraceMessage(Severity.Info, $"{key}=[{incrementalValue}]", component: Name, operation: "IncrementalStatistics");
+                        context.TracingContext.TraceMessage(Severity.Info, $"{key}=[{value}]", component: Name, operation: "PeriodicStatistics");
                     }
                 }
 
@@ -528,7 +534,13 @@ namespace BuildXL.Cache.ContentStore.Service
             }
 
             _logIncrementalStatsTimer?.Dispose();
-            await LogIncrementalStatsAsync(context);
+            _logMachineStatsTimer?.Dispose();
+
+            // Don't trace statistics if configured and only if startup was successful.
+            if (Tracer.EnableTraceStatisticsAtShutdown && StartupCompleted)
+            {
+                await LogIncrementalStatsAsync(context);
+            }
 
             // Stop the session expiration timer.
             _sessionExpirationCheckTimer?.Dispose();
@@ -557,6 +569,12 @@ namespace BuildXL.Cache.ContentStore.Service
 
                         if (session is IHibernateContentSession hibernateSession)
                         {
+                            if (Config.ShutdownEvictionBeforeHibernation)
+                            {
+                                // Calling shutdown of eviction before hibernating sessions to prevent possible race condition of evicting pinned content
+                                await hibernateSession.ShutdownEvictionAsync(context).ThrowIfFailure();
+                            }
+
                             var pinnedContentHashes = hibernateSession.EnumeratePinnedContentHashes().Select(x => x.Serialize()).ToList();
                             Tracer.Debug(context, $"Hibernating session {DescribeSession(sessionId, handle)}.");
                             sessionInfoList.Add(new HibernatedSessionInfo(
@@ -608,7 +626,7 @@ namespace BuildXL.Cache.ContentStore.Service
         private async Task<BoolResult> ShutdownStoresAsync(Context context)
         {
             var tasks = new List<Task<BoolResult>>(StoresByName.Count);
-            tasks.AddRange(StoresByName.Select(kvp => kvp.Value.ShutdownAsync(context)));
+            tasks.AddRange(StoresByName.Select(kvp => kvp.Value.ShutdownIfStartedAsync(context)));
             await TaskSafetyHelpers.WhenAll(tasks);
 
             var result = BoolResult.Success;
@@ -640,6 +658,7 @@ namespace BuildXL.Cache.ContentStore.Service
 
             _sessionExpirationCheckTimer?.Dispose();
             _logIncrementalStatsTimer?.Dispose();
+            _logMachineStatsTimer?.Dispose();
 
             _serviceReadinessChecker.Dispose();
 
@@ -682,7 +701,7 @@ namespace BuildXL.Cache.ContentStore.Service
 
                     var result = CreateSession(store, context, name, implicitPin).ThrowIfFailure();
 
-                    var session = result.Session;
+                    var session = result.Session!;
                     await session.StartupAsync(context).ThrowIfFailure();
 
                     var handle = new SessionHandle<TSession>(
@@ -695,13 +714,7 @@ namespace BuildXL.Cache.ContentStore.Service
                         GetTimeoutForCapabilities(capabilities));
 
                     bool added = _sessionHandles.TryAdd(id, handle);
-                    if (!added)
-                    {
-                        // CreateSession should not be called for an id that is already presented in the internal map.
-                        // The class members fully control the creation process, and the fact that the session is created is indication of a bug.
-                        Contract.Assert(false, $"The session with id '{id}' is already created.");
-                    }
-
+                    Contract.Check(added)?.Assert($"The session with id '{id}' is already created.");
                     Tracer.Debug(context, $"{nameof(CreateSessionAsync)} created session {handle.ToString(id)}.");
                     return Result.Success(session);
                 });
@@ -710,24 +723,25 @@ namespace BuildXL.Cache.ContentStore.Service
         private void TrySetBuildId(string sessionName)
         {
             // Domino provides build ID through session name for CB builds.
-            if (Logger is IOperationLogger operationLogger && Constants.TryExtractBuildId(sessionName, out var buildId))
+            if (Logger is IOperationLogger && Constants.TryExtractBuildId(sessionName, out var buildId))
             {
-                operationLogger.RegisterBuildId(buildId);
+                Logger.RegisterBuildId(buildId);
             }
         }
 
         private void TryUnsetBuildId(string sessionName)
         {
             // Domino provides build ID through session name for CB builds.
-            if (Logger is IOperationLogger operationLogger && Constants.TryExtractBuildId(sessionName, out _))
+            if (Logger is IOperationLogger && Constants.TryExtractBuildId(sessionName, out _))
             {
-                operationLogger.UnregisterBuildId();
+                Logger.UnregisterBuildId();
             }
         }
 
         /// <summary>
         /// Try gets a session by session id.
         /// </summary>
+        [return: MaybeNull]
         public TSession GetSession(int sessionId)
         {
             if (_sessionHandles.TryGetValue(sessionId, out var sessionHandle))
@@ -739,7 +753,7 @@ namespace BuildXL.Cache.ContentStore.Service
             return default;
         }
 
-        private async Task<Result<(TSession session, int sessionId, AbsolutePath tempDirectory)>> CreateTempDirectoryAndSessionAsync(
+        private Task<Result<(TSession session, int sessionId, AbsolutePath? tempDirectory)>> CreateTempDirectoryAndSessionAsync(
             OperationContext context,
             int? sessionIdHint,
             string sessionName,
@@ -751,33 +765,41 @@ namespace BuildXL.Cache.ContentStore.Service
             // The hint is provided when the session is recovered from hibernation.
             var sessionId = sessionIdHint ?? Interlocked.Increment(ref _lastSessionId);
 
-            var tempDirectoryCreationResult = await CreateSessionTempDirectoryAsync(context, cacheName, sessionId);
+            return context.PerformOperationAsync(
+                Tracer,
+                async () =>
+                {
+                    var tempDirectoryCreationResult = await CreateSessionTempDirectoryAsync(context, cacheName, sessionId);
 
-            if (!tempDirectoryCreationResult)
-            {
-                return new Result<(TSession session, int sessionId, AbsolutePath tempDirectory)>(tempDirectoryCreationResult);
-            }
+                    if (!tempDirectoryCreationResult)
+                    {
+                        return new Result<(TSession session, int sessionId, AbsolutePath? tempDirectory)>(tempDirectoryCreationResult);
+                    }
 
-            var sessionResult = await CreateSessionAsync(
-                context,
-                sessionName,
-                cacheName,
-                implicitPin,
-                sessionId,
-                sessionExpirationUtcTicks,
-                capabilities);
+                    var sessionResult = await CreateSessionAsync(
+                        context,
+                        sessionName,
+                        cacheName,
+                        implicitPin,
+                        sessionId,
+                        sessionExpirationUtcTicks,
+                        capabilities);
 
-            if (!sessionResult)
-            {
-                RemoveSessionTempDirectory(sessionId);
-                return Result.FromError<(TSession session, int sessionId, AbsolutePath tempDirectory)>(sessionResult);
-            }
+                    if (!sessionResult)
+                    {
+                        RemoveSessionTempDirectory(sessionId);
+                        return Result.FromError<(TSession session, int sessionId, AbsolutePath? tempDirectory)>(sessionResult);
+                    }
 
-            return Result.Success((sessionResult.Value, sessionId, tempDirectoryCreationResult.Value));
+                    return Result.Success<(TSession session, int sessionId, AbsolutePath? tempDirectory)>(
+                        (sessionResult.Value, sessionId, tempDirectoryCreationResult.Value));
+                },
+                extraStartMessage: $"SessionId=[{sessionId}]",
+                extraEndMessage: r => $"SessionId=[{sessionId}]");
         }
 
         /// <inheritdoc />
-        public async Task<Result<(int sessionId, AbsolutePath tempDirectory)>> CreateSessionAsync(
+        public async Task<Result<(int sessionId, AbsolutePath? tempDirectory)>> CreateSessionAsync(
             OperationContext context,
             string sessionName,
             string cacheName,
@@ -800,7 +822,7 @@ namespace BuildXL.Cache.ContentStore.Service
 
             if (!result)
             {
-                return new Result<(int sessionId, AbsolutePath tempDirectory)>(result);
+                return new Result<(int sessionId, AbsolutePath? tempDirectory)>(result);
             }
 
             return Result.Success((result.Value.sessionId, result.Value.tempDirectory));
@@ -851,7 +873,8 @@ namespace BuildXL.Cache.ContentStore.Service
 
         private string DescribeHibernatedSessionInfo(HibernatedSessionInfo info)
         {
-            return $"id=[{info.Id}] name=[{info.Session}] expiration=[{info.ExpirationUtcTicks}] capabilities=[{info.Capabilities}] pins=[{info.Pins.Count}]";
+            var expirationDateTime = new DateTime(info.ExpirationUtcTicks).ToLocalTime();
+            return $"id=[{info.Id}] name=[{info.Session}] expiration=[{expirationDateTime}] capabilities=[{info.Capabilities}] pins=[{info.Pins.Count}]";
         }
     }
 }

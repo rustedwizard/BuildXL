@@ -108,6 +108,8 @@ function qTestDotNetFrameworkToString(qTestDotNetFramework: QTestDotNetFramework
             return "FrameworkCore22";
         case QTestDotNetFramework.frameworkCore30:
             return "FrameworkCore30";
+        case QTestDotNetFramework.netcoreApp:
+            return "netcoreApp";    
         case QTestDotNetFramework.unspecified:
         default:
             return "Unspecified";
@@ -298,7 +300,7 @@ export function runQTest(args: QTestArguments): Result {
         hasUntrackedChildProcesses: args.qTestUnsafeArguments && args.qTestUnsafeArguments.doNotTrackDependencies,
         untrackedPaths: [
             ...addIf(qTestContextInfoFile !== undefined, qTestContextInfoFile),
-            ...addIf(flakyFile !== undefined, flakyFile),
+            ...addIf(flakyFile !== undefined, flakyFile)
         ],
         untrackedScopes: [
             // Untracking Recyclebin here to primarily unblock user scenarios that
@@ -315,32 +317,34 @@ export function runQTest(args: QTestArguments): Result {
 
     let result = Transformer.execute(
         Object.merge<Transformer.ExecuteArguments>(
-        {
-            tool: args.qTestTool ? args.qTestTool : qTestTool,
-            tags: args.tags,
-            description: args.description,
-            arguments: commandLineArgs,
-            consoleOutput: consolePath,
-            workingDirectory: sandboxDir,
-            tempDirectory: qtestRunTempDirectory,
-            weight: args.weight,
-            environmentVariables: envVars,
-            disableCacheLookup: Environment.getFlag("[Sdk.BuildXL]qTestForceTest"),
-            additionalTempDirectories : [sandboxDir],
-            privilegeLevel: args.privilegeLevel,
-            dependencies: [
-                //When there are test failures, and PDBs are looked up to generate the stack traces,
-                //the original location of PDBs is used instead of PDBs in test sandbox. This is
-                //a temporary solution until a permanent fix regarding the lookup is identified
-                ...(args.qTestInputs || args.qTestDirToDeploy.contents),
-                ...(args.qTestRuntimeDependencies || []),
-            ],
-            unsafe: unsafeOptions,
-            retryExitCodes: [2],
-            acquireSemaphores: args.qTestAcquireSemaphores,
-        },
-        changeAffectedInputListWrittenFileArg
-    ));
+            args.tools && args.tools.exec,
+            {
+                tool: args.qTestTool ? args.qTestTool : qTestTool,
+                tags: args.tags,
+                description: args.description,
+                arguments: commandLineArgs,
+                consoleOutput: consolePath,
+                workingDirectory: sandboxDir,
+                tempDirectory: qtestRunTempDirectory,
+                weight: args.weight,
+                environmentVariables: envVars,
+                disableCacheLookup: Environment.getFlag("[Sdk.BuildXL]qTestForceTest"),
+                additionalTempDirectories : [sandboxDir],
+                privilegeLevel: args.privilegeLevel,
+                dependencies: [
+                    //When there are test failures, and PDBs are looked up to generate the stack traces,
+                    //the original location of PDBs is used instead of PDBs in test sandbox. This is
+                    //a temporary solution until a permanent fix regarding the lookup is identified
+                    ...(args.qTestInputs || args.qTestDirToDeploy.contents),
+                    ...(args.qTestRuntimeDependencies || []),
+                ],
+                unsafe: unsafeOptions,
+                retryExitCodes: [2],
+                acquireSemaphores: args.qTestAcquireSemaphores,
+            },
+            changeAffectedInputListWrittenFileArg
+        )
+    );
 
     const qTestLogsDir: StaticDirectory = result.getOutputDirectory(logDir);
 
@@ -433,6 +437,8 @@ export const enum QTestDotNetFramework {
     frameworkCore22,
     @@Tool.option("--qtestDotNetFramework frameworkCore30")
     frameworkCore30,
+    @@Tool.option("--qtestDotNetFramework netcoreApp")
+    netcoreApp
 }
 
 /**
@@ -500,6 +506,15 @@ export interface QTestArguments extends Transformer.RunnerArguments {
     qTestAcquireSemaphores?: Transformer.SemaphoreInfo[];
     /** Overrides global setting to disable code coverage collection on this test binary */
     qTestDisableCodeCoverage?: boolean;
+    
+    /** Nested tool options */
+    tools?: {
+        /** 
+         * Options for tool execution
+         * */
+        exec?: Transformer.ExecuteArgumentsComposible;
+        wrapExec?: (exec: Transformer.ExecuteArguments) => Transformer.ExecuteArguments;
+    };
 }
 
 /**

@@ -13,6 +13,7 @@ import * as Shared from "Sdk.Managed.Shared";
 import * as XUnit from "Sdk.Managed.Testing.XUnit";
 import * as QTest from "Sdk.Managed.Testing.QTest";
 import * as Frameworks from "Sdk.Managed.Frameworks";
+import * as Net462 from "Sdk.Managed.Frameworks.Net462";
 import * as Net472 from "Sdk.Managed.Frameworks.Net472";
 
 import * as ResXPreProcessor from "Sdk.BuildXL.Tools.ResXPreProcessor";
@@ -24,7 +25,9 @@ import * as Contracts from "Tse.RuntimeContracts";
 export * from "Sdk.Managed";
 
 @@public
-export const NetFx = Net472.withQualifier({targetFramework: "net472"}).NetFx;
+export const NetFx = qualifier.targetFramework === "net462" 
+    ? Net462.withQualifier({targetFramework: "net462"}).NetFx
+    : Net472.withQualifier({targetFramework: "net472"}).NetFx;
 
 export const publicKey = "0024000004800000940000000602000000240000525341310004000001000100BDD83CF6A918814F5B0395F20B6AA573B872FCDDB8B121F162BDD7D5EB302146B2EA6D7E6551279FF9D62E7BEA417ACAE39BADC6E6DECFE45BA7B3AD70AF432A1AA587343AA67647A4D402A0E2D011A9758AAB9F0F8D1C911D554331E8176BE34592BADC08BC94BBD892AF7BCB72AC613F37E4B57A6E18599535211FEF8A7EBA";
 
@@ -65,7 +68,14 @@ export interface Arguments extends Managed.Arguments {
     contractsLevel?: Contracts.ContractsLevel;
 
     /** The assemblies that are internal visible for this assembly */
-    internalsVisibleTo?: string[],
+    internalsVisibleTo?: string[];
+
+    /**
+     * Whether to use the compiler's strict mode or not.
+     * In strict the compiler emits extra diagnostics for dangerous or invalid code.
+     * For instance, the compiler will warn on empty lock statements or when a value type instance potentially may be used in lock statement etc.
+     */
+    strictMode?: boolean;
 }
 
 @@public
@@ -88,7 +98,10 @@ export interface TestResult extends Managed.TestResult {
 export const isDotNetCoreBuild : boolean = qualifier.targetFramework === "netcoreapp3.1" || qualifier.targetFramework === "netstandard2.0";
 
 @@public
-export const isFullFramework : boolean = qualifier.targetFramework === "net472";
+export const isDotNetCoreApp : boolean = qualifier.targetFramework === "netcoreapp3.1";
+
+@@public
+export const isFullFramework : boolean = qualifier.targetFramework === "net472" || qualifier.targetFramework === "net462";
 
 @@public
 export const isTargetRuntimeOsx : boolean = qualifier.targetRuntime === "osx-x64";
@@ -100,10 +113,16 @@ export const isTargetRuntimeLinux : boolean = qualifier.targetRuntime === "linux
 export const isHostOsOsx : boolean = Context.getCurrentHost().os === "macOS";
 
 @@public
+export const isHostOsWin : boolean = Context.getCurrentHost().os === "win";
+
+@@public
+export const isHostOsLinux : boolean = Context.getCurrentHost().os === "unix";
+
+@@public
 export const targetFrameworkMatchesCurrentHost = 
-    (qualifier.targetRuntime === "win-x64" && Context.getCurrentHost().os === "win")
-    || (qualifier.targetRuntime === "osx-x64" && Context.getCurrentHost().os === "macOS")
-    || (qualifier.targetRuntime === "linux-x64" && Context.getCurrentHost().os === "unix");
+    (qualifier.targetRuntime === "win-x64" && isHostOsWin)
+    || (qualifier.targetRuntime === "osx-x64" && isHostOsOsx)
+    || (qualifier.targetRuntime === "linux-x64" && isHostOsLinux);
 
 /** Only run unit tests for one qualifier and also don't run tests which target macOS on Windows */
 @@public
@@ -113,10 +132,10 @@ export const restrictTestRunToSomeQualifiers =
     (qualifier.targetFramework !== "netcoreapp3.1" && qualifier.targetFramework !== "net472") ||
     !targetFrameworkMatchesCurrentHost;
 
-@@public
 /***
 * Whether service pip daemon tooling is included with the BuildXL deployment
 */
+@@public
 export const isDaemonToolingEnabled = Flags.isMicrosoftInternal && isFullFramework;
 
 /***
@@ -159,11 +178,12 @@ namespace Flags {
     export const genVSSolution = Environment.getFlag("[Sdk.BuildXL]GenerateVSSolution");
 
     /**
-     * Temporary flag to exclude building BuildXL.Explorer.
-     * BuildXL.Explorer is broken but building it can take a long time in CB environment.
+     * Whether to build BuildXL.Explorer during the build.
+     * BuildXL.Explorer is barely used, but building it can take a long time in CB environment and makes our rolling
+     * build unreliable currently. Thus, we make building BuildXL.Explorer optional based on the specified environment variable.
      */
     @@public
-    export const excludeBuildXLExplorer = Environment.getFlag("[Sdk.BuildXL]ExcludeBuildXLExplorer");
+    export const buildBuildXLExplorer = Environment.getFlag("[Sdk.BuildXL]BuildBuildXLExplorer");
 
     /**
      * Build tests that require admin privilege in VM.
@@ -190,6 +210,27 @@ namespace Flags {
      */
     @@public
     export const enableCrossgen = Environment.getFlag("[Sdk.BuildXL]enableCrossgen");
+
+    /**
+     * Gets the default value for whether to use the C# compiler's strict mode by default or not.
+     * Note, the property can be overriden by the library or executable arguments. This defines the default value only.
+     */
+    @@public
+    export const useCSharpCompilerStrictMode = Environment.getFlag("[Sdk.BuildXL]useStrictMode") || true;
+
+    /**
+     * Gets the default value for whether to embed pdbs into the final assemblies or not.
+     * Note, the property can be overriden by the library or executable arguments. This defines the default value only.
+     */
+    @@public
+    export const embedPdbs = Environment.hasVariable("[Sdk.BuildXL]embedPdbs") ? Environment.getFlag("[Sdk.BuildXL]embedPdbs") : true;
+
+    /**
+     * Gets the default value for whether to embed sources into pdbs.
+     * Note, the property can be overriden by the library or executable arguments. This defines the default value only.
+     */
+    @@public
+    export const embedSources = Environment.hasVariable("[Sdk.BuildXL]embedSources") ? Environment.getFlag("[Sdk.BuildXL]embedSources") : false;
 }
 
 @@public
@@ -212,6 +253,22 @@ export function library(args: Arguments): Managed.Assembly {
     args = processArguments(args, "library");
     return Managed.library(args);
 }
+
+@@public
+export const bclAsyncPackages : Managed.ManagedNugetPackage[] = [
+        importFrom("System.Threading.Tasks.Extensions").pkg,
+        importFrom("System.Linq.Async").pkg,
+        // .NET Core version is tricky, because there are some crucial differences between .netcoreapp and netstandard
+        (qualifier.targetFramework === "netcoreapp3.1" 
+          ? importFrom("Microsoft.Bcl.AsyncInterfaces").withQualifier({targetFramework: "netstandard2.1"}).pkg
+          : importFrom("Microsoft.Bcl.AsyncInterfaces").pkg)
+    ];
+
+@@public
+export const systemThreadingTasksDataflowPackageReference : Managed.ManagedNugetPackage[] = 
+    qualifier.targetFramework === "netcoreapp3.1" ? [] : [
+            importFrom("System.Threading.Tasks.Dataflow").pkg,
+        ];
 
 @@public
 export function nativeExecutable(args: Arguments): CoreRT.NativeExecutableResult {
@@ -248,8 +305,8 @@ export function executable(args: Arguments): Managed.Assembly {
                 name: "Newtonsoft.Json",
                 publicKeyToken: "30ad4fe6b2a6aeed",
                 culture: "neutral",
-                oldVersion: "0.0.0.0-11.0.0.0",
-                newVersion: "11.0.0.0",
+                oldVersion: "0.0.0.0-12.0.0.0",
+                newVersion: "12.0.0.0",
             },
             {
                 name: "Microsoft.VstsContentStore",
@@ -352,6 +409,9 @@ export function test(args: TestArguments) : TestResult {
     return result;
 }
 
+@@public
+export const notNullAttributesFile = f`NotNullAttributes.cs`;
+
 /**
  * Builds and runs an xunit test
  */
@@ -404,6 +464,20 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
     let rootNamespace = args.rootNamespace || assemblyName;
 
     args = Contracts.withRuntimeContracts(args, args.contractsLevel);
+    
+    // Need to turn on an experiemtal feature of the compiler in order to use some of the analyzers.
+    let features = args.enableStyleCopAnalyzers ? ['IOperation'] : [];
+    // Using strict mode if its enabled explicitely or if its not disabled explicitly,
+    // but enabled by default.
+    if (args.strictMode === true || (args.strictMode !== false && Flags.useCSharpCompilerStrictMode === true)) {
+        features = features.push('strict');
+    }
+
+    if (args.embedPdbs !== false && Flags.embedPdbs === true) {
+        args = args.merge<Managed.Arguments>({embedPdbs: true});
+    }
+
+    let embedSources = args.embedSources !== false && Flags.embedSources === true;
 
     args = Object.merge<Arguments>(
         {
@@ -428,12 +502,14 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
                 ...(args.skipDefaultReferences ? [] : [
                     ...(isDotNetCoreBuild ? [] : [
                         NetFx.System.Threading.Tasks.dll,
-                        importFrom("System.Threading.Tasks.Dataflow").pkg,
                     ]),
                     importFrom("BuildXL.Utilities.Instrumentation").Common.dll,
                     ...(args.generateLogs ? [
                         importFrom("BuildXL.Utilities.Instrumentation").Tracing.dll
                     ] : []),
+                    ...addIf(qualifier.targetFramework === "net462",
+                        importFrom("System.ValueTuple").pkg
+                    ),
                 ]),
             ],
             allowUnsafeBlocks: args.allowUnsafeBlocks || args.generateLogs, // When we generate logs we must add /unsafe since we generate unsafe code
@@ -447,12 +523,12 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
                     // TODO: Make analyzers supported in regular references by undestanding the structure in nuget packages
                     analyzers: getAnalyzers(args),
 
-                    // Need to turn on an experiemtal feature of the compiler in order to use some of the analyzers.
-                    features: args.enableStyleCopAnalyzers ? ['IOperation'] : undefined,
+                    features: features,
                     codeAnalysisRuleset: args.enableStyleCopAnalyzers ? f`BuildXL.ruleset` : undefined,
                     additionalFiles: args.enableStyleCopAnalyzers ? [f`stylecop.json`] : [],
                     keyFile: args.skipAssemblySigning ? undefined : devKey,
                     shared: Flags.useManagedSharedCompilation,
+                    embed: embedSources,
                 }
             },
             runCrossgenIfSupported: Flags.enableCrossgen,
@@ -509,9 +585,16 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
         });
         
         args = args.merge({
-            sources: [
-                extraSourceFile
-            ],
+            sources: [extraSourceFile],
+        });
+    }
+
+    // Add the file with non-nullable attributes for non-dotnet core projects
+    // if nullable flag is set, but a special flag is false.
+    if (args.nullable && qualifier.targetFramework !== "netcoreapp3.1" && args.addNotNullAttributeFile !== false) {
+        
+        args = args.merge({
+            sources: [notNullAttributesFile],
         });
     }
     
@@ -588,7 +671,11 @@ function processTestArguments(args: Managed.TestArguments) : Managed.TestArgumen
                     unsafe: {
                         // allowing process dumps to be written to /cores on macOS
                         untrackedScopes: isHostOsOsx ?  [ d`/cores` ] : []
-                    }
+                    },
+                    // Need to let BuildXL know all the paths where the sources are located, because some assertions 
+                    // libraries (like FluentAssertion) may decide to read the source file while the test runs in order
+                    // to make error messages more descriptive.
+                    dependencies: args.sources,
                 }
             }
         },

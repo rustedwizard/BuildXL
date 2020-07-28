@@ -2,233 +2,92 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
+using BuildXL.FrontEnd.JavaScript;
 using BuildXL.FrontEnd.Rush.ProjectGraph;
-using BuildXL.FrontEnd.Utilities;
-using BuildXL.FrontEnd.Utilities.GenericProjectGraphResolver;
 using BuildXL.FrontEnd.Workspaces.Core;
-using BuildXL.Native.IO;
-using BuildXL.Processes;
 using BuildXL.Utilities;
-using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Configuration.Mutable;
-using Newtonsoft.Json;
-using TypeScript.Net.Types;
 
 namespace BuildXL.FrontEnd.Rush
 {
     /// <summary>
     /// Workspace resolver for Rush
     /// </summary>
-    public class RushWorkspaceResolver : ProjectGraphWorkspaceResolverBase<RushGraphResult, RushResolverSettings>
+    public class RushWorkspaceResolver : JavaScriptWorkspaceResolver<RushConfiguration, RushResolverSettings>
     {
-        internal const string RushResolverName = "Rush";
-
         /// <summary>
-        /// Keep in sync with the BuildXL deployment spec that places the tool
+        /// CODESYNC: the BuildXL deployment spec that places the tool
         /// </summary>
-        private RelativePath RelativePathToGraphConstructionTool => RelativePath.Create(m_context.StringTable, @"tools\RushGraphBuilder\main.js");
-
-        /// <summary>
-        /// Preserves references for objects (so project references get correctly reconstructed), adds indentation for easier 
-        /// debugging (at the cost of a slightly higher serialization size) and includes nulls explicitly
-        /// </summary>
-        private static readonly JsonSerializerSettings s_jsonSerializerSettings = new JsonSerializerSettings
-        {
-            PreserveReferencesHandling = PreserveReferencesHandling.None,
-            Formatting = Formatting.Indented,
-            NullValueHandling = NullValueHandling.Include
-        };
+        protected override RelativePath RelativePathToGraphConstructionTool => RelativePath.Create(m_context.StringTable, @"tools\RushGraphBuilder\main.js");
 
         /// <inheritdoc/>
-        public RushWorkspaceResolver()
+        public RushWorkspaceResolver() : base(KnownResolverKind.RushResolverKind)
         {
-            Name = RushResolverName;
         }
 
         /// <inheritdoc/>
-        public override string Kind => KnownResolverKind.RushResolverKind;
-
-        /// <summary>
-        /// Creates an empty source file for now
-        /// </summary>
-        protected override SourceFile DoCreateSourceFile(AbsolutePath path)
+        protected override bool TryFindGraphBuilderToolLocation(RushResolverSettings resolverSettings, BuildParameters.IBuildParameters buildParameters, out AbsolutePath finalRushLibBaseLocation, out string failure)
         {
-            return SourceFile.Create(path.ToString(m_context.PathTable));
-        }
-        
-        /// <inheritdoc/>
-        protected override Task<Possible<RushGraphResult>> TryComputeBuildGraphAsync()
-        {
-            BuildParameters.IBuildParameters buildParameters = RetrieveBuildParameters();
-
-            return TryComputeBuildGraphAsync(buildParameters);
-        }
-
-        private async Task<Possible<RushGraphResult>> TryComputeBuildGraphAsync(BuildParameters.IBuildParameters buildParameters)
-        {
-            // We create a unique output file on the obj folder associated with the current front end, and using a GUID as the file name
-            AbsolutePath outputDirectory = m_host.GetFolderForFrontEnd(Name);
-            AbsolutePath outputFile = outputDirectory.Combine(m_context.PathTable, Guid.NewGuid().ToString());
-
-            // Make sure the directories are there
-            FileUtilities.CreateDirectory(outputDirectory.ToString(m_context.PathTable));
-
-            Possible<RushGraph> maybeRushGraph = await ComputeBuildGraphAsync(outputFile, buildParameters);
-
-            if (!maybeRushGraph.Succeeded)
+            // If the base location was provided at configuration time, we honor it as is
+            if (resolverSettings.RushLibBaseLocation.HasValue)
             {
-                // A more specific error has been logged already
-                return maybeRushGraph.Failure;
+                finalRushLibBaseLocation = resolverSettings.RushLibBaseLocation.Value.Path;
+                failure = string.Empty;
+                return true;
             }
 
-            var rushGraph = maybeRushGraph.Result;
+            finalRushLibBaseLocation = AbsolutePath.Invalid;
 
-            if (m_resolverSettings.KeepProjectGraphFile != true)
+            // If the location was not provided, let's try to see if Rush is installed, since rush-lib comes as part of it
+            // Look in %PATH% (as exposed in build parameters) for rush
+            string paths = buildParameters["PATH"];
+
+            AbsolutePath foundPath = AbsolutePath.Invalid;
+            foreach (string path in paths.Split(new[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries))
             {
-                DeleteGraphBuilderRelatedFiles(outputFile);
-            }
-            else
-            {
-                // Graph-related files are requested to be left on disk. Let's print a message with their location.
-                Tracing.Logger.Log.GraphBuilderFilesAreNotRemoved(m_context.LoggingContext, outputFile.ToString(m_context.PathTable));
-            }
-
-            // The module contains all project files that are part of the graph
-            var projectFiles = new HashSet<AbsolutePath>();
-            foreach (RushProject project in rushGraph.Projects)
-            {
-                projectFiles.Add(project.ProjectPath(m_context.PathTable));
-            }
-
-            var moduleDescriptor = ModuleDescriptor.CreateWithUniqueId(m_context.StringTable, m_resolverSettings.ModuleName, this);
-            var moduleDefinition = ModuleDefinition.CreateModuleDefinitionWithImplicitReferences(
-                moduleDescriptor,
-                m_resolverSettings.Root,
-                m_resolverSettings.File,
-                projectFiles,
-                allowedModuleDependencies: null, // no module policies
-                cyclicalFriendModules: null); // no whitelist of cycles
-
-            return new RushGraphResult(rushGraph, moduleDefinition);
-        }
-
-        private void DeleteGraphBuilderRelatedFiles(AbsolutePath outputFile)
-        {
-            // Remove the file with the serialized graph so we leave no garbage behind
-            // If there is a problem deleting these file, unlikely to happen (the process that created it should be gone by now), log as a warning and move on, this is not
-            // a blocking problem
-            try
-            {
-                FileUtilities.DeleteFile(outputFile.ToString(m_context.PathTable));
-            }
-            catch (BuildXLException ex)
-            {
-                Tracing.Logger.Log.CannotDeleteSerializedGraphFile(m_context.LoggingContext, m_resolverSettings.Location(m_context.PathTable), outputFile.ToString(m_context.PathTable), ex.Message);
-            }
-        }
-
-        private async Task<Possible<RushGraph>> ComputeBuildGraphAsync(
-            AbsolutePath outputFile,
-            BuildParameters.IBuildParameters buildParameters)
-        {
-            SandboxedProcessResult result = await RunRushGraphBuilderAsync(outputFile, buildParameters);
-
-            string standardError = result.StandardError.CreateReader().ReadToEndAsync().GetAwaiter().GetResult();
-
-            if (result.ExitCode != 0)
-            {
-                // In case of a cancellation, the tool may have exited with a non-zero
-                // code, but that's expected
-                if (!m_context.CancellationToken.IsCancellationRequested)
+                var nonEscapedPath = path.Trim('"');
+                // Sometimes PATH is not well-formed, so make sure we can actually recognize an absolute path there
+                if (AbsolutePath.TryCreate(m_context.PathTable, nonEscapedPath, out var absolutePath))
                 {
-                    // This should never happen! Report the standard error and exit gracefully
-                    Tracing.Logger.Log.GraphConstructionInternalError(
-                        m_context.LoggingContext,
-                        m_resolverSettings.Location(m_context.PathTable),
-                        standardError);
+                    if (m_host.Engine.FileExists(absolutePath.Combine(m_context.PathTable, "rush")))
+                    {
+                        foundPath = absolutePath;
+                        break;
+                    }
                 }
-
-                return new RushGraphConstructionFailure(m_resolverSettings, m_context.PathTable);
             }
 
-            // If the tool exited gracefully, but standard error is not empty, that
-            // is interpreted as a warning. We propagate that to the BuildXL log
-            if (!string.IsNullOrEmpty(standardError))
+            if (!foundPath.IsValid)
             {
-                Tracing.Logger.Log.GraphConstructionFinishedSuccessfullyButWithWarnings(
-                    m_context.LoggingContext,
-                    m_resolverSettings.Location(m_context.PathTable),
-                    standardError);
+                failure = "A location for 'rush-lib' is not explicitly specified, so trying to find a Rush installation to use instead. " +
+                    "However, 'rush' doesn't seem to be part of PATH. You can either specify the location explicitly using 'rushLibBaseLocation' field in " +
+                    $"the Rush resolver configuration, or make sure 'rush' is part of your PATH. Current PATH is '{paths}'.";
+                return false;
             }
 
-            TrackFilesAndEnvironment(result.AllUnexpectedFileAccesses, outputFile.GetParent(m_context.PathTable));
+            // We found where Rush is located. So rush-lib is a known dependency of it, so should be nested within Rush module
+            // Observe that even if that's not the case the final validation will occur under the rush graph builder tool, when
+            // the module is tried to be loaded
+            failure = string.Empty;
+            finalRushLibBaseLocation = foundPath.Combine(m_context.PathTable, 
+                RelativePath.Create(m_context.StringTable, "node_modules/@microsoft/rush/node_modules"));
 
-            JsonSerializer serializer = ConstructProjectGraphSerializer(s_jsonSerializerSettings);
+            // Just verbose log this
+            Tracing.Logger.Log.UsingRushLibBaseAt(m_context.LoggingContext, resolverSettings.Location(m_context.PathTable), finalRushLibBaseLocation.ToString(m_context.PathTable));
 
-            using (var sr = new StreamReader(outputFile.ToString(m_context.PathTable)))
-            using (var reader = new JsonTextReader(sr))
-            {
-                var flattenedRushGraph = serializer.Deserialize<GenericRushGraph<GenericRushProject<string>>>(reader);
-
-                RushGraph graph = ResolveDependencies(flattenedRushGraph);
-
-                return graph;
-            }
+            return true;
         }
 
-        private Task<SandboxedProcessResult> RunRushGraphBuilderAsync(
-            AbsolutePath outputFile,
-            BuildParameters.IBuildParameters buildParameters)
+        /// <summary>
+        /// The graph construction tool expects: path-to-rush.json path-to-output-graph path-to-rush-lib
+        /// </summary>
+        protected override string GetGraphConstructionToolArguments(AbsolutePath outputFile, AbsolutePath toolLocation, AbsolutePath bxlGraphConstructionToolPath, string nodeExeLocation)
         {
-            AbsolutePath toolPath = m_configuration.Layout.BuildEngineDirectory.Combine(m_context.PathTable, RelativePathToGraphConstructionTool);
-            string outputDirectory = outputFile.GetParent(m_context.PathTable).ToString(m_context.PathTable);
-            
-            // We always use cmd.exe as the tool so if the node.exe location is not provided we can just pass 'node.exe' and let PATH do the work.
-            var cmdExeArtifact = FileArtifact.CreateSourceFile(AbsolutePath.Create(m_context.PathTable, Environment.GetEnvironmentVariable("COMSPEC")));
-            string nodeExe = m_resolverSettings.NodeExeLocation.HasValue ?
-                m_resolverSettings.NodeExeLocation.Value.Path.ToString(m_context.PathTable) :
-                "node.exe";
             string pathToRushJson = m_resolverSettings.Root.Combine(m_context.PathTable, "rush.json").ToString(m_context.PathTable);
 
-            // TODO: add qualifier support.
-            // The graph construction tool expects: <path-to-rush.json> <path-to-output-graph> [<debug|release>]
-            string toolArguments = $@"/C """"{nodeExe}"" ""{toolPath.ToString(m_context.PathTable)}"" ""{pathToRushJson}"" ""{outputFile.ToString(m_context.PathTable)}"" debug""";
-
-            return FrontEndUtilities.RunSandboxedToolAsync(
-               m_context,
-               cmdExeArtifact.Path.ToString(m_context.PathTable),
-               buildStorageDirectory: outputDirectory,
-               fileAccessManifest: FrontEndUtilities.GenerateToolFileAccessManifest(m_context, outputFile.GetParent(m_context.PathTable)),
-               arguments: toolArguments,
-               workingDirectory: m_configuration.Layout.SourceDirectory.ToString(m_context.PathTable),
-               description: "Rush graph builder",
-               buildParameters);
-        }
-
-        private RushGraph ResolveDependencies(GenericRushGraph<GenericRushProject<string>> flattenedRushGraph)
-        {
-            var resolvedProjects = new Dictionary<string, RushProject>(flattenedRushGraph.Projects.Count);
-            
-            // Add all unresolved projects first
-            foreach (var flattenedProject in flattenedRushGraph.Projects)
-            {
-                var rushProject = RushProject.FromGenericRushProject(flattenedProject);
-                resolvedProjects.Add(flattenedProject.Name, rushProject);
-            }
-
-            // Now resolve dependencies
-            foreach (var flattenedProject in flattenedRushGraph.Projects)
-            {
-                var resolvedProject = resolvedProjects[flattenedProject.Name];
-                resolvedProject.SetDependencies(flattenedProject.Dependencies.Select(name => resolvedProjects[name]).ToReadOnlyArray());
-            }
-
-            return new RushGraph(resolvedProjects.Values);
+            return $@"/C """"{nodeExeLocation}"" ""{bxlGraphConstructionToolPath.ToString(m_context.PathTable)}"" ""{pathToRushJson}"" ""{outputFile.ToString(m_context.PathTable)}"" ""{toolLocation.ToString(m_context.PathTable)}""";
         }
     }
 }

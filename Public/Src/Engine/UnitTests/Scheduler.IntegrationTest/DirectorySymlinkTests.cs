@@ -23,9 +23,10 @@ using EngineLogEventId=BuildXL.Engine.Tracing.LogEventId;
 namespace IntegrationTest.BuildXL.Scheduler
 {
     [Feature(Features.Symlink)]
+    [Trait("Category", "SymlinkTests")]
     public class DirectorySymlinkTests : SchedulerIntegrationTestBase
     {
-        internal readonly struct LookupSpec
+        public readonly struct LookupSpec
         {
             /// <summary>Arbitrary description</summary>
             internal string Desc { get; }
@@ -47,32 +48,58 @@ namespace IntegrationTest.BuildXL.Scheduler
                 Observations = observations;
             }
 
-            internal (bool shouldContain, string fullPath)[] TranslateObservations(string rootDir)
+            internal enum TransalteAction
+            { 
+                ShouldContain,
+                ShouldNotContain,
+                ShouldNotExistInAnyPath
+            }
+
+            internal (TransalteAction action, string fullPath)[] TranslateObservations(string rootDir)
             {
                 return Observations
                     .Select(spec =>
                     {
                         var splits = spec.Split(' ');
                         XAssert.AreEqual(2, splits.Length);
-                        var plusMinus = splits[0];
+                        var plusMinusBang = splits[0];
                         var relPath = splits[1];
-                        XAssert.IsTrue(plusMinus == "+" || plusMinus == "-");
-                        var shouldContain = plusMinus == "+";
+                        TransalteAction action = TransalteAction.ShouldContain;
+                        switch (plusMinusBang)
+                        {
+                            case "+":
+                                action = TransalteAction.ShouldContain;
+                                break;
+                            case "-":
+                                action = TransalteAction.ShouldNotContain;
+                                break;
+                            case "!":
+                                action = TransalteAction.ShouldNotExistInAnyPath;
+                                break;
+                            default:
+                                XAssert.IsFalse(true, "Unknown TranslateAction encoutnered!");
+                                break;
+                        }
                         var fullPath = X($"{rootDir}/{relPath}");
-                        return (shouldContain, fullPath);
+                        return (action, fullPath);
                     })
                     .ToArray();
             }
 
-            internal bool IncludesObservation(string rootDir, string fullPath) => FilterObservations(rootDir, fullPath, shouldContain: true).Any();
-            internal bool ExcludesObservation(string rootDir, string fullPath) => FilterObservations(rootDir, fullPath, shouldContain: false).Any();
+            internal bool IncludesObservation(string rootDir, string fullPath) => FilterObservations(rootDir, fullPath, action: TransalteAction.ShouldContain).Any();
+            internal bool ExcludesObservation(string rootDir, string fullPath) => FilterObservations(rootDir, fullPath, action: TransalteAction.ShouldNotContain).Any();
 
-            internal IEnumerable<(bool shouldContain, string fullPath)> FilterObservations(string rootDir, string fullPath, bool shouldContain)
-                => TranslateObservations(rootDir).Where(o => o.fullPath == fullPath && o.shouldContain == shouldContain);
+            internal IEnumerable<(TransalteAction action, string fullPath)> FilterObservations(string rootDir, string fullPath, TransalteAction action)
+                => TranslateObservations(rootDir).Where(o => o.fullPath == fullPath && o.action == action);
+
+            /// <nodoc />
+            public override string ToString() => Desc;
         }
 
         public DirectorySymlinkTests(ITestOutputHelper output) : base(output)
         {
+            // Enable full symbolic link resolving for testing 
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullSymlinkResolving = false;
         }
 
         protected override void Dispose(bool disposing)
@@ -81,7 +108,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             base.Dispose(disposing);
         }
 
-        /* 
+        /*
          * Operations which when executed produce the following layout
 
             {rootDir}
@@ -94,23 +121,14 @@ namespace IntegrationTest.BuildXL.Scheduler
                 ├── sym-A -> A
                 └── sym-sym-A -> sym-A
         */
-        private const string DirectoryLayout = @"
+     
+        private const string GeneralDirectoryLayout = @"
 sym-Versions_A_file -> Versions/A/file
 sym-Versions_sym-A_file -> Versions/sym-A/file
 Versions/
 Versions/A/
 Versions/A/file
 Versions/A/sym-loop -> ../sym-A/
-Versions/sym-A -> A/
-Versions/sym-sym-A -> sym-A/
-";
-
-        private const string DirectoryLayoutWinTest = @"
-sym-Versions_A_file -> Versions/A/file
-sym-Versions_sym-A_file -> Versions/sym-A/file
-Versions/
-Versions/A/
-Versions/A/file
 Versions/sym-A -> A/
 Versions/sym-sym-A -> sym-A/
 ";
@@ -123,11 +141,11 @@ Versions/sym-sym-A -> sym-A/
         ///   - paths going through any directory symlinks should never be observed
         ///   - full path to the actual file must be observed
         ///   - full paths to any symbolic links that were resolved while looking up the actual file must be observed
-        /// 
+        ///
         /// <see cref="LookupSpec.Observations"/> for more details on the format of strings specified as observations.
         /// In a nutshell, prefix is "+" means that the path must be observed, and "-" means that the path must not be observed.
         /// </remarks>
-        private LookupSpec[] LookupSpecs { get; } = new[]
+        private static LookupSpec[] LookupSpecs { get; } = new[]
         {
             new LookupSpec(
                 "readDirectly",
@@ -205,7 +223,7 @@ Versions/sym-sym-A -> sym-A/
                     "- Versions/sym-sym-A/file"
                 }
             ),
-
+            
             new LookupSpec(
                 "readViaSymLoop",
                 lookup: "Versions/A/sym-loop/file",
@@ -223,7 +241,7 @@ Versions/sym-sym-A -> sym-A/
             ),
         };
 
-        private LookupSpec[] AbsentProbeSpecs { get; } = new[]
+        private static LookupSpec[] AbsentProbeSpecs { get; } = new[]
         {
             new LookupSpec(
                 "absentProbeViaDirSymlink",
@@ -252,9 +270,8 @@ Versions/sym-sym-A -> sym-A/
             ),
         };
 
-        private IEnumerable<Operation> GetLayoutProducingOperations(string rootDir)
+        private IEnumerable<Operation> GetLayoutProducingOperations(string rootDir, string layout)
         {
-            var layout = OperatingSystemHelper.IsUnixOS ? DirectoryLayout : DirectoryLayoutWinTest;
             return layout
                 .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(spec => $"{rootDir}/{spec.Trim()}")
@@ -264,21 +281,46 @@ Versions/sym-sym-A -> sym-A/
                                           OpWriteFile(X(spec)));
         }
 
-        private IEnumerable<Operation> GetLayoutProducingOperationsWithDummyReadFile(string rootDir, string dummyFileDescription)
-            => GetLayoutProducingOperations(rootDir).Concat(new[]
+        private IEnumerable<Operation> GetLayoutProducingOperationsWithDummyReadFile(string rootDir, string layout, string dummyFileDescription)
+            => GetLayoutProducingOperations(rootDir, layout).Concat(new[]
             {
                 OpReadDummySourceFile(dummyFileDescription)
             });
 
+        public static IEnumerable<object[]> LookupTestsData()
+        {
+            foreach (var spec in LookupSpecs.Concat(AbsentProbeSpecs))
+            {
+                yield return new object[] { spec };
+            }
+        }
+
+        [TheoryIfSupported(requiresSymlinkPermission: true)]
+        [MemberData(nameof(LookupTestsData))]
+        public void LookupTests(LookupSpec spec)
+        {
+            AbsolutePath rootDirAbsPath = CreateUniqueObjPath("LookupTest");
+            string rootDir = rootDirAbsPath.ToString(Context.PathTable);
+            var files = CreateLayoutOnDisk(rootDir, GeneralDirectoryLayout);
+
+            var sealDirArtifact = SealDirectory(rootDirAbsPath, files, SealDirectoryKind.Full);
+
+            var pip = CreateAndScheduleConsumer(sealDirArtifact, spec.Desc, spec.Lookup);
+
+            var result = RunScheduler().AssertSuccess().AssertCacheMiss(pip.PipId);
+
+            ValidateObservations(result, rootDir, new[] { (pip, spec) });
+        }
+
         [Feature(Features.Symlink)]
-        [FactIfSupported(requiresSymlinkPermission: true, requiresUnixBasedOperatingSystem: true)]
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void TestEnumerateDirectory()
         {
             AbsolutePath dirAbsPath = CreateUniqueObjPath($"TestDirEnum.framework");
             string rootDir = dirAbsPath.ToString(Context.PathTable);
 
             // create layout on disk
-            List<FileArtifact> dirContents = CreateLayoutOnDisk(rootDir);
+            List<FileArtifact> dirContents = CreateLayoutOnDisk(rootDir, GeneralDirectoryLayout);
 
             // enumerate directory
             var reportedFilePaths = new HashSet<string>();
@@ -303,51 +345,7 @@ Versions/sym-sym-A -> sym-A/
 
         [Feature(Features.Symlink)]
         [Feature(Features.OpaqueDirectory)]
-        [TheoryIfSupported(requiresWindowsBasedOperatingSystem: true, requiresSymlinkPermission: true)]
-        [InlineData(SealDirectoryKind.Full)]
-        [InlineData(SealDirectoryKind.Partial)]
-        [InlineData(SealDirectoryKind.Opaque)]
-        [InlineData(SealDirectoryKind.SharedOpaque)]
-        public void DirectorySymlinksInOutputDirectoryProducerOnlyOnWindows(SealDirectoryKind dirKind)
-        {
-            XAssert.IsFalse(dirKind.IsSourceSeal());
-           
-            AbsolutePath rootDirAbsPath = CreateUniqueObjPath($"{dirKind}.framework");
-            string rootDir = rootDirAbsPath.ToString(Context.PathTable);
-
-            // schedule producer pip: produce opaque directory with a bunch of symlinks
-            var operations = GetLayoutProducingOperationsWithDummyReadFile(rootDir, "producer");
-            var producerPipBuilder = CreatePipBuilder(operations);
-            producerPipBuilder.ToolDescription = StringId.Create(Context.StringTable, "producer");
-
-            // if dirKind is an opaque output, then just declare the root directory as an opaque output;
-            // otherwise, add all outputs explicitly and schedule a seal directory pip to seal them.
-            Process producerPip;
-            if (dirKind.IsOpaqueOutput())
-            {
-                producerPipBuilder.AddOutputDirectory(rootDirAbsPath, kind: dirKind);
-                producerPip = SchedulePipBuilder(producerPipBuilder).Process;
-            }
-            else
-            {
-                var dao = InferIOFromOperations(operations, force: true);
-                foreach (var output in dao.Outputs) producerPipBuilder.AddOutputFile(output.Path);
-                foreach (var input in dao.Dependencies) producerPipBuilder.AddInputFile(input);
-                producerPip = SchedulePipBuilder(producerPipBuilder).Process;
-            }
-
-            // first run, expect cache miss
-            RunScheduler().AssertSuccess().AssertCacheMiss(producerPip.PipId);
-            AssertWarningEventLogged(LogEventId.StorageSymlinkDirInOutputDirectoryWarning, count: 2);
-
-            // rerun, check cache miss, symlink directory in output can't be cached
-            RunScheduler().AssertSuccess().AssertCacheMiss(producerPip.PipId);
-            AssertWarningEventLogged(LogEventId.StorageSymlinkDirInOutputDirectoryWarning, count: 2);
-        }
-
-        [Feature(Features.Symlink)]
-        [Feature(Features.OpaqueDirectory)]
-        [TheoryIfSupported(requiresUnixBasedOperatingSystem: true, requiresSymlinkPermission: true)]
+        [TheoryIfSupported(requiresSymlinkPermission: true)]
         [InlineData(SealDirectoryKind.Full)]
         [InlineData(SealDirectoryKind.Partial)]
         [InlineData(SealDirectoryKind.Opaque)]
@@ -360,7 +358,7 @@ Versions/sym-sym-A -> sym-A/
             string rootDir = rootDirAbsPath.ToString(Context.PathTable);
 
             // schedule producer pip: produce opaque directory with a bunch of symlinks
-            var operations = GetLayoutProducingOperationsWithDummyReadFile(rootDir, "producer");
+            var operations = GetLayoutProducingOperationsWithDummyReadFile(rootDir, GeneralDirectoryLayout, "producer");
             var producerPipBuilder = CreatePipBuilder(operations);
             producerPipBuilder.ToolDescription = StringId.Create(Context.StringTable, "producer");
 
@@ -412,7 +410,7 @@ Versions/sym-sym-A -> sym-A/
                     .AssertCacheHit(allPipIds.Except(new[] { consumer.pip.PipId }).ToArray());
             }
 
-            // invalidate producer pip, rerun, expect reads to be cache misses and absent probes to be cache hits 
+            // invalidate producer pip, rerun, expect reads to be cache misses and absent probes to be cache hits
             InvalidatePip(producerPip);
             RunSchedulerAndValidateProducedLayout()
                 .AssertCacheMiss(readConsumers.Select(t => t.pip.PipId).ToArray())
@@ -437,7 +435,7 @@ Versions/sym-sym-A -> sym-A/
                             ValidateDirectoryExists(ArtifactToString(op.Path));
                             break;
                         case Operation.Type.CreateSymlink:
-                            ValidateSymlinkExists(ArtifactToString(op.LinkPath));
+                            ValidateSymlinkExists(ArtifactToString(op.LinkPath), op.SymLinkFlag);
                             break;
                         case Operation.Type.WriteFile:
                             ValidateNonSymlinkFileExists(ArtifactToString(op.Path));
@@ -456,7 +454,7 @@ Versions/sym-sym-A -> sym-A/
 
         [Feature(Features.Symlink)]
         [Feature(Features.SealedSourceDirectory)]
-        [TheoryIfSupported(requiresUnixBasedOperatingSystem: true, requiresSymlinkPermission: true)]
+        [TheoryIfSupported(requiresSymlinkPermission: true)]
         [InlineData(SealDirectoryKind.SourceAllDirectories)]
         [InlineData(SealDirectoryKind.SourceTopDirectoryOnly)]
         public void DirectorySymlinksInSealSourceDirectory(SealDirectoryKind sealKind)
@@ -467,7 +465,7 @@ Versions/sym-sym-A -> sym-A/
             string sealDir = sealDirAbsPath.ToString(Context.PathTable);
 
             // create layout on disk
-            List<FileArtifact> dirContents = CreateLayoutOnDisk(sealDir);
+            List<FileArtifact> dirContents = CreateLayoutOnDisk(sealDir, GeneralDirectoryLayout);
 
             // schedule seal dir
             var sealDirArtifact = SealDirectory(sealDirAbsPath, sealKind, dirContents.ToArray());
@@ -544,14 +542,14 @@ Versions/sym-sym-A -> sym-A/
                 .ToArray();
         }
 
-        [FactIfSupported(requiresSymlinkPermission: true, requiresUnixBasedOperatingSystem: true)]
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void UserSpecifiesOutputPathContainingDirectorySymlinksFails()
         {
             AbsolutePath rootDirAbsPath = CreateUniqueObjPath("ExplicitSymDirOutPath.framework");
             string rootDir = rootDirAbsPath.ToString(Context.PathTable);
 
             // schedule producer pip
-            var operations = GetLayoutProducingOperationsWithDummyReadFile(rootDir, "producer");
+            var operations = GetLayoutProducingOperationsWithDummyReadFile(rootDir, GeneralDirectoryLayout, "producer");
             var producerPipBuilder = CreatePipBuilder(operations);
             producerPipBuilder.ToolDescription = StringId.Create(Context.StringTable, "producer");
 
@@ -563,13 +561,13 @@ Versions/sym-sym-A -> sym-A/
             foreach (var output in dao.Outputs) producerPipBuilder.AddOutputFile(output.Path);
 
             // additionally declare Versions/sym-A/file as output
-            var outViaSymDir = $"{rootDir}/Versions/sym-A/file";
+            var outViaSymDir = X($"{rootDir}/Versions/sym-A/file");
             producerPipBuilder.AddOutputFile(Context.PathTable, outViaSymDir);
 
             // schedule pip and run
             var producerPip = SchedulePipBuilder(producerPipBuilder).Process;
 
-            // assert failure with error "Pip produced outputs 
+            // assert failure with error "Pip produced outputs
             RunScheduler().AssertFailure();
             AssertErrorEventLogged(LogEventId.FailPipOutputWithNoAccessed);
             AssertLogContains(caseSensitive: false, $"No file access for output: '{outViaSymDir}'");
@@ -577,7 +575,7 @@ Versions/sym-sym-A -> sym-A/
 
         private const int ReadCount = 50;
 
-        [FactIfSupported(requiresSymlinkPermission: true, requiresUnixBasedOperatingSystem: true)]
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void ConcurrentAccessToHardlinksPointingToSameFile()
         {
             CreateHardLinks(out var hardlink1, out var hardlink2);
@@ -594,11 +592,15 @@ Versions/sym-sym-A -> sym-A/
             RunScheduler().AssertSuccess();
         }
 
-        [FactIfSupported(requiresSymlinkPermission: true, requiresUnixBasedOperatingSystem: true)]
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void ConcurrentCreationOfHardlinksPointingToSameFile()
         {
+            // Tests generally use an InMemoryArtifactContentCache and running this test causes share violations when concurrency is high
+            // and page flushing is enabled on Windows systems - this seems to be a bug in either the CLR or the kernel code
+            Configuration.Sandbox.FlushPageCacheToFileSystemOnStoringOutputsToCache = false;
+
             var srcFile = CreateSourceFileWithPrefix(prefix: "hardlink-source.txt");
-            for (int i = 0; i < 5; i++)
+            for (int i = 0; i < 666; i++)
             {
                 CreateAndSchedulePipBuilder(
                     description: "create-hardlink-" + i,
@@ -610,7 +612,7 @@ Versions/sym-sym-A -> sym-A/
             RunScheduler().AssertSuccess();
         }
 
-        [FactIfSupported(requiresSymlinkPermission: true, requiresUnixBasedOperatingSystem: true)]
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void ConcurrentAccessToHardlinksPointingToSameFileViaSymlink()
         {
             CreateHardLinks(out var hardlink1, out var hardlink2);
@@ -632,14 +634,14 @@ Versions/sym-sym-A -> sym-A/
             RunScheduler().AssertSuccess();
         }
 
-        [FactIfSupported(requiresSymlinkPermission: true, requiresUnixBasedOperatingSystem: true)]
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void ConcurrentAccessToHardlinksPointingToSameFileViaSymlinkDirectory()
         {
             CreateHardLinks(out var hardlink1, out var hardlink2);
             AbsolutePath symDir = CreateUniqueSourcePath(prefix: "sym-dir-hardlink1");
             string symDirPath = ToString(symDir);
             string hardlink1Path = ToString(hardlink1);
-            XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(symDirPath, Path.GetDirectoryName(hardlink1Path), isTargetFile: true));
+            XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(symDirPath, Path.GetDirectoryName(hardlink1Path), isTargetFile: false));
             FileArtifact hardlink1ViaSymDir = InFile(X($"{symDirPath}/{Path.GetFileName(hardlink1Path)}"));
 
             var pip1builder = CreatePipBuilder(
@@ -659,7 +661,7 @@ Versions/sym-sym-A -> sym-A/
             RunScheduler().AssertSuccess();
         }
 
-        [FactIfSupported(requiresSymlinkPermission: true, requiresUnixBasedOperatingSystem: true)]
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void ConcurrentAccessToHardlinksPointingToSameFileIntertwinedWithOtherReads()
         {
             CreateHardLinks(out var hardlink1, out var hardlink2);
@@ -690,8 +692,8 @@ Versions/sym-sym-A -> sym-A/
 
             AbsolutePath directorySymlink = CreateUniquePath("Symlink", ReadonlyRoot);
             XAssert.IsTrue(FileUtilities.TryCreateSymbolicLink(
-                directorySymlink.ToString(Context.PathTable), 
-                targetDirectory.ToString(Context.PathTable), 
+                directorySymlink.ToString(Context.PathTable),
+                targetDirectory.ToString(Context.PathTable),
                 isTargetFile: false).Succeeded);
 
             var pipBuilder = CreatePipBuilder(new[]
@@ -700,10 +702,7 @@ Versions/sym-sym-A -> sym-A/
                 Operation.WriteFile(CreateOutputFileArtifact())
             });
 
-            if (OperatingSystemHelper.IsUnixOS)
-            {
-                pipBuilder.AddInputFile(directorySymlink);
-            }
+            pipBuilder.AddInputFile(directorySymlink);
 
             ProcessWithOutputs processWithOutputs = SchedulePipBuilder(pipBuilder);
 
@@ -712,6 +711,119 @@ Versions/sym-sym-A -> sym-A/
 
             CreateSourceFile(targetDirectory, "file3");
             RunScheduler().AssertCacheMiss(processWithOutputs.Process.PipId);
+        }
+        
+        [Fact(Skip = "Skip until new LKG with correct symlink loop enumeration / deletion is deployed")]
+        public void EnumeratingAndDeletingDirectoriesWithDirectorySymlinks()
+        {
+            AbsolutePath rootDirAbsPath = CreateUniqueObjPath("layout");
+            string rootDir = rootDirAbsPath.ToString(Context.PathTable);
+
+            string testDirectoryLayout = @"
+                target/
+                target/file
+                target/file2
+                sym_dir -> target/
+                target/sym_dir_loop -> ../target/
+            ";
+            
+            var files = CreateLayoutOnDisk(rootDir, testDirectoryLayout);
+            var filePaths = files.Select(fa => fa.Path.ToString(Context.PathTable)).ToList();
+
+            FileUtilities.EnumerateDirectoryEntries(rootDir, true /* recursive */, (dir, fileName, attributes) =>
+            {
+                if (attributes.HasFlag(FileAttributes.Archive) ||
+                    attributes.HasFlag(FileAttributes.Normal) ||
+                    attributes.HasFlag(FileAttributes.Directory | FileAttributes.ReparsePoint))
+                {
+                    var entry = Path.Combine(dir, fileName);
+                    XAssert.Contains(filePaths, new[] { entry });
+                    filePaths.Remove(entry);
+                }
+            });
+
+            // Make sure file and any kind of symlink was reported as file / reparse point with directory type
+            XAssert.IsTrue(filePaths.Count == 0);
+
+            FileUtilities.DeleteDirectoryContents(rootDir, deleteRootDirectory: true);
+
+            // Make sure deletion worked, because sym_dir_loop creates a symbolic directory link loop
+            XAssert.IsFalse(Directory.Exists(rootDir));
+        }
+
+        [FactIfSupported(requiresSymlinkPermission: true)]
+        public void AbsoluteDirectorySymlinksRecursivelyResolveCorrectly()
+        {
+            AbsolutePath rootDirAbsPath = CreateUniqueObjPath("layout");
+            string rootDir = rootDirAbsPath.ToString(Context.PathTable);
+
+            string testDirectoryLayout = string.Format(@"
+                first_root/
+                first_root/target/
+                first_root/target/file
+                first_root/sym_dir -> target/
+                first_root/nested_sym_dir -> sym_dir/
+                second_root/
+                second_root/target/
+                second_root/target/file -> {0}/first_root/nested_sym_dir/file
+                second_root/sym-dir -> target/
+            ", rootDir);
+
+            var spec = new LookupSpec(
+                "readThroughSymlinkFileOverRelativeAndAbsoluteDirectorySymlinks",
+                lookup: "second_root/sym-dir/file",
+                target: "first_root/target/file",
+                observations: new[]
+                {
+                    "+ first_root/target/file",
+                    "+ first_root/sym_dir",
+                    "+ first_root/nested_sym_dir",
+                    "+ second_root/sym-dir",
+                    "+ second_root/target/file"
+                }
+            );
+
+            var files = CreateLayoutOnDisk(rootDir, testDirectoryLayout);
+            var sealDirArtifact = SealDirectory(rootDirAbsPath, files, SealDirectoryKind.Full);
+            var pip = CreateAndScheduleConsumer(sealDirArtifact, spec.Desc, spec.Lookup);
+
+            var result = RunScheduler().AssertSuccess().AssertCacheMiss(pip.PipId);
+            ValidateObservations(result, rootDir, new[] { (pip, spec) });
+        }
+
+        [FactIfSupported(requiresSymlinkPermission: true, requiresWindowsBasedOperatingSystem: true)]
+        public void JunctionsInPathDontInfluenceDirectorySymlinkResolving()
+        {
+            AbsolutePath junctionDirectory = CreateUniqueDirectory(prefix: "junction");
+            AbsolutePath rootDirectory = CreateUniqueDirectory(prefix: "root");
+            FileUtilities.CreateJunction(junctionDirectory.ToString(Context.PathTable), rootDirectory.ToString(Context.PathTable));
+            string rootDir = junctionDirectory.ToString(Context.PathTable);
+
+            string testDirectoryLayout = string.Format(@"
+                base/
+                base/target/
+                base/target/file
+                base/sym_dir -> target/
+            ", rootDir);
+
+            var spec = new LookupSpec(
+                "readThroughPathWithJunctionAndResolveOnlySymlinks",
+                lookup: "base/sym_dir/file",
+                target: "base/target/file",
+                observations: new[]
+                {
+                    "+ base/target/file",
+                    "+ base/sym_dir",
+                    "! root"
+                }
+            );
+
+            var files = CreateLayoutOnDisk(rootDir, testDirectoryLayout);
+            var sealDirArtifact = SealDirectory(junctionDirectory, files, SealDirectoryKind.Full);
+            var pip = CreateAndScheduleConsumer(sealDirArtifact, spec.Desc, spec.Lookup);
+
+            var result = RunScheduler().AssertSuccess().AssertCacheMiss(pip.PipId);
+            ValidateObservations(result, rootDir, new[] { (pip, spec) });
         }
 
         private static IEnumerable<T> Multiply<T>(int count, T elem) => Enumerable.Range(1, count).Select(_ => elem);
@@ -745,10 +857,10 @@ Versions/sym-sym-A -> sym-A/
             return path.ToString(Context.PathTable);
         }
 
-        private List<FileArtifact> CreateLayoutOnDisk(string rootDir)
+        private List<FileArtifact> CreateLayoutOnDisk(string rootDir, string layout)
         {
             FileUtilities.CreateDirectory(rootDir);
-            var operations = GetLayoutProducingOperations(rootDir);
+            var operations = GetLayoutProducingOperations(rootDir, layout);
             foreach (var op in operations)
             {
                 op.PathTable = Context.PathTable;
@@ -785,11 +897,18 @@ Versions/sym-sym-A -> sym-A/
         {
             foreach (var consumer in allConsumers)
             {
-                ValidateObservations(result, consumer.pip, consumer.spec.TranslateObservations(rootDir));
+                ValidateObservations(
+                    result,
+                    consumer.pip,
+                    consumer.spec
+                        .TranslateObservations(rootDir)
+                        // exclude paths that are explicitly declared as inputs because those don't have to be reported
+                        .Where(t => !(t.action == LookupSpec.TransalteAction.ShouldContain && consumer.pip.Dependencies.Any(fileDep => ArtifactToString(fileDep) == t.fullPath)))
+                        .ToArray());
             }
         }
 
-        private void ValidateObservations(ScheduleRunResult result, Process pip, (bool shouldContain, string fullPath)[] observationSpecs)
+        private void ValidateObservations(ScheduleRunResult result, Process pip, (LookupSpec.TransalteAction action, string fullPath)[] observationSpecs)
         {
             XAssert.IsTrue(result.PathSets[pip.PipId].HasValue);
             var observedPaths = new HashSet<AbsolutePath>(result.PathSets[pip.PipId].Value.Paths.Select(e => e.Path));
@@ -798,20 +917,32 @@ Versions/sym-sym-A -> sym-A/
                 observedPaths.Select(p => Environment.NewLine + "  " + p.ToString(Context.PathTable)).OrderBy(s => s));
             var pipDesc = pip.ToolDescription.ToString(Context.StringTable);
 
-            foreach (var (shouldContain, path) in observationSpecs)
+            foreach (var (action, path) in observationSpecs)
             {
                 var absPath = AbsolutePath.Create(Context.PathTable, path);
-                if (shouldContain)
+                switch (action)
                 {
-                    XAssert.IsTrue(
-                        observedPaths.Contains(absPath),
-                        $"Pip '{pipDesc}' was expected to contain '{path}' but it doesn't.  Observed paths: {observedPathsStr}");
-                }
-                else
-                {
-                    XAssert.IsFalse(
-                        observedPaths.Contains(absPath),
-                        $"Pip '{pipDesc}' was expected to NOT contain '{path}' but it does.  Observed paths: {observedPathsStr}");
+                    case LookupSpec.TransalteAction.ShouldContain:
+                    {
+                        XAssert.IsTrue(
+                            observedPaths.Contains(absPath),
+                            $"Pip '{pipDesc}' was expected to contain '{path}' but it doesn't.  Observed paths: {observedPathsStr}");
+                        break;
+                    }
+                    case LookupSpec.TransalteAction.ShouldNotContain:
+                    {
+                        XAssert.IsFalse(
+                            observedPaths.Contains(absPath),
+                            $"Pip '{pipDesc}' was expected to NOT contain '{path}' but it does.  Observed paths: {observedPathsStr}");
+                        break;
+                    }
+                    case LookupSpec.TransalteAction.ShouldNotExistInAnyPath:
+                    {
+                        XAssert.IsFalse(
+                            observedPaths.Select(p => p.ToString(Context.PathTable)).Where(p => p.Contains(path)).Any(),
+                            $"Pip '{pipDesc}' was expected to NOT contain '{path}' in any observed path but it does.  Observed paths: {observedPathsStr}");
+                        break;
+                    }
                 }
             }
         }
@@ -831,11 +962,14 @@ Versions/sym-sym-A -> sym-A/
         private FileArtifact OutFile(string path)
             => FileArtifact.CreateOutputFile(AbsolutePath.Create(Context.PathTable, path));
 
+        private DirectoryArtifact OutDir(string path)
+            => DirectoryArtifact.CreateWithZeroPartialSealId(AbsolutePath.Create(Context.PathTable, path));
+
         private Operation OpReadDummySourceFile(string desc)
             => Operation.ReadFile(CreateSourceFileWithPrefix(prefix: InPrefix + desc));
 
         private Operation OpCreateDir(string dirPath)
-            => Operation.CreateDir(OutFile(dirPath), doNotInfer: true);
+            => Operation.CreateDir(OutDir(dirPath), doNotInfer: true);
 
         private Operation OpWriteFile(string filePath)
             => Operation.WriteFile(OutFile(filePath), doNotInfer: true);
@@ -855,20 +989,20 @@ Versions/sym-sym-A -> sym-A/
         private void ValidateDirectoryExists(string dir)
             => ValidateFileExists(dir, PathExistence.ExistsAsDirectory);
 
-        private void ValidateSymlinkExists(string file)
-            => ValidateFileExists(file, PathExistence.ExistsAsFile, isSymlink: true);
+        private void ValidateSymlinkExists(string file, Operation.SymbolicLinkFlag flag)
+            => ValidateFileExists(file, PathExistence.ExistsAsFile, isSymlink: true, isDirectorySymlink: flag == Operation.SymbolicLinkFlag.DIRECTORY);
 
         private void ValidateNonSymlinkFileExists(string file)
             => ValidateFileExists(file, PathExistence.ExistsAsFile, isSymlink: false);
 
-        private void ValidateFileExists(string file, PathExistence expected, bool? isSymlink = null)
+        private void ValidateFileExists(string file, PathExistence expected, bool? isSymlink = null, bool isDirectorySymlink = false)
         {
             var maybePathExistence = FileUtilities.TryProbePathExistence(file, followSymlink: false);
             XAssert.IsTrue(maybePathExistence.Succeeded, $"Failed to determine path existence for '{file}'");
             XAssert.AreEqual(expected, maybePathExistence.Result, $"Wrong file existence for file '{file}'");
             if (isSymlink.HasValue)
             {
-                XAssert.AreEqual(isSymlink.Value, SymlinkTests.IsSymlink(file), $"Wrong symlink attribute for file '{file}'");
+                XAssert.AreEqual(isSymlink.Value, SymlinkTests.IsSymlink(file, isDirectorySymlink), $"Wrong symlink attribute for file '{file}'");
             }
         }
     }

@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.ContractsLight;
 using System.Text;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 
@@ -41,22 +42,27 @@ namespace BuildXL.Cache.ContentStore.Service
         /// <nodoc />
         public LocalServerConfiguration(ServiceConfiguration serviceConfiguration)
         {
-            OverrideServiceConfiguration(serviceConfiguration);
-        }
+            Contract.Requires(serviceConfiguration.DataRootPath != null);
 
-        /// <nodoc />
-        public LocalServerConfiguration()
-        {
-            GrpcPort = DefaultGrpcPort;
+            DataRootPath = serviceConfiguration.DataRootPath;
+            NamedCacheRoots = serviceConfiguration.NamedCacheRoots;
+            GrpcPort = (int)serviceConfiguration.GrpcPort;
+            GrpcPortFileName = serviceConfiguration.GrpcPortFileName ?? DefaultFileName;
+            BufferSizeForGrpcCopies = serviceConfiguration.BufferSizeForGrpcCopies;
+            GzipBarrierSizeForGrpcCopies = serviceConfiguration.GzipBarrierSizeForGrpcCopies;
+            ProactivePushCountLimit = serviceConfiguration.ProactivePushCountLimit;
+            LogMachineStatsInterval = serviceConfiguration.LogMachineStatsInterval ?? DefaultLogMachineStatsInterval;
+            LogIncrementalStatsInterval = serviceConfiguration.LogIncrementalStatsInterval ?? DefaultLogIncrementalStatsInterval;
         }
 
         /// <nodoc />
         public LocalServerConfiguration OverrideServiceConfiguration(ServiceConfiguration serviceConfiguration)
         {
+            Contract.Requires(serviceConfiguration.DataRootPath != null);
             DataRootPath = serviceConfiguration.DataRootPath;
             NamedCacheRoots = serviceConfiguration.NamedCacheRoots;
             GrpcPort = (int)serviceConfiguration.GrpcPort;
-            GrpcPortFileName = serviceConfiguration.GrpcPortFileName;
+            GrpcPortFileName = serviceConfiguration.GrpcPortFileName ?? DefaultFileName;
             BufferSizeForGrpcCopies = serviceConfiguration.BufferSizeForGrpcCopies;
             GzipBarrierSizeForGrpcCopies = serviceConfiguration.GzipBarrierSizeForGrpcCopies;
             ProactivePushCountLimit = serviceConfiguration.ProactivePushCountLimit;
@@ -125,6 +131,11 @@ namespace BuildXL.Cache.ContentStore.Service
         /// <nodoc />
         public int? BufferSizeForGrpcCopies { get; private set; }
 
+        /// <summary>
+        /// If true, then the unsafe version of ByteString construction is used that avoids extra copy of the byte[].
+        /// </summary>
+        public bool UseUnsafeByteStringConstruction { get; set; }
+
         /// <nodoc />
         public const int DefaultProactivePushCountLimit = 128;
 
@@ -142,13 +153,18 @@ namespace BuildXL.Cache.ContentStore.Service
         public static readonly string DefaultFileName = "CASaaS GRPC port";
 
         /// <nodoc />
-        public string GrpcPortFileName { get; set; } = DefaultFileName;
+        public string? GrpcPortFileName { get; set; } = DefaultFileName;
 
         /// <nodoc />
         public int? GrpcThreadPoolSize { get; set; }
 
         /// <nodoc />
-        public IAbsFileSystem FileSystem { get; set; }
+        public IAbsFileSystem? FileSystem { get; set; }
+
+        /// <summary>
+        /// When set to true, we will shut down the quota keeper before hibernating sessions to prevent a race condition of evicting pinned content
+        /// </summary>
+        public bool ShutdownEvictionBeforeHibernation { get; set; }
 
         /// <inheritdoc />
         public override string ToString()

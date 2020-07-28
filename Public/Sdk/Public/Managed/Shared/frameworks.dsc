@@ -75,7 +75,7 @@ export type RuntimeVersion = "win-x64" | "osx-x64" | "linux-x64";
 
 namespace TargetFrameworks {
     @@public
-    export type DesktopTargetFrameworks = "net451" | "net461" | "net472";
+    export type DesktopTargetFrameworks = "net451" | "net461" | "net462" | "net472";
 
     @@public
     export type CoreClrTargetFrameworks = "netcoreapp2.2" | "netcoreapp3.1";
@@ -116,14 +116,17 @@ namespace TargetFrameworks {
         export interface Current extends Qualifier {
             configuration: "debug" | "release";
             targetFramework: "netcoreapp3.1",
-            targetRuntime: "win-x64" | "osx-x64",
+            targetRuntime: "win-x64" | "osx-x64" | "linux-x64",
         }
 
         @@public
         export const current : Current = {
             configuration: qualifier.configuration,
             targetFramework: "netcoreapp3.1",
-            targetRuntime: Context.getCurrentHost().os === "win" ? "win-x64" : "osx-x64",
+            targetRuntime: 
+                Context.getCurrentHost().os === "win"   ? "win-x64" : 
+                Context.getCurrentHost().os === "macOS" ? "osx-x64" :
+                "linux-x64",
         };
     }
 }

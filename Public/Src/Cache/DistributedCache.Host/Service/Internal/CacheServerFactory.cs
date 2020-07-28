@@ -61,7 +61,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                 distributedSettings,
                 new AbsolutePath(_arguments.DataRootPath),
                 isDistributed: !isLocal);
-            var localServerConfiguration = CreateLocalServerConfiguration(cacheConfig.LocalCasSettings.ServiceSettings, serviceConfiguration);
+            var localServerConfiguration = CreateLocalServerConfiguration(cacheConfig.LocalCasSettings.ServiceSettings, serviceConfiguration, distributedSettings);
 
             if (isLocal)
             {
@@ -78,7 +78,7 @@ namespace BuildXL.Cache.Host.Service.Internal
 
         private StartupShutdownBase CreateLocalServer(LocalServerConfiguration localServerConfiguration, DistributedContentSettings distributedSettings = null)
         {
-            Func<AbsolutePath, IContentStore> contentStoreFactory = path => ContentStoreFactory.CreateContentStore(_fileSystem, path, evictionAnnouncer: null, distributedEvictionSettings: default, contentStoreSettings: default, trimBulkAsync: null);
+            Func<AbsolutePath, IContentStore> contentStoreFactory = path => ContentStoreFactory.CreateContentStore(_fileSystem, path, contentStoreSettings: default, distributedStore: null);
 
             if (distributedSettings?.EnableMetadataStore == true)
             {
@@ -134,6 +134,12 @@ namespace BuildXL.Cache.Host.Service.Internal
                     _logger.Debug($"Using [{resolvedCacheSettings.Settings.CacheRootPath}]'s settings: {resolvedCacheSettings.Settings}");
 
                     drivesWithContentStore[resolvedCacheSettings.Drive] = factory.CreateContentStore(resolvedCacheSettings);
+                }
+
+                if (string.IsNullOrEmpty(cacheConfig.LocalCasSettings.PreferredCacheDrive))
+                {
+                    var knownDrives = string.Join(",", factory.OrderedResolvedCacheSettings.Select(cacheSetting => cacheSetting.Drive));
+                    throw new ArgumentException($"Preferred cache drive is missing, which can indicate an invalid configuration. Known drives={knownDrives}");
                 }
 
                 return new MultiplexedContentStore(drivesWithContentStore, cacheConfig.LocalCasSettings.PreferredCacheDrive);
@@ -197,19 +203,22 @@ namespace BuildXL.Cache.Host.Service.Internal
                 {
                     Database = new RocksDbContentLocationDatabaseConfiguration(path / "RocksDbMemoizationStore")
                     {
-                        MetadataGarbageCollectionEnabled = true,
+                        CleanOnInitialize = false,
                         OnFailureDeleteExistingStoreAndRetry = true,
                         LogsKeepLongTerm = true,
+                        MetadataGarbageCollectionEnabled = true,
+                        MetadataGarbageCollectionMaximumNumberOfEntriesToKeep = distributedSettings.MaximumNumberOfMetadataEntriesToStore,
                     },
                 };
-
-                config.Database.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep = distributedSettings.MaximumNumberOfMetadataEntriesToStore;
 
                 return new RocksDbMemoizationStore(_logger, SystemClock.Instance, config);
             }
         }
 
-        private static LocalServerConfiguration CreateLocalServerConfiguration(LocalCasServiceSettings localCasServiceSettings, ServiceConfiguration serviceConfiguration)
+        private static LocalServerConfiguration CreateLocalServerConfiguration(
+            LocalCasServiceSettings localCasServiceSettings,
+            ServiceConfiguration serviceConfiguration,
+            DistributedContentSettings distributedSettings)
         {
             serviceConfiguration.GrpcPort = localCasServiceSettings.GrpcPort;
             serviceConfiguration.BufferSizeForGrpcCopies = localCasServiceSettings.BufferSizeForGrpcCopies;
@@ -217,9 +226,12 @@ namespace BuildXL.Cache.Host.Service.Internal
             serviceConfiguration.ProactivePushCountLimit = localCasServiceSettings.MaxProactivePushRequestHandlers;
 
             var localContentServerConfiguration = new LocalServerConfiguration(serviceConfiguration);
+            
             ApplyIfNotNull(localCasServiceSettings.UnusedSessionTimeoutMinutes, value => localContentServerConfiguration.UnusedSessionTimeout = TimeSpan.FromMinutes(value));
             ApplyIfNotNull(localCasServiceSettings.UnusedSessionHeartbeatTimeoutMinutes, value => localContentServerConfiguration.UnusedSessionHeartbeatTimeout = TimeSpan.FromMinutes(value));
             ApplyIfNotNull(localCasServiceSettings.GrpcThreadPoolSize, value => localContentServerConfiguration.GrpcThreadPoolSize = value);
+            ApplyIfNotNull(distributedSettings?.UseUnsafeByteStringConstruction, value => localContentServerConfiguration.UseUnsafeByteStringConstruction = value);
+            ApplyIfNotNull(distributedSettings?.ShutdownEvictionBeforeHibernation, value => localContentServerConfiguration.ShutdownEvictionBeforeHibernation = value);
 
             return localContentServerConfiguration;
         }

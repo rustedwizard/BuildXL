@@ -91,25 +91,13 @@ namespace BuildXL.Cache.ContentStore.Distributed
 
             var contentHashInfo = new List<ContentHashWithSizeAndLocations>(left.ContentHashesInfo);
 
-            if (left.Count != right.Count)
-            {
-                Contract.Assert(false, $"Can't merge results of different sizes. left.Count is {left.Count}, right.Count is {right.Count}");
-            }
-
+            Contract.Check(left.Count == right.Count)?.Assert($"Can't merge results of different sizes. left.Count is {left.Count}, right.Count is {right.Count}");
             for (int i = 0; i < contentHashInfo.Count; i++)
             {
-                contentHashInfo[i] = Merge(left.ContentHashesInfo[i], right.ContentHashesInfo[i]);
+                contentHashInfo[i] = ContentHashWithSizeAndLocations.Merge(left.ContentHashesInfo[i], right.ContentHashesInfo[i]);
             }
 
             return new GetBulkLocationsResult(contentHashInfo);
-        }
-
-        private static ContentHashWithSizeAndLocations Merge(ContentHashWithSizeAndLocations left, ContentHashWithSizeAndLocations right)
-        {
-            Contract.Requires(left.ContentHash == right.ContentHash);
-            Contract.Requires(left.Size == -1 || right.Size == -1 || right.Size == left.Size);
-            var finalList = (left.Locations ?? Enumerable.Empty<MachineLocation>()).Union(right.Locations ?? Enumerable.Empty<MachineLocation>());
-            return new ContentHashWithSizeAndLocations(left.ContentHash, Math.Max(left.Size, right.Size), finalList.ToList(), ContentLocationEntry.MergeEntries(left.Entry, right.Entry));
         }
 
         /// <summary>
@@ -136,11 +124,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
 
             var contentHashInfo = new List<ContentHashWithSizeAndLocations>(left.ContentHashesInfo);
 
-            if (left.Count != right.Count)
-            {
-                Contract.Assert(false, $"Can't subtract results of different sizes. left.Count is {left.Count}, right.Count is {right.Count}");
-            }
-
+            Contract.Check(left.Count == right.Count)?.Assert($"Can't subtract results of different sizes. left.Count is {left.Count}, right.Count is {right.Count}");
             for (int i = 0; i < contentHashInfo.Count; i++)
             {
                 contentHashInfo[i] = Subtract(left.ContentHashesInfo[i], right.ContentHashesInfo[i]);

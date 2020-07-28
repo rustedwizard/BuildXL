@@ -32,9 +32,10 @@ namespace Rush {
             Script.dll,
             Core.dll,
             Sdk.dll,
+            JavaScript.dll
         ],
         runtimeContent:[
-            importFrom("BuildXL.Tools").RushGraphBuilder.deployment
+            importFrom("BuildXL.Tools").JavaScript.RushGraphBuilder.deployment
         ],
         internalsVisibleTo: [
             "Test.BuildXL.FrontEnd.Rush",

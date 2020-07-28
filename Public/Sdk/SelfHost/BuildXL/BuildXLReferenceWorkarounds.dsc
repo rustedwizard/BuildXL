@@ -1,7 +1,7 @@
 
 /** Returns a list of nuget packages required to use Task/Task<T>/ValueTask<T>. */
 @@public
-export const tplPackages = isDotNetCoreBuild ? [] : [importFrom("System.Threading.Tasks.Extensions").pkg];
+export const tplPackages = isDotNetCoreApp ? [] : [importFrom("System.Threading.Tasks.Extensions").pkg];
 
 @@public
 export const fluentAssertionsWorkaround = [
@@ -16,6 +16,12 @@ export const fluentAssertionsWorkaround = [
  * contains AAD and the mac not...
  */
 @@public
-export const visualStudioServicesArtifactServicesWorkaround = qualifier.targetRuntime === "win-x64" 
-    ? importFrom("Microsoft.VisualStudio.Services.ArtifactServices.Shared").withQualifier({targetFramework: "net472"}).pkg
-    : importFrom("Microsoft.VisualStudio.Services.ArtifactServices.Shared").pkg;
+export const visualStudioServicesArtifactServicesWorkaround = [
+    qualifier.targetRuntime === "win-x64" 
+        ? importFrom("Microsoft.VisualStudio.Services.ArtifactServices.Shared").withQualifier({targetFramework: "net472"}).pkg
+        : importFrom("Microsoft.VisualStudio.Services.ArtifactServices.Shared").pkg,
+    // Missing dependency since nuspec only declares dependencies specifically for net462. Make sure to include it here.
+    qualifier.targetFramework === "netstandard2.0"
+        ? importFrom("Microsoft.Azure.Storage.Common").withQualifier({targetFramework: "net472"}).pkg
+        : importFrom("Microsoft.Azure.Storage.Common").pkg
+];

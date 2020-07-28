@@ -169,6 +169,13 @@ namespace Tool.ServicePipDaemon
         });
 
         /// <nodoc />
+        public static readonly StrOption ArtifactLogName = RegisterDaemonConfigOption(new StrOption("artifactLogName")
+        {
+            HelpText = "Name for artifact-side log file",
+            IsRequired = false
+        });
+
+        /// <nodoc />
         public static readonly StrOption File = new StrOption("file")
         {
             ShortName = "f",
@@ -215,6 +222,25 @@ namespace Tool.ServicePipDaemon
             ShortName = IpcServerMonikerRequired.ShortName,
             HelpText = IpcServerMonikerRequired.HelpText,
             IsRequired = false,
+        };
+
+
+        /// <nodoc />
+        public static readonly StrOption Directory = new StrOption("directory")
+        {
+            ShortName = "dir",
+            HelpText = "Directory path",
+            IsRequired = false,
+            IsMultiValue = true,
+        };
+
+        /// <nodoc />
+        public static readonly StrOption DirectoryId = new StrOption("directoryId")
+        {
+            ShortName = "dirid",
+            HelpText = "BuildXL directory identifier",
+            IsRequired = false,
+            IsMultiValue = true,
         };
 
         /// <nodoc />

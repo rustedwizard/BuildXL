@@ -1058,8 +1058,8 @@ namespace BuildXL.Native.IO.Windows
         /// </remarks>
         private bool CheckSupportUnprivilegedCreateSymbolicLinkFlag()
         {
-            var tempTarget = Path.GetTempFileName();
-            var tempLink = Path.GetTempFileName();
+            var tempTarget = FileUtilities.GetTempFileName();
+            var tempLink = FileUtilities.GetTempFileName();
             DeleteFile(tempLink, true);
             CreateSymbolicLinkW(tempLink, tempTarget, SymbolicLinkTarget.File | SymbolicLinkTarget.AllowUnprivilegedCreate);
             int lastError = Marshal.GetLastWin32Error();
@@ -2783,6 +2783,45 @@ namespace BuildXL.Native.IO.Windows
         }
 
         /// <inheritdoc />
+        public bool TryGetFinalPathNameByPath(string path, out string finalPath, out int nativeErrorCode, bool volumeGuidPath = false)
+        {
+            Contract.RequiresNotNullOrEmpty(path);
+
+            SafeFileHandle handle = CreateFileW(
+                ToLongPathIfExceedMaxPath(path),
+                FileDesiredAccess.None,
+                FileShare.None,
+                lpSecurityAttributes: IntPtr.Zero,
+                dwCreationDisposition: FileMode.Open,
+                dwFlagsAndAttributes: FileFlagsAndAttributes.FileFlagBackupSemantics,
+                hTemplateFile: IntPtr.Zero);
+            
+            nativeErrorCode = Marshal.GetLastWin32Error();
+
+            if (handle.IsInvalid)
+            {
+                finalPath = string.Empty;
+                return false;
+            }
+
+            using (handle)
+            {
+                try
+                {
+                    finalPath = GetFinalPathNameByHandle(handle, volumeGuidPath);
+                    return true;
+                }
+                catch(NativeWin32Exception ex)
+                {
+                    finalPath = string.Empty;
+                    nativeErrorCode = ex.NativeErrorCode;
+
+                    return false;
+                }
+            }
+        }
+
+        /// <inheritdoc />
         public string GetFinalPathNameByHandle(SafeFileHandle handle, bool volumeGuidPath = false)
         {
             const int VolumeNameGuid = 0x1;
@@ -2792,7 +2831,8 @@ namespace BuildXL.Native.IO.Windows
             int neededSize = NativeIOConstants.MaxPath;
             do
             {
-                pathBuffer.EnsureCapacity(neededSize);
+                // Capacity must include the null terminator character
+                pathBuffer.EnsureCapacity(neededSize + 1);
                 neededSize = GetFinalPathNameByHandleW(handle, pathBuffer, pathBuffer.Capacity, flags: volumeGuidPath ? VolumeNameGuid : 0);
                 if (neededSize == 0)
                 {
@@ -2813,22 +2853,39 @@ namespace BuildXL.Native.IO.Windows
 
                 Contract.Assume(neededSize < NativeIOConstants.MaxLongPath);
             }
-            while (neededSize > pathBuffer.Capacity);
+            while (neededSize >= pathBuffer.Capacity);
 
-            const string ExpectedPrefix = LongPathPrefix;
-            Contract.Assume(pathBuffer.Length >= ExpectedPrefix.Length, "Expected a long-path prefix");
-            for (int i = 0; i < ExpectedPrefix.Length; i++)
+            bool expectedPrefixIsPresent = true;
+
+            // The returned path can either have a \\?\ or a \??\ prefix
+            // Observe LongPathPrefix and NtPathPrefix have the same length
+            if (pathBuffer.Length >= LongPathPrefix.Length)
             {
-                Contract.Assume(pathBuffer[i] == ExpectedPrefix[i], "Expected a long-path prefix");
+                for (int i = 0; i < LongPathPrefix.Length; i++)
+                {
+                    int currentChar = pathBuffer[i];
+                    if (!(currentChar == LongPathPrefix[i] || currentChar == NtPathPrefix[i]))
+                    {
+                        expectedPrefixIsPresent = false;
+                        break;
+                    }
+                }
+                
+            }
+            else
+            {
+                expectedPrefixIsPresent = false;
             }
 
-            if (volumeGuidPath)
+            // Some paths do not come back with any prefixes. This is the case for example of unix-like paths
+            // that some tools, even on Windows, decide to probe
+            if (volumeGuidPath || !expectedPrefixIsPresent)
             {
                 return pathBuffer.ToString();
             }
             else
             {
-                return pathBuffer.ToString(startIndex: ExpectedPrefix.Length, length: pathBuffer.Length - ExpectedPrefix.Length);
+                return pathBuffer.ToString(startIndex: LongPathPrefix.Length, length: pathBuffer.Length - LongPathPrefix.Length);
             }
         }
 
@@ -3049,6 +3106,24 @@ namespace BuildXL.Native.IO.Windows
             bool isEnumerationForDirectoryDeletion = false,
             bool followSymlinksToDirectories = false)
         {
+            return EnumerateDirectoryEntries(
+                directoryPath, 
+                recursive,
+                pattern, 
+                (path, name, attributes, IsReparsePointActionable) => handleEntry(path, name, attributes), 
+                isEnumerationForDirectoryDeletion, 
+                followSymlinksToDirectories);
+        }
+
+        /// <inheritdoc />
+        private EnumerateDirectoryResult EnumerateDirectoryEntries(
+            string directoryPath,
+            bool recursive,
+            string pattern,
+            Action<string /*filePath*/, string /*fileName*/, FileAttributes /*attributes*/, bool /* isActionableReparsePoint*/> handleEntry,
+            bool isEnumerationForDirectoryDeletion = false,
+            bool followSymlinksToDirectories = false)
+        {
             // directoryPath may be passed by users, so don't modify it (e.g., TrimEnd '\') because it's going to be part of the returned result.
             var searchDirectoryPath = Path.Combine(ToLongPathIfExceedMaxPath(directoryPath), "*");
 
@@ -3067,12 +3142,19 @@ namespace BuildXL.Native.IO.Windows
                     if (((findResult.DwFileAttributes & FileAttributes.Directory) == 0) ||
                         (findResult.CFileName != "." && findResult.CFileName != ".."))
                     {
+                        // When enumerating directories, it is important to not descend into actionable reparse points because
+                        // they could create loops in the directory structure and crash the build engine. Windows has several
+                        // reparse point types (tags), we make sure to not follow mount points and symbolic link ones - this is
+                        // required to properly support directory symlinks.
+                        var isActionableReparsePoint = IsReparsePointActionable(GetReparsePointTypeFromWin32FindData(findResult));
+                         
                         if (PathMatchSpecW(findResult.CFileName, pattern))
                         {
-                            handleEntry(directoryPath, findResult.CFileName, findResult.DwFileAttributes);
+                            handleEntry(directoryPath, findResult.CFileName, findResult.DwFileAttributes, isActionableReparsePoint);
                         }
 
-                        if (recursive && (findResult.DwFileAttributes & FileAttributes.Directory) != 0)
+                        // Only descend if the entry is a directory and not an actionable reparse point
+                        if (recursive && (findResult.DwFileAttributes & FileAttributes.Directory) != 0 && !isActionableReparsePoint)
                         {
                             var recursiveResult = EnumerateDirectoryEntries(
                                 Path.Combine(directoryPath, findResult.CFileName),
@@ -3139,7 +3221,9 @@ namespace BuildXL.Native.IO.Windows
                             handleFileEntry(directoryPath, findResult.CFileName, findResult.DwFileAttributes, findResult.GetFileSize());
                         }
 
-                        if (recursive && (findResult.DwFileAttributes & FileAttributes.Directory) != 0)
+                        // Only descend if the entry is a real directory, not a symlink nor file
+                        var reparsePointTag = GetReparsePointTypeFromWin32FindData(findResult);
+                        if (recursive && (findResult.DwFileAttributes & FileAttributes.Directory) != 0 && !IsReparsePointActionable(reparsePointTag))
                         {
                             var recursiveResult = EnumerateFiles(
                                 Path.Combine(directoryPath, findResult.CFileName),
@@ -3303,6 +3387,20 @@ namespace BuildXL.Native.IO.Windows
         {
             return EnumerateDirectoryEntries(directoryPath, recursive: false, handleEntry: (currentDirectory, fileName, fileAttributes) => handleEntry(fileName, fileAttributes), isEnumerationForDirectoryDeletion);
         }
+        
+        internal EnumerateDirectoryResult EnumerateDirectoryEntries(
+            string directoryPath,
+            bool recursive,
+            Action<string /*filePath*/, string /*fileName*/, FileAttributes /*attributes*/, bool /* isActionableReparsePoint*/> handleEntry,
+            bool isEnumerationForDirectoryDeletion = false)
+        {
+            return EnumerateDirectoryEntries(directoryPath, recursive, "*", handleEntry, isEnumerationForDirectoryDeletion);
+        }
+        
+        internal EnumerateDirectoryResult EnumerateDirectoryEntries(string directoryPath, Action<string, FileAttributes, bool> handleEntry, bool isEnumerationForDirectoryDeletion = false)
+        {
+            return EnumerateDirectoryEntries(directoryPath, recursive: false, handleEntry: (currentDirectory, fileName, fileAttributes, isActionableReparspoint) => handleEntry(fileName, fileAttributes, isActionableReparspoint), isEnumerationForDirectoryDeletion);
+        }
 
         /// <summary>
         /// Throws an exception for the unexpected failure of a native API.
@@ -3390,7 +3488,15 @@ namespace BuildXL.Native.IO.Windows
         /// <inheritdoc />
         public bool IsReparsePointActionable(ReparsePointType reparsePointType)
         {
-            return reparsePointType == ReparsePointType.SymLink || reparsePointType == ReparsePointType.MountPoint;
+            return reparsePointType == ReparsePointType.FileSymlink 
+                || reparsePointType == ReparsePointType.DirectorySymlink 
+                || reparsePointType == ReparsePointType.MountPoint;
+        }
+
+        /// <inheritdoc />
+        public bool IsReparsePointSymbolicLink(ReparsePointType reparsePointType)
+        {
+            return reparsePointType == ReparsePointType.FileSymlink || reparsePointType == ReparsePointType.DirectorySymlink;
         }
 
         /// <inheritdoc />
@@ -3411,19 +3517,24 @@ namespace BuildXL.Native.IO.Windows
             {
                 if (!findHandle.IsInvalid)
                 {
-                    if (findResult.DwReserved0 == (uint)DwReserved0Flag.IO_REPARSE_TAG_SYMLINK ||
-                        findResult.DwReserved0 == (uint)DwReserved0Flag.IO_REPARSE_TAG_MOUNT_POINT)
-                    {
-                        return findResult.DwReserved0 == (uint)DwReserved0Flag.IO_REPARSE_TAG_SYMLINK
-                            ? ReparsePointType.SymLink
-                            : ReparsePointType.MountPoint;
-                    }
-
-                    return ReparsePointType.NonActionable;
+                    return GetReparsePointTypeFromWin32FindData(findResult);
                 }
             }
 
             return ReparsePointType.None;
+        }
+
+        private ReparsePointType GetReparsePointTypeFromWin32FindData(WIN32_FIND_DATA findResult)
+        {
+            if (findResult.DwReserved0 == (uint)DwReserved0Flag.IO_REPARSE_TAG_SYMLINK ||
+                findResult.DwReserved0 == (uint)DwReserved0Flag.IO_REPARSE_TAG_MOUNT_POINT)
+            {
+                return findResult.DwReserved0 == (uint)DwReserved0Flag.IO_REPARSE_TAG_SYMLINK
+                    ? ((findResult.DwFileAttributes & FileAttributes.Directory) != 0) ? ReparsePointType.DirectorySymlink : ReparsePointType.FileSymlink
+                    : ReparsePointType.MountPoint;
+            }
+
+            return ReparsePointType.NonActionable;
         }
 
         /// <inheritdoc/>
@@ -4064,7 +4175,7 @@ namespace BuildXL.Native.IO.Windows
                         return maybeReparsePointType.Failure;
                     }
 
-                    if (maybeReparsePointType.Result == ReparsePointType.SymLink)
+                    if (IsReparsePointSymbolicLink(maybeReparsePointType.Result))
                     {
                         var maybeTarget = TryGetReparsePointTarget(null, resultSoFar);
 

@@ -48,7 +48,7 @@ namespace BuildXL.Cache.ContentStore.Sessions
         protected virtual bool TraceErrorsOnly => false;
 
         /// <nodoc />
-        protected ContentSessionBase(string name, CounterTracker counterTracker = null)
+        protected ContentSessionBase(string name, CounterTracker? counterTracker = null)
         {
             Name = name;
             BaseCounters = CounterTracker.CreateCounterCollection<ContentSessionBaseCounters>(counterTracker);
@@ -121,18 +121,43 @@ namespace BuildXL.Cache.ContentStore.Sessions
                     () => PinCoreAsync(operationContext, contentHashes, urgencyHint, retryCounter: BaseCounters[ContentSessionBaseCounters.PinBulkRetries], fileCounter: BaseCounters[ContentSessionBaseCounters.PinBulkFileCount]),
                     extraEndMessage: results =>
                     {
+                        var copies = 0;
                         var resultString = string.Join(",", results.Select(task =>
                         {
                             // Since all bulk operations are constructed with Task.FromResult, it is safe to just access the result;
                             var result = task.Result;
+
+                            if (result.Item is DistributedPinResult distributedPinResult)
+                            {
+                                if (distributedPinResult.CopyLocally)
+                                {
+                                    copies++;
+                                }
+                            }
+
                             return $"{contentHashes[result.Index].ToShortString()}:{result.Item}";
                         }));
 
-                        return $"Count={contentHashes.Count}, Hashes=[{resultString}]";
+                        return $"Count={contentHashes.Count}, Copies={copies}, Hashes=[{resultString}]";
                     },
                     traceOperationStarted: TraceOperationStarted,
                     traceErrorsOnly: TraceErrorsOnly,
                     counter: BaseCounters[ContentSessionBaseCounters.PinBulk]));
+        }
+
+        /// <inheritdoc />
+        public Task<IEnumerable<Task<Indexed<PinResult>>>> PinAsync(
+            Context context, 
+            IReadOnlyList<ContentHash> contentHashes, 
+            PinOperationConfiguration configuration)
+        {
+            return WithOperationContext(
+                context,
+                configuration.CancellationToken,
+                operationContext => operationContext.PerformNonResultOperationAsync(
+                    Tracer,
+                    () => PinAsync(operationContext, contentHashes, configuration.CancellationToken, configuration.UrgencyHint),
+                    extraStartMessage: $"{nameof(ContentSessionBase)} subtype {GetType().FullName} does not implement its own {nameof(IConfigurablePin)}.{nameof(IConfigurablePin.PinAsync)}. Falling back on {nameof(ContentSessionBase)}.{nameof(ContentSessionBase.PinAsync)}"));
         }
 
         /// <nodoc />
@@ -172,9 +197,14 @@ namespace BuildXL.Cache.ContentStore.Sessions
 
                                          return message + $" Gate.OccupiedCount={result.Metadata.GateOccupiedCount} Gate.Wait={result.Metadata.GateWaitTime.TotalMilliseconds}ms";
                                      },
-                    traceErrorsOnly: TraceErrorsOnly,
+                    traceErrorsOnly: TraceErrorsOnlyForPlaceFile(path),
                     counter: BaseCounters[ContentSessionBaseCounters.PlaceFile]));
         }
+
+        /// <summary>
+        /// Gets whether only errors should be traced for place file operations to the given path.
+        /// </summary>
+        protected virtual bool TraceErrorsOnlyForPlaceFile(AbsolutePath path) => TraceErrorsOnly;
 
         /// <nodoc />
         protected abstract Task<PlaceFileResult> PlaceFileCoreAsync(

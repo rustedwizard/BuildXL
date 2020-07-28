@@ -17,6 +17,15 @@ namespace BuildXL.Interop.Unix
         internal static extern int symlink(string target, string symlinkFilePath);
 
         [DllImport(LibC, SetLastError = true)]
+        internal static extern int mkfifo(string pathname, FilePermissions mode);
+
+        [DllImport(LibC, SetLastError = true)]
+        unsafe internal static extern int read(int fd, byte* buf, int bufsiz);
+
+        [DllImport(LibC, SetLastError = true)]
+        internal static extern int read(int fd, byte[] buf, int bufsiz);
+
+        [DllImport(LibC, SetLastError = true)]
         internal static extern int link(string link, string hardlinkFilePath);
 
         [DllImport(LibC, SetLastError = true)]
@@ -30,5 +39,8 @@ namespace BuildXL.Interop.Unix
 
         [DllImport(LibC, SetLastError = true)]
         internal static extern uint geteuid();
+
+        [DllImport(LibC, SetLastError = true)]
+        internal static extern int kill(int pid, int signal);
     }
 }

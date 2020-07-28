@@ -31,7 +31,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
         /// <summary>
         ///     Initializes a new instance of the <see cref="EvictResult"/> class.
         /// </summary>
-        public EvictResult(string errorMessage, string diagnostics = null)
+        public EvictResult(string errorMessage, string? diagnostics = null)
             : base(errorMessage, diagnostics)
         {
         }
@@ -39,7 +39,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
         /// <summary>
         ///     Initializes a new instance of the <see cref="EvictResult"/> class.
         /// </summary>
-        public EvictResult(Exception exception, string message = null)
+        public EvictResult(Exception exception, string? message = null)
             : base(exception, message)
         {
         }
@@ -103,7 +103,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
         /// </summary>
         public DeleteResult ToDeleteResult(ContentHash contentHash)
         {
-            if (HasException)
+            if (Exception != null)
             {
                 return new DeleteResult(DeleteResult.ResultCode.Error, Exception, ErrorMessage);
             }
@@ -112,14 +112,14 @@ namespace BuildXL.Cache.ContentStore.Tracing
             {
                 if (!SuccessfullyEvictedHash)
                 {
-                    return new DeleteResult(DeleteResult.ResultCode.ContentNotFound, contentHash, EvictedSize, PinnedSize);
+                    return new DeleteResult(DeleteResult.ResultCode.ContentNotFound, contentHash, EvictedSize);
                 }
 
-                return new DeleteResult(DeleteResult.ResultCode.Success, contentHash, EvictedSize, PinnedSize);
+                return new DeleteResult(DeleteResult.ResultCode.Success, contentHash, EvictedSize);
             }
 
             // !HasException && Succeeded && !SuccessfulyEvictedHash
-            return new DeleteResult(DeleteResult.ResultCode.ContentNotDeleted, contentHash, EvictedSize, PinnedSize);
+            return new DeleteResult(DeleteResult.ResultCode.ContentNotDeleted, contentHash, EvictedSize);
         }
 
         /// <nodoc />

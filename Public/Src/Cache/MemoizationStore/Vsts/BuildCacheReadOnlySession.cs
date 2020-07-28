@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-extern alias Async;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -475,7 +474,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         public bool ShutdownStarted { get; private set; }
 
         /// <inheritdoc />
-        public Async::System.Collections.Generic.IAsyncEnumerable<GetSelectorResult> GetSelectors(Context context, Fingerprint weakFingerprint, CancellationToken cts, UrgencyHint urgencyHint = UrgencyHint.Nominal)
+        public System.Collections.Generic.IAsyncEnumerable<GetSelectorResult> GetSelectors(Context context, Fingerprint weakFingerprint, CancellationToken cts, UrgencyHint urgencyHint = UrgencyHint.Nominal)
         {
             return this.GetSelectorsAsAsyncEnumerable(context, weakFingerprint, cts, urgencyHint);
         }
@@ -717,6 +716,21 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             }
 
             return BackingContentSession.PinAsync(context, contentHashes, cts, urgencyHint);
+        }
+
+        /// <inheritdoc />
+        public Task<IEnumerable<Task<Indexed<PinResult>>>> PinAsync(Context context, IReadOnlyList<ContentHash> contentHashes, PinOperationConfiguration config)
+        {
+            if (WriteThroughContentSession != null)
+            {
+                return Workflows.RunWithFallback(
+                    contentHashes,
+                    hashes => WriteThroughContentSession.PinAsync(context, hashes, config),
+                    hashes => BackingContentSession.PinAsync(context, hashes, config),
+                    result => result.Succeeded);
+            }
+
+            return BackingContentSession.PinAsync(context, contentHashes, config);
         }
 
         /// <inheritdoc />

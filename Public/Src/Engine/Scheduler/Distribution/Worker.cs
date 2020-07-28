@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Linq;
@@ -15,6 +17,7 @@ using BuildXL.Scheduler.Artifacts;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
+using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Threading;
 using static BuildXL.Utilities.FormattableStringEx;
@@ -39,6 +42,13 @@ namespace BuildXL.Scheduler.Distribution
         private const string CommitSemaphoreName = "BuildXL.Scheduler.Worker.TotalCommit";
 
         /// <summary>
+        /// Name of semaphore that controls the number of pips that execute in VM.
+        /// </summary>
+        private const string PipInVmSemaphoreName = "BuildXL.Scheduler.Worker.PipInVm";
+
+        private static readonly ObjectPool<List<ProcessSemaphoreInfo>> s_semaphoreInfoListPool = Pools.CreateListPool<ProcessSemaphoreInfo>();
+
+        /// <summary>
         /// Defines event handler for changes in worker resources
         /// </summary>
         internal delegate void WorkerResourceChangedHandler(Worker worker, WorkerResource resource, bool resourceIncreased);
@@ -46,6 +56,9 @@ namespace BuildXL.Scheduler.Distribution
         private int m_acquiredCacheLookupSlots;
         private int m_acquiredProcessSlots;
         private int m_acquiredIpcSlots;
+        private int m_acquiredMaterializeInputSlots;
+        private int m_acquiredPostProcessSlots;
+
         private ContentTrackingSet m_availableContent;
         private ContentTrackingSet m_availableHashes;
         private SemaphoreSet<StringId> m_workerSemaphores;
@@ -161,6 +174,11 @@ namespace BuildXL.Scheduler.Distribution
         }
 
         /// <summary>
+        /// The total amount of slots for materialize input
+        /// </summary>
+        public int TotalMaterializeInputSlots { get; protected set; }
+
+        /// <summary>
         /// Name of the RAM semaphore
         /// </summary>
         private StringId m_ramSemaphoreNameId;
@@ -200,7 +218,7 @@ namespace BuildXL.Scheduler.Distribution
         private int m_commitSemaphoreIndex = -1;
 
         /// <summary>
-        /// The total amount of available commit on the worker at the beginning of the build.
+        /// The total amount of commit memory on the worker.
         /// </summary>
         public int? TotalCommitMb
         {
@@ -266,9 +284,16 @@ namespace BuildXL.Scheduler.Distribution
         /// <remarks>
         /// If there is no historical ram usage for the process pips, we assume that 80% of memory is used if all process slots are occupied.
         /// </remarks>
-        internal int DefaultMemoryUsageMbPerProcess => (int)((TotalRamMb ?? 0) * 0.8 / Math.Max(TotalProcessSlots, Environment.ProcessorCount));
+        internal int DefaultWorkingSetMbPerProcess => (int)((TotalRamMb ?? 0) * 0.8 / Math.Max(TotalProcessSlots, Environment.ProcessorCount));
 
-        internal int DefaultCommitUsageMbPerProcess => (int)(DefaultMemoryUsageMbPerProcess * 1.5);
+        /// <summary>
+        /// Defaulf commit size usage
+        /// </summary>
+        /// <remarks>
+        /// As commit size is the total virtual address space used by process, it needs to be larger than working set.
+        /// We use 1.5 multiplier to make it larger than working set.
+        /// </remarks>
+        internal int DefaultCommitSizeMbPerProcess => (int)(DefaultWorkingSetMbPerProcess * 1.5);
 
         /// <summary>
         /// Listen for status change events on the worker
@@ -327,6 +352,11 @@ namespace BuildXL.Scheduler.Distribution
         /// Gets the name of the worker
         /// </summary>
         public string Name { get; }
+
+        /// <summary>
+        /// Which counters are being logged for tracer
+        /// </summary>
+        public readonly ConcurrentDictionary<string, byte> InitializedTracerCounters = new ConcurrentDictionary<string, byte>();
 
         /// <summary>
         /// Snapshot of pip state counts for worker
@@ -396,7 +426,7 @@ namespace BuildXL.Scheduler.Distribution
         /// <summary>
         /// Gets the currently acquired slots for all operations that can be done on a worker.
         /// </summary>
-        public int AcquiredSlots => AcquiredProcessSlots + AcquiredCacheLookupSlots + AcquiredIpcSlots;
+        public int AcquiredSlots => AcquiredProcessSlots + AcquiredCacheLookupSlots + AcquiredIpcSlots + Volatile.Read(ref m_acquiredPostProcessSlots);
 
         /// <summary>
         /// Gets the currently acquired slots for process pips.
@@ -407,6 +437,11 @@ namespace BuildXL.Scheduler.Distribution
         /// Gets the currently acquired process slots
         /// </summary>
         public int AcquiredProcessSlots => Volatile.Read(ref m_acquiredProcessSlots);
+
+        /// <summary>
+        /// Gets the currently acquired process slots
+        /// </summary>
+        public int AcquiredMaterializeInputSlots => Volatile.Read(ref m_acquiredMaterializeInputSlots);
 
         /// <summary>
         /// Gets the currently acquired cache lookup slots
@@ -552,17 +587,37 @@ namespace BuildXL.Scheduler.Distribution
                 // processes running (the number of acquired slots is 0)
                 if (AcquiredProcessSlots != 0 && AcquiredProcessSlots + processRunnablePip.Weight > (EffectiveTotalProcessSlots * loadFactor))
                 {
-                    limitingResource = WorkerResource.AvailableProcessSlots;
+                    limitingResource = MemoryResourceAvailable ? WorkerResource.AvailableProcessSlots : WorkerResource.MemoryResourceAvailable;
+                    return false;
+                }
+
+                if (AcquiredMaterializeInputSlots >= TotalMaterializeInputSlots)
+                {
+                    limitingResource = WorkerResource.AvailableMaterializeInputSlots;
                     return false;
                 }
 
                 StringId limitingResourceName = StringId.Invalid;
-                if (processRunnablePip.TryAcquireResources(m_workerSemaphores, GetAdditionalResourceInfo(processRunnablePip), out limitingResourceName))
+                var expectedMemoryCounters = GetExpectedMemoryCounters(processRunnablePip);
+                if (processRunnablePip.TryAcquireResources(m_workerSemaphores, GetAdditionalResourceInfo(processRunnablePip, expectedMemoryCounters), out limitingResourceName))
                 {
                     Interlocked.Add(ref m_acquiredProcessSlots, processRunnablePip.Weight);
                     OnWorkerResourcesChanged(WorkerResource.AvailableProcessSlots, increased: false);
+                    Interlocked.Add(ref m_acquiredPostProcessSlots, 1);
                     runnablePip.AcquiredResourceWorker = this;
+                    processRunnablePip.ExpectedMemoryCounters = expectedMemoryCounters;
                     limitingResource = null;
+
+                    if (runnablePip.Environment.InputsLazilyMaterialized)
+                    {
+                        // If inputs are lazily materialized, we need to acquire MaterializeInput slots.
+                        // Then, we can stop ChooseWorkerCpu queue when the materialize slots are full.
+                        // If inputs are not lazily materialized, there is no need to acquire MaterializeInput slots
+                        // because we do not execute MaterializeInput step for those builds such as single-machine builds.
+                        // Otherwise, the hang occurs for single machine builds where we do not lazily materialize inputs.
+                        Interlocked.Add(ref m_acquiredMaterializeInputSlots, 1);
+                    }
+
                     return true;
                 }
 
@@ -583,114 +638,181 @@ namespace BuildXL.Scheduler.Distribution
             }
         }
 
-        private ProcessSemaphoreInfo[] GetAdditionalResourceInfo(ProcessRunnablePip runnableProcess)
+        private ProcessSemaphoreInfo[] GetAdditionalResourceInfo(ProcessRunnablePip runnableProcess, ProcessMemoryCounters expectedMemoryCounters)
         {
-            if (TotalRamMb == null || runnableProcess.Environment.Configuration.Schedule.UseHistoricalRamUsageInfo != true)
+            using (var semaphoreInfoListWrapper = s_semaphoreInfoListPool.GetInstance())
             {
-                // Not tracking working set
-                return null;
-            }
+                var semaphores = semaphoreInfoListWrapper.Instance;
 
-            if (!m_ramSemaphoreNameId.IsValid)
-            {
-                m_ramSemaphoreNameId = runnableProcess.Environment.Context.StringTable.AddString(RamSemaphoreName);
-                m_ramSemaphoreIndex = m_workerSemaphores.CreateSemaphore(m_ramSemaphoreNameId, ProcessExtensions.PercentageResourceLimit);
-            }
-
-            var expectedMemoryCounters = GetExpectedMemoryCounters(runnableProcess);
-
-            var ramSemaphoreInfo = ProcessExtensions.GetNormalizedPercentageResource(
-                    m_ramSemaphoreNameId,
-                    usage: expectedMemoryCounters.PeakWorkingSetMb,
-                    total: TotalRamMb.Value);
-
-            if (runnableProcess.Environment.Configuration.Schedule.EnableHistoricCommitMemoryProjection)
-            {
-                if (!m_commitSemaphoreNameId.IsValid)
+                if (runnableProcess.Process.RequiresAdmin
+                    && runnableProcess.Environment.Configuration.Sandbox.AdminRequiredProcessExecutionMode.ExecuteExternalVm()
+                    && runnableProcess.Environment.Configuration.Sandbox.VmConcurrencyLimit > 0)
                 {
-                    m_commitSemaphoreNameId = runnableProcess.Environment.Context.StringTable.AddString(CommitSemaphoreName);
-                    m_commitSemaphoreIndex = m_workerSemaphores.CreateSemaphore(m_commitSemaphoreNameId, ProcessExtensions.PercentageResourceLimit);
+                    semaphores.Add(new ProcessSemaphoreInfo(
+                        runnableProcess.Environment.Context.StringTable.AddString(PipInVmSemaphoreName),
+                        value: 1,
+                        limit: runnableProcess.Environment.Configuration.Sandbox.VmConcurrencyLimit));
                 }
 
-                var commitSemaphoreInfo = ProcessExtensions.GetNormalizedPercentageResource(
-                    m_commitSemaphoreNameId,
-                    usage: expectedMemoryCounters.PeakCommitUsageMb,
-                    total: TotalCommitMb.Value);
+                if (TotalRamMb == null || runnableProcess.Environment.Configuration.Schedule.UseHistoricalRamUsageInfo != true)
+                {
+                    // Not tracking working set
+                    return semaphores.ToArray();
+                }
 
-                return new ProcessSemaphoreInfo[] { ramSemaphoreInfo, commitSemaphoreInfo };
+                if (!m_ramSemaphoreNameId.IsValid)
+                {
+                    m_ramSemaphoreNameId = runnableProcess.Environment.Context.StringTable.AddString(RamSemaphoreName);
+                    m_ramSemaphoreIndex = m_workerSemaphores.CreateSemaphore(m_ramSemaphoreNameId, ProcessExtensions.PercentageResourceLimit);
+                }
+
+                bool enableLessAggresiveMemoryProjection = runnableProcess.Environment.Configuration.Schedule.EnableLessAggresiveMemoryProjection;
+                var ramSemaphoreInfo = ProcessExtensions.GetNormalizedPercentageResource(
+                        m_ramSemaphoreNameId,
+                        usage: enableLessAggresiveMemoryProjection ? expectedMemoryCounters.AverageWorkingSetMb : expectedMemoryCounters.PeakWorkingSetMb,
+                        total: TotalRamMb.Value);
+
+                semaphores.Add(ramSemaphoreInfo);
+
+                if (runnableProcess.Environment.Configuration.Schedule.EnableHistoricCommitMemoryProjection)
+                {
+                    if (!m_commitSemaphoreNameId.IsValid)
+                    {
+                        m_commitSemaphoreNameId = runnableProcess.Environment.Context.StringTable.AddString(CommitSemaphoreName);
+                        m_commitSemaphoreIndex = m_workerSemaphores.CreateSemaphore(m_commitSemaphoreNameId, ProcessExtensions.PercentageResourceLimit);
+                    }
+
+                    var commitSemaphoreInfo = ProcessExtensions.GetNormalizedPercentageResource(
+                        m_commitSemaphoreNameId,
+                        usage: enableLessAggresiveMemoryProjection ? expectedMemoryCounters.AverageCommitSizeMb : expectedMemoryCounters.PeakCommitSizeMb,
+                        total: TotalCommitMb.Value);
+
+                    semaphores.Add(commitSemaphoreInfo);
+                }
+
+                return semaphores.ToArray();
             }
-
-            return new ProcessSemaphoreInfo[] { ramSemaphoreInfo};
         }
 
         /// <summary>
         /// Gets the estimated memory counters for the process
         /// </summary>
-        public ProcessMemoryCounters GetExpectedMemoryCounters(ProcessRunnablePip runnableProcess, bool isCancelledDueToResourceExhaustion = false)
+        public ProcessMemoryCounters GetExpectedMemoryCounters(ProcessRunnablePip runnableProcess)
         {
             if (TotalRamMb == null || TotalCommitMb == null)
             {
-                return ProcessMemoryCounters.CreateFromMb(0, 0, 0);
+                return ProcessMemoryCounters.CreateFromMb(0, 0, 0, 0);
             }
 
-            if (runnableProcess.ExpectedMemoryCounters == null)
+            if (runnableProcess.ExpectedMemoryCounters.HasValue)
             {
-                return ProcessMemoryCounters.CreateFromMb(
-                    peakVirtualMemoryUsageMb: DefaultMemoryUsageMbPerProcess,
-                    peakWorkingSetMb: DefaultMemoryUsageMbPerProcess,
-                    peakCommitUsageMb: DefaultCommitUsageMbPerProcess);
+                // If there is already an expected memory counters for the process,
+                // it means that we retry the process with another worker due to 
+                // several reasons including stopped worker, memory exhaustion.
+                // That's why, we should reuse the expected memory counters that 
+                // are updated with recent data from last execution.
+                return runnableProcess.ExpectedMemoryCounters.Value;
             }
 
-            var expectedMemoryCounters = runnableProcess.ExpectedMemoryCounters.Value;
+            // If there is a historic perf data, use it.
+            if (runnableProcess.HistoricPerfData != null)
+            {
+                return runnableProcess.HistoricPerfData.Value.MemoryCounters;
+            }
 
-            // If the process is cancelled due to resource exhaustion, multiply the memory usage by 1.25; otherwise use the historic memory.
-            double multiplier = isCancelledDueToResourceExhaustion ? 1.25 : 1;
-
+            // If there is no historic perf data, use the defaults for the worker.
             return ProcessMemoryCounters.CreateFromMb(
-                peakVirtualMemoryUsageMb: (int) (expectedMemoryCounters.PeakVirtualMemoryUsageMb * multiplier),
-                peakWorkingSetMb: (int)(expectedMemoryCounters.PeakWorkingSetMb * multiplier),
-                peakCommitUsageMb: (int)(expectedMemoryCounters.PeakCommitUsageMb * multiplier));
+                peakWorkingSetMb: DefaultWorkingSetMbPerProcess,
+                averageWorkingSetMb: DefaultWorkingSetMbPerProcess,
+                peakCommitSizeMb: DefaultCommitSizeMbPerProcess,
+                averageCommitSizeMb: DefaultCommitSizeMbPerProcess);
         }
 
         /// <summary>
         /// Release pip's resources after worker is done with the task
         /// </summary>
-        public void ReleaseResources(RunnablePip runnablePip)
+        public void ReleaseResources(RunnablePip runnablePip, PipExecutionStep nextStep)
         {
             Contract.Assert(runnablePip.AcquiredResourceWorker == this);
 
-            runnablePip.AcquiredResourceWorker = null;
+            var stepCompleted = runnablePip.Step;
+            bool isCancelledOrFailed = nextStep == PipExecutionStep.ChooseWorkerCpu || nextStep == PipExecutionStep.HandleResult;
 
             var processRunnablePip = runnablePip as ProcessRunnablePip;
             if (processRunnablePip != null)
             {
-                if (runnablePip.Step == PipExecutionStep.CacheLookup)
+                switch (stepCompleted)
                 {
-                    Interlocked.Decrement(ref m_acquiredCacheLookupSlots);
-                    OnWorkerResourcesChanged(WorkerResource.AvailableCacheLookupSlots, increased: true);
-                    runnablePip.SetWorker(null);
-                }
-                else
-                {
-                    Contract.Assert(processRunnablePip.Resources.HasValue);
+                    case PipExecutionStep.CacheLookup:
+                    {
+                        Interlocked.Decrement(ref m_acquiredCacheLookupSlots);
+                        OnWorkerResourcesChanged(WorkerResource.AvailableCacheLookupSlots, increased: true);
+                        runnablePip.SetWorker(null);
+                        runnablePip.AcquiredResourceWorker = null;
+                        break;
+                    }
+                    case PipExecutionStep.MaterializeInputs:
+                    {
+                        Interlocked.Decrement(ref m_acquiredMaterializeInputSlots);
+                        OnWorkerResourcesChanged(WorkerResource.AvailableMaterializeInputSlots, increased: true);
+                        if (isCancelledOrFailed)
+                        {
+                            releaseExecuteProcessSlots();
+                            releasePostProcessSlots();
+                        }
 
-                    Interlocked.Add(ref m_acquiredProcessSlots, -processRunnablePip.Weight);
+                        break;
+                    }
+                    case PipExecutionStep.ExecuteProcess:
+                    {
+                        releaseExecuteProcessSlots();
+                        if (isCancelledOrFailed)
+                        {
+                            releasePostProcessSlots();
+                        }
 
-                    var resources = processRunnablePip.Resources.Value;
-                    m_workerSemaphores.ReleaseResources(resources);
-
-                    OnWorkerResourcesChanged(WorkerResource.AvailableProcessSlots, increased: true);
+                        break;
+                    }
+                    case PipExecutionStep.PostProcess:
+                    {
+                        releasePostProcessSlots();
+                        break;
+                    }
                 }
             }
 
             if (runnablePip.PipType == PipType.Ipc)
             {
-                Interlocked.Decrement(ref m_acquiredIpcSlots);
+                if (stepCompleted == PipExecutionStep.ExecuteNonProcessPip || isCancelledOrFailed)
+                {
+                    Interlocked.Decrement(ref m_acquiredIpcSlots);
+                    runnablePip.SetWorker(null);
+                    runnablePip.AcquiredResourceWorker = null;
+                }
             }
 
             if (AcquiredSlots == 0 && Status == WorkerNodeStatus.Stopping)
             {
                 DrainCompletion.TrySetResult(true);
+            }
+
+            void releaseExecuteProcessSlots()
+            {
+                Contract.Assert(processRunnablePip.Resources.HasValue);
+
+                Interlocked.Add(ref m_acquiredProcessSlots, -processRunnablePip.Weight);
+
+                var resources = processRunnablePip.Resources.Value;
+                m_workerSemaphores.ReleaseResources(resources);
+
+                OnWorkerResourcesChanged(WorkerResource.AvailableProcessSlots, increased: true);
+            }
+
+            void releasePostProcessSlots()
+            {
+                Interlocked.Decrement(ref m_acquiredPostProcessSlots);
+                runnablePip.SetWorker(null);
+                runnablePip.AcquiredResourceWorker = null;
             }
         }
 

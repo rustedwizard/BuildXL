@@ -91,16 +91,23 @@ namespace BuildXL.Storage
         /// If the file must be hashed (cache miss), the computed hash is stored in the file content table.
         /// </summary>
         /// <exception cref="BuildXLException">Thrown if accessing the local path specified by 'key' fails.</exception>
-        public static async Task<VersionedFileIdentityAndContentInfoWithOrigin> GetAndRecordContentHashAsync(
+        public static async
+#if NET_COREAPP
+                            ValueTask<VersionedFileIdentityAndContentInfoWithOrigin>
+#else
+                            Task<VersionedFileIdentityAndContentInfoWithOrigin>
+#endif
+                                                                                     GetAndRecordContentHashAsync(
             this FileContentTable fileContentTable,
             string path,
             bool? strict = default,
-            Action<SafeFileHandle, VersionedFileIdentityAndContentInfoWithOrigin> beforeClose = null)
+            Action<SafeFileHandle, VersionedFileIdentityAndContentInfoWithOrigin> beforeClose = null,
+            bool ignoreKnownContentHash = false)
         {
             Contract.Requires(fileContentTable != null);
             Contract.Requires(path != null);
 
-            if (beforeClose == null)
+            if (beforeClose == null && !ignoreKnownContentHash)
             {
                 // Due to path mapping in FileContentTable, querying with path will be much faster than opening a handle for a stream.
                 VersionedFileIdentityAndContentInfo? existingInfo = fileContentTable.TryGetKnownContentHash(path);
@@ -123,7 +130,7 @@ namespace BuildXL.Storage
                 VersionedFileIdentityAndContentInfoWithOrigin newInfo = await fileContentTable.GetAndRecordContentHashAsync(
                     contentStream,
                     strict: strict,
-                    ignoreKnownContentHash: beforeClose == null);
+                    ignoreKnownContentHash: beforeClose == null || ignoreKnownContentHash);
 
                 beforeClose?.Invoke(contentStream.SafeFileHandle, newInfo);
 
@@ -136,7 +143,13 @@ namespace BuildXL.Storage
         /// If the file must be hashed (cache miss), the computed hash is stored in the file content table.
         /// </summary>
         /// <exception cref="BuildXLException">Thrown if accessing the local path specified by 'key' fails.</exception>
-        public static async Task<VersionedFileIdentityAndContentInfoWithOrigin> GetAndRecordContentHashAsync(
+        public static async
+#if NET_COREAPP
+                            ValueTask<VersionedFileIdentityAndContentInfoWithOrigin>
+#else
+                            Task<VersionedFileIdentityAndContentInfoWithOrigin>
+#endif
+                                                                                     GetAndRecordContentHashAsync(
             this FileContentTable fileContentTable,
             FileStream contentStream,
             bool? strict = default, 

@@ -252,6 +252,12 @@ namespace BuildXL.Cache.ContentStore.Sessions
         }
 
         /// <inheritdoc />
+        public Task<IEnumerable<Task<Indexed<PinResult>>>> PinAsync(Context context, IReadOnlyList<ContentHash> contentHashes, PinOperationConfiguration config)
+        {
+            return PinAsync(context, contentHashes, config.CancellationToken, config.UrgencyHint);
+        }
+
+        /// <inheritdoc />
         public Task<IEnumerable<Task<Indexed<PlaceFileResult>>>> PlaceFileAsync(
             Context context,
             IReadOnlyList<ContentHashWithPath> hashesWithPaths,
@@ -347,6 +353,19 @@ namespace BuildXL.Cache.ContentStore.Sessions
                     _tracer.Warning(context, $"Failed to pin contentHash=[{contentHashList[r.Index].ToShortString()}]");
                 }
             }
+        }
+
+        /// <inheritdoc />
+        public async Task<BoolResult> ShutdownEvictionAsync(Context context)
+        {
+            var sessionForStream = _sessionForStream as IHibernateContentSession;
+            var sessionForPath = _sessionForPath as IHibernateContentSession;
+
+            var result = sessionForStream != null
+                ? await sessionForStream.ShutdownEvictionAsync(context)
+                : BoolResult.Success;
+
+            return sessionForPath != null ? await sessionForPath.ShutdownEvictionAsync(context) & result : result;
         }
 
         /// <summary>

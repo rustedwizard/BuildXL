@@ -24,7 +24,7 @@ namespace BuildXL.Cache.ContentStore.Stores
     /// <summary>
     ///     An <see cref="IContentStore"/> implemented over <see cref="FileSystemContentStoreInternal"/>
     /// </summary>
-    public class FileSystemContentStore : StartupShutdownBase, IContentStore, IAcquireDirectoryLock, IRepairStore, ILocalContentStore, IStreamStore, IPushFileHandler
+    public class FileSystemContentStore : StartupShutdownBase, IContentStore, IAcquireDirectoryLock, ILocalContentStore, IStreamStore, IPushFileHandler
     {
         private const string Component = nameof(FileSystemContentStore);
 
@@ -35,11 +35,6 @@ namespace BuildXL.Cache.ContentStore.Stores
         ///     Gets the underlying store implementation.
         /// </summary>
         internal readonly FileSystemContentStoreInternal Store;
-
-        /// <summary>
-        ///     Removes provided cache content snapshot from the content location store.
-        /// </summary>
-        private readonly TrimBulkAsync _trimBulkAsync;
 
         /// <inheritdoc />
         protected override Tracer Tracer => _tracer;
@@ -71,17 +66,31 @@ namespace BuildXL.Cache.ContentStore.Stores
         }
 
         /// <summary>
+        /// Backward-compat constructor.
+        /// </summary>
+        public FileSystemContentStore(
+            IAbsFileSystem fileSystem,
+            IClock clock,
+            AbsolutePath rootPath,
+            ConfigurationModel? configurationModel = null,
+            NagleQueue<ContentHash>? nagleQueue = null,
+            DistributedEvictionSettings? distributedEvictionSettings = null,
+            TrimBulkAsync? trimBulkAsync = null,
+            ContentStoreSettings? settings = null)
+        : this(fileSystem, clock, rootPath, configurationModel, distributedEvictionSettings?.DistributedStore, settings)
+        {
+        }
+
+        /// <summary>
         ///     Initializes a new instance of the <see cref="FileSystemContentStore" /> class.
         /// </summary>
         public FileSystemContentStore(
             IAbsFileSystem fileSystem,
             IClock clock,
             AbsolutePath rootPath,
-            ConfigurationModel configurationModel = null,
-            NagleQueue<ContentHash> nagleQueue = null,
-            DistributedEvictionSettings distributedEvictionSettings = null,
-            TrimBulkAsync trimBulkAsync = null,
-            ContentStoreSettings settings = null)
+            ConfigurationModel? configurationModel,
+            IDistributedLocationStore? distributedStore,
+            ContentStoreSettings? settings)
         {
             Contract.Requires(fileSystem != null);
             Contract.Requires(clock != null);
@@ -103,11 +112,8 @@ namespace BuildXL.Cache.ContentStore.Stores
                 clock,
                 rootPath,
                 configurationModel,
-                nagleQueue,
-                distributedEvictionSettings,
-                settings);
-
-            _trimBulkAsync = trimBulkAsync;
+                settings,
+                distributedStore);
         }
 
         /// <inheritdoc />
@@ -181,21 +187,6 @@ namespace BuildXL.Cache.ContentStore.Stores
         }
 
         /// <inheritdoc />
-        public Task<StructResult<long>> RemoveFromTrackerAsync(Context context)
-        {
-            return RemoveFromTrackerCall<ContentStoreTracer>.RunAsync(_tracer, OperationContext(context), async () =>
-            {
-                if (_trimBulkAsync == null)
-                {
-                    return new StructResult<long>("Repair handling not enabled.");
-                }
-
-                var contentHashes = await Store.EnumerateContentHashesAsync();
-                return await _trimBulkAsync(context, contentHashes, CancellationToken.None, UrgencyHint.Nominal);
-            });
-        }
-
-        /// <inheritdoc />
         public Task<IReadOnlyList<ContentInfo>> GetContentInfoAsync(CancellationToken token)
         {
             // TODO: add cancellation support for EnumerateContentInfoAsync
@@ -252,7 +243,7 @@ namespace BuildXL.Cache.ContentStore.Stores
         }
 
         /// <inheritdoc />
-        public Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions = null)
+        public Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions? deleteOptions = null)
         { 
             return Store.DeleteAsync(context, contentHash, deleteOptions);
         }

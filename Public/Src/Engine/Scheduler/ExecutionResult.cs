@@ -39,8 +39,8 @@ namespace BuildXL.Scheduler
         }
 
         private PipResultStatus m_result;
-        private IReadOnlyList<ReportedFileAccess> m_fileAccessViolationsNotWhitelisted;
-        private IReadOnlyList<ReportedFileAccess> m_whitelistedFileAccessViolations;
+        private IReadOnlyList<ReportedFileAccess> m_fileAccessViolationsNotAllowlisted;
+        private IReadOnlyList<ReportedFileAccess> m_allowlistedFileAccessViolations;
         private int m_numberOfWarnings;
         private ProcessPipExecutionPerformance m_performanceInformation;
         private WeakContentFingerprint? m_weakFingerprint;
@@ -58,7 +58,7 @@ namespace BuildXL.Scheduler
         private CacheLookupPerfInfo m_cacheLookupPerfInfo;
         private IReadOnlyDictionary<string, int> m_pipProperties;
         private bool m_hasUserRetries;
-        private bool m_isCancelledDueToResourceExhaustion;
+        private RetryInfo m_retryInfo;
 
         public CacheLookupPerfInfo CacheLookupPerfInfo
         {
@@ -92,7 +92,7 @@ namespace BuildXL.Scheduler
         /// <summary>
         /// Gets observed ownership for shared dynamic directories
         /// </summary>
-        public IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>> SharedDynamicDirectoryWriteAccesses { get; private set; }
+        public IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> SharedDynamicDirectoryWriteAccesses { get; private set; }
 
         /// <summary>
         /// Observed allowed undeclared source reads
@@ -150,8 +150,11 @@ namespace BuildXL.Scheduler
         /// <summary>
         /// Sets the pip result for the process execution. An error must be logged before calling this method
         /// </summary>
-        public void SetResult(LoggingContext context, PipResultStatus status)
+        public void SetResult(LoggingContext context, 
+            PipResultStatus status, 
+            RetryInfo retryInfo = null)
         {
+            Contract.Requires(status != PipResultStatus.Succeeded || retryInfo == null, "Succeeded Pips should not have RetryInfo");
             if (status == PipResultStatus.Failed)
             {
                 Contract.Assert(context.ErrorWasLogged, "Set a failed status without logging an error");
@@ -159,41 +162,42 @@ namespace BuildXL.Scheduler
 
             EnsureUnsealed();
             InnerUnsealedState.Result = status;
+            m_retryInfo = retryInfo;
         }
 
         /// <summary>
-        /// Gets the collection of unexpected file accesses reported so far that were not whitelisted. These are 'violations'.
+        /// Gets the collection of unexpected file accesses reported so far that were not allowlisted. These are 'violations'.
         /// </summary>
-        public IReadOnlyList<ReportedFileAccess> FileAccessViolationsNotWhitelisted
+        public IReadOnlyList<ReportedFileAccess> FileAccessViolationsNotAllowlisted
         {
             get
             {
                 EnsureSealed();
-                return m_fileAccessViolationsNotWhitelisted;
+                return m_fileAccessViolationsNotAllowlisted;
             }
 
             set
             {
                 EnsureUnsealed();
-                InnerUnsealedState.FileAccessViolationsNotWhitelisted = new Optional<IReadOnlyList<ReportedFileAccess>>(value);
+                InnerUnsealedState.FileAccessViolationsNotAllowlisted = new Optional<IReadOnlyList<ReportedFileAccess>>(value);
             }
         }
 
         /// <summary>
-        /// Gets the collection of unexpected file accesses reported so far that were whitelisted.
+        /// Gets the collection of unexpected file accesses reported so far that were allowlisted.
         /// </summary>
-        public IReadOnlyList<ReportedFileAccess> WhitelistedFileAccessViolations
+        public IReadOnlyList<ReportedFileAccess> AllowlistedFileAccessViolations
         {
             get
             {
                 EnsureSealed();
-                return m_whitelistedFileAccessViolations;
+                return m_allowlistedFileAccessViolations;
             }
 
             set
             {
                 EnsureUnsealed();
-                InnerUnsealedState.WhitelistedFileAccessViolations = new Optional<IReadOnlyList<ReportedFileAccess>>(value);
+                InnerUnsealedState.AllowlistedFileAccessViolations = new Optional<IReadOnlyList<ReportedFileAccess>>(value);
             }
         }
 
@@ -400,13 +404,13 @@ namespace BuildXL.Scheduler
         }
 
         /// <summary>
-        /// Whether it is cancelled due to resource exhaustion
+        /// Whether the pip was cancelled. Returns the reason for cancellation.
         /// </summary>
-        public bool IsCancelledDueToResourceExhaustion
+        public RetryInfo RetryInfo
         {
             get
             {
-                return m_isCancelledDueToResourceExhaustion;
+                return m_retryInfo;
             }
         }
 
@@ -434,8 +438,8 @@ namespace BuildXL.Scheduler
             ReadOnlyArray<(DirectoryArtifact, ReadOnlyArray<FileArtifact>)> directoryOutputs,
             ProcessPipExecutionPerformance performanceInformation,
             WeakContentFingerprint? fingerprint,
-            IReadOnlyList<ReportedFileAccess> fileAccessViolationsNotWhitelisted,
-            IReadOnlyList<ReportedFileAccess> whitelistedFileAccessViolations,
+            IReadOnlyList<ReportedFileAccess> fileAccessViolationsNotAllowlisted,
+            IReadOnlyList<ReportedFileAccess> allowlistedFileAccessViolations,
             bool mustBeConsideredPerpetuallyDirty,
             ReadOnlyArray<AbsolutePath> dynamicallyObservedFiles,
             ReadOnlyArray<AbsolutePath> dynamicallyProbedFiles,
@@ -449,7 +453,7 @@ namespace BuildXL.Scheduler
             CacheLookupPerfInfo cacheLookupStepDurations,
             IReadOnlyDictionary<string, int> pipProperties,
             bool hasUserRetries,
-            bool isCancelledDueToResourceExhaustion)
+            RetryInfo pipRetryInfo = null)
         {
             var processExecutionResult =
                 new ExecutionResult
@@ -461,8 +465,8 @@ namespace BuildXL.Scheduler
                     SharedDynamicDirectoryWriteAccesses = ComputeSharedDynamicAccessesFrom(directoryOutputs),
                     m_performanceInformation = performanceInformation,
                     m_weakFingerprint = fingerprint,
-                    m_fileAccessViolationsNotWhitelisted = fileAccessViolationsNotWhitelisted,
-                    m_whitelistedFileAccessViolations = whitelistedFileAccessViolations,
+                    m_fileAccessViolationsNotAllowlisted = fileAccessViolationsNotAllowlisted,
+                    m_allowlistedFileAccessViolations = allowlistedFileAccessViolations,
                     m_mustBeConsideredPerpetuallyDirty = mustBeConsideredPerpetuallyDirty,
                     m_dynamicallyObservedFiles = dynamicallyObservedFiles,
                     m_dynamicallyProbedFiles = dynamicallyProbedFiles,
@@ -477,7 +481,7 @@ namespace BuildXL.Scheduler
                     m_cacheLookupPerfInfo = cacheLookupStepDurations,
                     m_pipProperties = pipProperties,
                     m_hasUserRetries = hasUserRetries,
-                    m_isCancelledDueToResourceExhaustion = isCancelledDueToResourceExhaustion
+                    m_retryInfo = pipRetryInfo,
                 };
             return processExecutionResult;
         }
@@ -504,8 +508,8 @@ namespace BuildXL.Scheduler
                 convergedCacheResult.DirectoryOutputs,
                 PerformanceInformation,
                 WeakFingerprint,
-                FileAccessViolationsNotWhitelisted,
-                WhitelistedFileAccessViolations,
+                FileAccessViolationsNotAllowlisted,
+                AllowlistedFileAccessViolations,
                 convergedCacheResult.MustBeConsideredPerpetuallyDirty,
                 // Converged result does not have values for the following dynamic observations. Use the observations from this result.
                 DynamicallyObservedFiles,
@@ -520,7 +524,7 @@ namespace BuildXL.Scheduler
                 cacheLookupStepDurations: convergedCacheResult.m_cacheLookupPerfInfo,
                 PipProperties,
                 HasUserRetries,
-                IsCancelledDueToResourceExhaustion);
+                RetryInfo);
         }
 
         /// <summary>
@@ -538,8 +542,8 @@ namespace BuildXL.Scheduler
                 DirectoryOutputs,
                 PerformanceInformation,
                 WeakFingerprint,
-                FileAccessViolationsNotWhitelisted,
-                WhitelistedFileAccessViolations,
+                FileAccessViolationsNotAllowlisted,
+                AllowlistedFileAccessViolations,
                 MustBeConsideredPerpetuallyDirty,
                 DynamicallyObservedFiles,
                 DynamicallyProbedFiles,
@@ -553,7 +557,7 @@ namespace BuildXL.Scheduler
                 CacheLookupPerfInfo,
                 PipProperties,
                 HasUserRetries,
-                IsCancelledDueToResourceExhaustion);
+                RetryInfo);
         }
 
         /// <summary>
@@ -599,7 +603,7 @@ namespace BuildXL.Scheduler
             m_numberOfWarnings = executionResult.NumberOfWarnings;
             m_pipProperties = executionResult.PipProperties;
             m_hasUserRetries = executionResult.HadUserRetries;
-            m_isCancelledDueToResourceExhaustion = executionResult.IsCancelledDueToResourceExhaustion;
+            m_retryInfo = executionResult.RetryInfo;
             InnerUnsealedState.ExecutionResult = executionResult;
             SharedDynamicDirectoryWriteAccesses = executionResult.SharedDynamicDirectoryWriteAccesses;
         }
@@ -655,12 +659,12 @@ namespace BuildXL.Scheduler
         }
 
         /// <summary>
-        /// Gets a canceled result without run information.
+        /// Gets a canceled result without run information for retry on another worker.
         /// </summary>
-        public static ExecutionResult GetCanceledNotRunResult(LoggingContext loggingContext)
+        public static ExecutionResult GetRetryableNotRunResult(LoggingContext loggingContext, RetryInfo retryInfo)
         {
             var result = new ExecutionResult();
-            result.SetResult(loggingContext, PipResultStatus.Canceled);
+            result.SetResult(loggingContext, PipResultStatus.Canceled, retryInfo);
             result.Seal();
 
             return result;
@@ -692,7 +696,7 @@ namespace BuildXL.Scheduler
                     m_result = m_unsealedState.Result.Value;
                     m_outputContent = ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.From(m_unsealedState.OutputContent);
                     m_directoryOutputs = ReadOnlyArray<(DirectoryArtifact, ReadOnlyArray<FileArtifact>)>.From(m_unsealedState.DirectoryOutputs);
-                    
+
                     // If the result from the sandbox was not reported, that means this pip came from the cache, and therefore
                     // the shared dynamic accesses need to be populated from the already reported output directories
                     if (!m_unsealedState.SandboxedResultReported)
@@ -708,18 +712,22 @@ namespace BuildXL.Scheduler
                     m_absentPathProbesUnderOutputDirectories = m_unsealedState.AbsentPathProbesUnderOutputDirectories;
 
                     SandboxedProcessPipExecutionResult processResult = m_unsealedState.ExecutionResult;
-                    if (processResult != null && processResult.Status != SandboxedProcessPipExecutionStatus.PreparationFailed)
+
+                    if (processResult != null && 
+                        processResult.Status != SandboxedProcessPipExecutionStatus.PreparationFailed && 
+                        !RetryReasonExtensions.IsPrepRetryableFailure(processResult.RetryInfo?.RetryReason))
                     {
                         if (!(processResult.Status == SandboxedProcessPipExecutionStatus.Succeeded ||
                             processResult.Status == SandboxedProcessPipExecutionStatus.ExecutionFailed ||
                             processResult.Status == SandboxedProcessPipExecutionStatus.Canceled ||
                             processResult.Status == SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed ||
-                            processResult.Status == SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed ||
-                            processResult.Status == SandboxedProcessPipExecutionStatus.MismatchedMessageCount))
+                            processResult.RetryInfo?.RetryReason == RetryReason.OutputWithNoFileAccessFailed ||
+                            processResult.RetryInfo?.RetryReason == RetryReason.MismatchedMessageCount))
                         {
-                            Contract.Assert(false, "Invalid execution status: " + processResult.Status);
+                            string retryReason = processResult.RetryInfo != null ? $", Retry Reason: {processResult.RetryInfo.RetryReason}, Retry Location: {processResult.RetryInfo.RetryLocation}" : "";
+                            Contract.Assert(false, "Invalid execution status: " + processResult.Status + retryReason);
                         }
-                            
+
                         Contract.Assert(
                             processResult.PrimaryProcessTimes != null,
                             "Execution counters are available when the status is not PreparationFailed");
@@ -727,14 +735,14 @@ namespace BuildXL.Scheduler
                             m_unsealedState.UnexpectedFileAccessCounters.HasValue,
                             "File access counters are available when the status is not PreparationFailed");
                         Contract.Assert(
-                            m_unsealedState.FileAccessViolationsNotWhitelisted.IsValid,
+                            m_unsealedState.FileAccessViolationsNotAllowlisted.IsValid,
                             "File access violations not set when the status is not PreparationFailed");
 
                         TimeSpan wallClockTime = (TimeSpan)processResult.PrimaryProcessTimes?.TotalWallClockTime;
                         JobObject.AccountingInformation jobAccounting = processResult.JobAccountingInformation ??
                                                                         default(JobObject.AccountingInformation);
-                        m_fileAccessViolationsNotWhitelisted = m_unsealedState.FileAccessViolationsNotWhitelisted.Value;
-                        m_whitelistedFileAccessViolations = m_unsealedState.WhitelistedFileAccessViolations.Value;
+                        m_fileAccessViolationsNotAllowlisted = m_unsealedState.FileAccessViolationsNotAllowlisted.Value;
+                        m_allowlistedFileAccessViolations = m_unsealedState.AllowlistedFileAccessViolations.Value;
 
                         m_performanceInformation = new ProcessPipExecutionPerformance(
                             m_result.ToExecutionLevel(),
@@ -748,7 +756,8 @@ namespace BuildXL.Scheduler
                             kernelTime: jobAccounting.KernelTime,
                             memoryCounters: jobAccounting.MemoryCounters,
                             numberOfProcesses: jobAccounting.NumberOfProcesses,
-                            workerId: 0);
+                            workerId: 0,
+                            suspendedDurationMs: processResult.SuspendedDurationMs);
                     }
                 }
                 else
@@ -767,21 +776,21 @@ namespace BuildXL.Scheduler
             }
         }
 
-        private static ReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>> ComputeSharedDynamicAccessesFrom(ReadOnlyArray<(DirectoryArtifact, ReadOnlyArray<FileArtifact>)> directoryOutputs)
+        private static ReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> ComputeSharedDynamicAccessesFrom(ReadOnlyArray<(DirectoryArtifact, ReadOnlyArray<FileArtifact>)> directoryOutputs)
         {
             var sharedDynamicAccesses = directoryOutputs
                 .Where(kvp => kvp.Item1.IsSharedOpaque)
-                .ToDictionary(kvp => kvp.Item1.Path, kvp => (IReadOnlyCollection<AbsolutePath>) kvp.Item2.SelectArray(fileArtifact => fileArtifact.Path));
+                .ToDictionary(kvp => kvp.Item1.Path, kvp => (IReadOnlyCollection<FileArtifactWithAttributes>) kvp.Item2.SelectArray(fileArtifact => FileArtifactWithAttributes.Create(fileArtifact, FileExistence.Required)));
 
-            return new ReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>>(sharedDynamicAccesses);
+            return new ReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>>(sharedDynamicAccesses);
         }
 
         private static FileMonitoringViolationCounters ConvertFileMonitoringViolationCounters(UnexpectedFileAccessCounters counters)
         {
             return new FileMonitoringViolationCounters(
-                numFileAccessViolationsNotWhitelisted: counters.NumFileAccessViolationsNotWhitelisted,
-                numFileAccessesWhitelistedAndCacheable: counters.NumFileAccessesWhitelistedAndCacheable,
-                numFileAccessesWhitelistedButNotCacheable: counters.NumFileAccessesWhitelistedButNotCacheable);
+                numFileAccessViolationsNotAllowlisted: counters.NumFileAccessViolationsNotAllowlisted,
+                numFileAccessesAllowlistedAndCacheable: counters.NumFileAccessesAllowlistedAndCacheable,
+                numFileAccessesAllowlistedButNotCacheable: counters.NumFileAccessesAllowlistedButNotCacheable);
         }
 
         private sealed class UnsealedState
@@ -789,8 +798,8 @@ namespace BuildXL.Scheduler
             private SandboxedProcessPipExecutionResult m_executionResult;
 
             public bool SandboxedResultReported { get; private set; }
-            public Optional<IReadOnlyList<ReportedFileAccess>> FileAccessViolationsNotWhitelisted;
-            public Optional<IReadOnlyList<ReportedFileAccess>> WhitelistedFileAccessViolations;
+            public Optional<IReadOnlyList<ReportedFileAccess>> FileAccessViolationsNotAllowlisted;
+            public Optional<IReadOnlyList<ReportedFileAccess>> AllowlistedFileAccessViolations;
             public PipResultStatus? Result;
             public SandboxedProcessPipExecutionResult ExecutionResult
             {

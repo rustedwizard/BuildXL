@@ -37,7 +37,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             DistributedContentCopier<T> contentCopier,
             IDistributedContentCopierHost copierHost,
             MachineLocation localMachineLocation,
-            ContentTrackerUpdater contentTrackerUpdater = null,
             DistributedContentStoreSettings settings = default)
             : base(
                 name,
@@ -46,7 +45,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 contentCopier,
                 copierHost,
                 localMachineLocation,
-                contentTrackerUpdater: contentTrackerUpdater,
                 settings)
         {
         }
@@ -65,8 +63,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 return PutCoreAsync(
                     operationContext,
                     (decoratedStreamSession, wrapStream) => decoratedStreamSession.PutFileAsync(operationContext, path, hashType, realizationMode, operationContext.Token, urgencyHint, wrapStream),
-                    session => session.PutFileAsync(operationContext, hashType, path, realizationMode, operationContext.Token, urgencyHint),
-                    path: path.Path);
+                    session => session.PutFileAsync(operationContext, hashType, path, realizationMode, operationContext.Token, urgencyHint));
             });
         }
 
@@ -86,16 +83,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 return PutCoreAsync(
                     operationContext,
                     (decoratedStreamSession, wrapStream) => decoratedStreamSession.PutFileAsync(operationContext, path, contentHash, realizationMode, operationContext.Token, urgencyHint, wrapStream),
-                    session => session.PutFileAsync(operationContext, contentHash, path, realizationMode, operationContext.Token, urgencyHint),
-                    path: path.Path);
+                    session => session.PutFileAsync(operationContext, contentHash, path, realizationMode, operationContext.Token, urgencyHint));
             });
         }
 
         private Task<PutResult> PerformPutFileGatedOperationAsync(OperationContext operationContext, Func<Task<PutResult>> func)
         {
-            return PutAndPlaceFileGate.GatedOperationAsync(async (timeWaiting) =>
+            return PutAndPlaceFileGate.GatedOperationAsync(async (timeWaiting, currentCount) =>
             {
-                var gateOccupiedCount = Settings.MaximumConcurrentPutAndPlaceFileOperations - PutAndPlaceFileGate.CurrentCount;
+                var gateOccupiedCount = Settings.MaximumConcurrentPutAndPlaceFileOperations - currentCount;
 
                 var result = await func();
                 result.MetaData = new ResultMetaData(timeWaiting, gateOccupiedCount);
@@ -139,8 +135,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
         private async Task<PutResult> PutCoreAsync(
             OperationContext context,
             Func<IDecoratedStreamContentSession, Func<Stream, Stream>, Task<PutResult>> putRecordedAsync,
-            Func<IContentSession, Task<PutResult>> putAsync,
-            string path = null)
+            Func<IContentSession, Task<PutResult>> putAsync)
         {
             PutResult result;
             if (ContentLocationStore.AreBlobsSupported && Inner is IDecoratedStreamContentSession decoratedStreamSession)
@@ -182,10 +177,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 var proactiveCopyTask = WithOperationContext(
                     context,
                     CancellationToken.None,
-                    operationContext => ProactiveCopyIfNeededAsync(operationContext, result.ContentHash, tryBuildRing: true, ProactiveCopyReason.Put, path)
+                    operationContext => ProactiveCopyIfNeededAsync(operationContext, result.ContentHash, tryBuildRing: true, CopyReason.Put)
                 );
 
-                if (Settings.InlineProactiveCopies)
+                if (Settings.InlineOperationsForTests)
                 {
                     var proactiveCopyResult = await proactiveCopyTask;
 

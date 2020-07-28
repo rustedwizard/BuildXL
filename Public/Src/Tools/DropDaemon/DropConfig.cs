@@ -38,7 +38,7 @@ namespace Tool.DropDaemon
         public TimeSpan NagleTime = DefaultNagleTimeForAssociate;
 
         /// <summary>
-        ///     Used to compute drop expiration date (<see cref="Microsoft.VisualStudio.Services.Drop.App.Core.IDropServiceClient.CreateAsync"/>).
+        ///     Used to compute drop expiration date (<see cref="Microsoft.VisualStudio.Services.Drop.App.Core.IDropServiceClient.CreateAsync(string, bool, DateTime?, bool, System.Threading.CancellationToken)"/>).
         /// </summary>
         public TimeSpan Retention { get; }
 
@@ -66,6 +66,11 @@ namespace Tool.DropDaemon
         ///     Log directory.
         /// </summary>
         public string LogDir { get; }
+
+        /// <summary>
+        ///     File name for artifact-side logs
+        /// </summary>
+        public string ArtifactLogName { get; }
 
         #endregion
 
@@ -113,7 +118,9 @@ namespace Tool.DropDaemon
             bool? verbose = null,
             bool? enableTelemetry = null,
             bool? enableChunkDedup = null,
-            string logDir = null)
+            string logDir = null,
+            string artifactLogName = null,
+            int? batchSize = null)
         {
             Name = dropName;
             Service = serviceEndpoint;
@@ -124,6 +131,8 @@ namespace Tool.DropDaemon
             EnableTelemetry = enableTelemetry ?? DefaultEnableTelemetry;
             EnableChunkDedup = enableChunkDedup ?? DefaultEnableChunkDedup;
             LogDir = logDir;
+            ArtifactLogName = artifactLogName;
+            BatchSize = batchSize ?? DefaultBatchSizeForAssociate;
         }
     }
 }

@@ -422,7 +422,9 @@ namespace BuildXL.Scheduler.IncrementalScheduling
 
             foreach (var node in pipGraph.DirectedGraph.Nodes)
             {
-                if (pipGraph.PipTable.GetPipType(node.ToPipId()) == PipType.HashSourceFile)
+                var pipId = node.ToPipId();
+                Contract.Requires(pipId.IsValid, "Invalid node detected in the Directed PipGraph. Please backup your log folders and report this bug with the log folders to domdev@microsoft.com. As a temporary fix please delete the engine cache and try again.");
+                if (pipGraph.PipTable.GetPipType(pipId) == PipType.HashSourceFile)
                 {
                     dirtyNodes.Remove(node);
                     materializedNodes.Add(node);
@@ -697,6 +699,14 @@ namespace BuildXL.Scheduler.IncrementalScheduling
         {
             if (dynamicObservationsToInvalidate.TryGetValues(path, out IEnumerable<PipStableId> pipStableIds))
             {
+                if (observationType == DynamicObservationType.ProbedFile &&
+                    FileUtilities.FileExistsNoFollow(changedPathStr))
+                {
+                    // When a probed file is renamed to a new name and renamed back to the original name, it considered as a removal of the probed file. 
+                    // We will not treat this case as a changed path
+                    return;
+                }
+
                 m_tempNodeIds.Clear();
 
                 foreach (var pipStableId in pipStableIds)

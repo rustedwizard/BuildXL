@@ -34,7 +34,7 @@ namespace Test.BuildXL.Scheduler
 
         public ScheduleRunData RunData { get; } = new ScheduleRunData();
 
-        protected override bool SandboxingWithKextEnabled => OperatingSystemHelper.IsUnixOS;
+        public bool SandboxingWithKextEnabled => OperatingSystemHelper.IsUnixOS;
 
         protected override bool InitSandboxConnectionKext(LoggingContext loggingContext, ISandboxConnection SandboxConnectionKext = null)
         {
@@ -55,10 +55,10 @@ namespace Test.BuildXL.Scheduler
             FileContentTable fileContentTable,
             EngineCache cache,
             IConfiguration configuration,
-            FileAccessWhitelist fileAccessWhitelist,
+            FileAccessAllowlist fileAccessAllowlist,
             DirectoryMembershipFingerprinterRuleSet directoryMembershipFingerprinterRules = null,
             ITempCleaner tempCleaner = null,
-            PipRuntimeTimeTable runningTimeTable = null,
+            HistoricPerfDataTable runningTimeTable = null,
             JournalState journalState = null,
             PerformanceCollector performanceCollector = null,
             string fingerprintSalt = null,
@@ -70,8 +70,8 @@ namespace Test.BuildXL.Scheduler
             DirectoryTranslator directoryTranslator = null,
             VmInitializer vmInitializer = null,
             SchedulerTestHooks testHooks = null) : base(graph, pipQueue, context, fileContentTable, cache,
-                configuration, fileAccessWhitelist, loggingContext, null, directoryMembershipFingerprinterRules,
-                tempCleaner, AsyncLazy<PipRuntimeTimeTable>.FromResult(runningTimeTable), performanceCollector, fingerprintSalt, previousInputsSalt,
+                configuration, fileAccessAllowlist, loggingContext, null, directoryMembershipFingerprinterRules,
+                tempCleaner, AsyncLazy<HistoricPerfDataTable>.FromResult(runningTimeTable), performanceCollector, fingerprintSalt, previousInputsSalt,
                 ipcProvider: ipcProvider, 
                 directoryTranslator: directoryTranslator, 
                 journalState: journalState, 

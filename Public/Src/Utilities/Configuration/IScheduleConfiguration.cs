@@ -21,7 +21,7 @@ namespace BuildXL.Utilities.Configuration
         /// Specifies the minimum amount of available RAM before scheduling is paused to allow freeing resources.
         /// NOTE: In order for scheduling to be paused, both this limit and <see cref="MaximumRamUtilizationPercentage"/> must be met.
         /// </summary>
-        int MinimumTotalAvailableRamMb { get; }
+        int? MinimumTotalAvailableRamMb { get; }
 
         /// <summary>
         /// Indicates that processes should not be cancelled and retried when machine RAM is low as specified by
@@ -195,11 +195,6 @@ namespace BuildXL.Utilities.Configuration
         int ProcessRetries { get; }
 
         /// <summary>
-        /// Create symlink lazily from the symlink definition manifest.
-        /// </summary>
-        bool UnsafeLazySymlinkCreation { get; }
-
-        /// <summary>
         /// Enables lazy materialization of write file outputs. Defaults to off (on for CloudBuild)
         /// </summary>
         /// <remarks>
@@ -211,11 +206,6 @@ namespace BuildXL.Utilities.Configuration
         /// Gets whether IPC pip output should be written to disk. Defaults to on (off for CloudBuild)
         /// </summary>
         bool WriteIpcOutput { get; }
-
-        /// <summary>
-        /// Gets the mode for reporting unexpected symlink accesses which defines when unexpected accesses are reported
-        /// </summary>
-        UnexpectedSymlinkAccessReportingMode UnexpectedSymlinkAccessReportingMode { get; }
 
         /// <summary>
         /// Stores pip outputs to cache.
@@ -313,7 +303,7 @@ namespace BuildXL.Utilities.Configuration
         /// <summary>
         /// Indicates whether historic cpu information should be used to decide the weight of process pips.
         /// </summary>
-        bool UseHistoricalCpuUsageInfo { get; }
+        bool? UseHistoricalCpuUsageInfo { get; }
 
         /// <summary>
         /// Instead of creating a random moniker for API server, use a fixed predetermined moniker.
@@ -332,10 +322,15 @@ namespace BuildXL.Utilities.Configuration
         int? MinimumDiskSpaceForPipsGb { get; }
 
         /// <summary>
-        /// Number of retires allowed per Pip failing due to low memory. 
+        /// Number of retries allowed per Pip failing due to low memory. 
         /// null represents inifinite attempts.
         /// </summary>
-        int? NumRetryFailedPipsDueToLowMemory { get; }
+        int? MaxRetriesDueToLowMemory { get; }
+
+        /// <summary>
+        /// Number of retries allowed per pip failing due to retryable failures. 
+        /// </summary>
+        int MaxRetriesDueToRetryableFailures { get; }
 
         /// <summary>
         /// Instructs the scheduler to only perform cache lookup and skip execution of pips that are cache misses.
@@ -378,5 +373,21 @@ namespace BuildXL.Utilities.Configuration
         /// Specifies the max multiplier for the number of elements in ChooseWorkerCPU queue
         /// </summary>
         double? DelayedCacheLookupMaxMultiplier { get; }
+
+        /// <summary>
+        /// Enable less aggresive memory projection by using average memory usage instead of peak usage
+        /// </summary>
+        bool EnableLessAggresiveMemoryProjection { get; }
+
+        /// <summary>
+        /// Mode for managing memory during builds
+        /// </summary>
+        ManageMemoryMode ManageMemoryMode { get; }
+
+        /// <summary>
+        /// Ignores any filters that might have been specified for composite shared opaques.
+        /// Temporary option. For A/B testing purposes only.
+        /// </summary>
+        bool? DisableCompositeOpaqueFilters { get; }
     }
 }

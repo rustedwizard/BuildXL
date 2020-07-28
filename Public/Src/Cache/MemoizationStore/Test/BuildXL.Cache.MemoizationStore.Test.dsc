@@ -33,8 +33,9 @@ namespace Test {
             importFrom("BuildXL.Utilities").dll,
             ...importFrom("BuildXL.Cache.ContentStore").redisPackages,
             importFrom("System.Data.SQLite.Core").pkg,
-            importFrom("System.Interactive.Async").pkg,
+            ...BuildXLSdk.bclAsyncPackages,
             ...BuildXLSdk.fluentAssertionsWorkaround,
+            ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
         ],
     });
 }

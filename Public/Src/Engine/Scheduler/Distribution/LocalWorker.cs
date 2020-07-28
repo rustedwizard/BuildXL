@@ -10,6 +10,7 @@ using BuildXL.Pips.Operations;
 using BuildXL.Processes;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Storage.Fingerprints;
+using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Tasks;
 
 namespace BuildXL.Scheduler.Distribution
@@ -38,11 +39,12 @@ namespace BuildXL.Scheduler.Distribution
         /// <summary>
         /// Constructor
         /// </summary>
-        public LocalWorker(int totalProcessSlots, int totalCacheLookupSlots, IDetoursEventListener detoursListener)
+        public LocalWorker(IScheduleConfiguration scheduleConfig, IDetoursEventListener detoursListener)
             : base(workerId: 0, name: "#0 (Local)")
         {
-            TotalProcessSlots = totalProcessSlots;
-            TotalCacheLookupSlots = totalCacheLookupSlots;
+            TotalProcessSlots = scheduleConfig.MaxProcesses;
+            TotalCacheLookupSlots = scheduleConfig.MaxCacheLookup;
+            TotalMaterializeInputSlots = scheduleConfig.MaxMaterialize;
             Start();
             m_detoursListener = detoursListener;
         }
@@ -93,7 +95,7 @@ namespace BuildXL.Scheduler.Distribution
                     process,
                     fingerprint,
                     processIdListener: UpdateCurrentlyRunningPipsCount,
-                    expectedMemoryCounters: GetExpectedMemoryCounters(processRunnable),
+                    expectedMemoryCounters: processRunnable.ExpectedMemoryCounters.Value,
                     detoursEventListener: m_detoursListener);
                 processRunnable.SetExecutionResult(executionResult);
 

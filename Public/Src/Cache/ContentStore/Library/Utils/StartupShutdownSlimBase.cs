@@ -19,6 +19,11 @@ namespace BuildXL.Cache.ContentStore.Utils
     /// </summary>
     public abstract class StartupShutdownSlimBase : IStartupShutdownSlim
     {
+        // Tracking instance id to simplify debugging of double shutdown issues.
+        private static int CurrentInstanceId;
+        private static int GetCurrentInstanceId() => Interlocked.Increment(ref CurrentInstanceId);
+        private readonly int _instanceId = GetCurrentInstanceId();
+
         private readonly CancellationTokenSource _shutdownStartedCancellationTokenSource = new CancellationTokenSource();
 
         /// <nodoc />
@@ -33,7 +38,7 @@ namespace BuildXL.Cache.ContentStore.Utils
         public virtual bool AllowMultipleStartupAndShutdowns => false;
 
         private int _refCount = 0;
-        private Lazy<Task<BoolResult>> _lazyStartupTask;
+        private Lazy<Task<BoolResult>>? _lazyStartupTask;
 
         /// <inheritdoc />
         public virtual bool StartupCompleted { get; private set; }
@@ -45,7 +50,7 @@ namespace BuildXL.Cache.ContentStore.Utils
         public virtual bool ShutdownCompleted { get; private set; }
 
         /// <nodoc />
-        protected virtual Func<BoolResult, string> ExtraStartupMessageFactory => null;
+        protected virtual Func<BoolResult, string>? ExtraStartupMessageFactory => null;
 
         /// <inheritdoc />
         public bool ShutdownStarted => _shutdownStartedCancellationTokenSource.Token.IsCancellationRequested;
@@ -74,11 +79,10 @@ namespace BuildXL.Cache.ContentStore.Utils
             {
                 Interlocked.Increment(ref _refCount);
             }
-            else if (StartupStarted)
+            else 
             {
-                Contract.Assert(false, $"Cannot start '{Tracer.Name}' because StartupAsync method was already called on this instance.");
+                Contract.Check(!StartupStarted)?.Assert($"Cannot start '{Tracer.Name}' because StartupAsync method was already called on this instance.");
             }
-
             StartupStarted = true;
 
             LazyInitializer.EnsureInitialized(ref _lazyStartupTask, () =>
@@ -88,13 +92,13 @@ namespace BuildXL.Cache.ContentStore.Utils
                     var result = await operationContext.PerformInitializationAsync(
                         Tracer,
                         () => StartupCoreAsync(operationContext),
-                        endMessageFactory: ExtraStartupMessageFactory);
+                        endMessageFactory: r => $"Id={_instanceId}." + ExtraStartupMessageFactory?.Invoke(r));
                     StartupCompleted = true;
 
                     return result;
                 }));
 
-            return await _lazyStartupTask.Value;
+            return await _lazyStartupTask!.Value;
         }
 
         /// <inheritdoc />
@@ -109,11 +113,7 @@ namespace BuildXL.Cache.ContentStore.Utils
                 }
             }
 
-            if (ShutdownStarted)
-            {
-                Contract.Assert(false, $"Cannot shut down '{Tracer.Name}' because ShutdownAsync method was already called on this instance.");
-            }
-
+            Contract.Check(!ShutdownStarted)?.Assert($"Cannot shut down '{Tracer.Name}' because ShutdownAsync method was already called on the instance with Id={_instanceId}.");
             TriggerShutdownStarted();
 
             if (ShutdownCompleted)
@@ -124,7 +124,8 @@ namespace BuildXL.Cache.ContentStore.Utils
             var operationContext = new OperationContext(context);
             var result = await operationContext.PerformOperationAsync(
                 Tracer,
-                () => ShutdownCoreAsync(operationContext));
+                () => ShutdownCoreAsync(operationContext),
+                extraEndMessage: r => $"Id={_instanceId}.");
             ShutdownCompleted = true;
 
             return result;
@@ -160,7 +161,7 @@ namespace BuildXL.Cache.ContentStore.Utils
         protected virtual Task<BoolResult> ShutdownCoreAsync(OperationContext context) => BoolResult.SuccessTask;
 
         /// <nodoc />
-        protected virtual void ThrowIfInvalid([CallerMemberName]string operation = null)
+        protected virtual void ThrowIfInvalid([CallerMemberName]string? operation = null)
         {
             if (!StartupCompleted)
             {

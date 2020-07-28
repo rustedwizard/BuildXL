@@ -7,6 +7,7 @@ namespace Test.Tool.DropDaemon {
     export const dll = !BuildXLSdk.Flags.isMicrosoftInternal ? undefined : BuildXLSdk.test({
         assemblyName: "Test.Tool.DropDaemon",
         sources: globR(d`.`, "*.cs"),
+        appConfig: f`Test.Tool.DropDaemon.dll.config`,
         references: [
             importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
             importFrom("BuildXL.Cache.ContentStore").UtilitiesCore.dll,
@@ -24,11 +25,13 @@ namespace Test.Tool.DropDaemon {
             importFrom("Drop.App.Core").pkg,
             importFrom("Drop.Client").pkg,
             importFrom("Microsoft.AspNet.WebApi.Client").pkg,
-            BuildXLSdk.visualStudioServicesArtifactServicesWorkaround,
+            ...BuildXLSdk.visualStudioServicesArtifactServicesWorkaround,
             importFrom("Microsoft.VisualStudio.Services.BlobStore.Client").pkg,
+            importFrom("Microsoft.VisualStudio.Services.BlobStore.Client.Cache").pkg,
             importFrom("Microsoft.IdentityModel.Clients.ActiveDirectory").pkg,
             importFrom("Microsoft.VisualStudio.Services.Client").pkg,
             importFrom("Microsoft.VisualStudio.Services.InteractiveClient").pkg,
+            importFrom("Microsoft.Azure.Storage.Common").pkg,
         ]
     });
 }

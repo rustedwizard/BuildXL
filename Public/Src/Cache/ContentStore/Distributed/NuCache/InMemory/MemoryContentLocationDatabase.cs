@@ -70,23 +70,23 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.InMemory
             _map.AddOrUpdate(hash, key => entry, (key, old) => entry);
         }
 
-
         /// <inheritdoc />
         public override Possible<bool> TryUpsert(
             OperationContext context,
             StrongFingerprint strongFingerprint,
             ContentHashListWithDeterminism replacement,
-            Func<MetadataEntry, bool> shouldReplace)
+            Func<MetadataEntry, bool> shouldReplace,
+            DateTime? lastAccessTimeUtc)
         {
             throw new NotImplementedException();
         }
 
         /// <inheritdoc />
-        public override GetContentHashListResult GetContentHashList(OperationContext context, StrongFingerprint strongFingerprint)
+        public override Result<MetadataEntry?> GetMetadataEntry(OperationContext context, StrongFingerprint strongFingerprint, bool touch)
         {
             throw new NotImplementedException();
         }
-        
+
         /// <inheritdoc />
         public override Result<IReadOnlyList<Selector>> GetSelectors(OperationContext context, Fingerprint weakFingerprint)
         {
@@ -154,11 +154,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.InMemory
             }
 
             return ContentLocationEntry.Missing;
-        }
-
-        /// <inheritdoc />
-        protected override void UpdateClusterStateCore(OperationContext context, ClusterState clusterState, bool write)
-        {
         }
 
         /// <inheritdoc />

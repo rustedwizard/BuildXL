@@ -238,12 +238,12 @@ namespace ContentStoreTest.Stores
                 throw new NotImplementedException();
             }
 
-            public Task<Stream> OpenAsync(AbsolutePath path, FileAccess fileAccess, FileMode fileMode, FileShare share, FileOptions options, int bufferSize)
+            public Task<StreamWithLength?> OpenAsync(AbsolutePath path, FileAccess fileAccess, FileMode fileMode, FileShare share, FileOptions options, int bufferSize)
             {
                 throw new NotImplementedException();
             }
 
-            public Task<Stream> OpenReadOnlyAsync(AbsolutePath path, FileShare share)
+            public Task<StreamWithLength?> OpenReadOnlyAsync(AbsolutePath path, FileShare share)
             {
                 throw new NotImplementedException();
             }
@@ -321,6 +321,11 @@ namespace ContentStoreTest.Stores
             }
 
             public Task<GetContentSizeResult> GetContentSizeAndCheckPinnedAsync(Context context, ContentHash contentHash, PinRequest? pinRequest = null)
+            {
+                throw new NotImplementedException();
+            }
+
+            public Task<BoolResult> ShutdownEvictionAsync(Context context)
             {
                 throw new NotImplementedException();
             }

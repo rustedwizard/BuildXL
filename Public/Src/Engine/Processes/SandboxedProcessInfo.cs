@@ -134,8 +134,8 @@ namespace BuildXL.Processes
             SidebandWriter sidebandWriter = null,
             bool createJobObjectForCurrentProcess = true)
         {
-            Contract.Requires(pathTable != null);
-            Contract.Requires(fileName != null);
+            Contract.RequiresNotNull(pathTable);
+            Contract.RequiresNotNull(fileName);
 
             PathTable = pathTable;
             FileAccessManifest = fileAccessManifest;
@@ -183,8 +183,8 @@ namespace BuildXL.Processes
                   sandboxConnection,
                   createJobObjectForCurrentProcess: createJobObjectForCurrentProcess)
         {
-            Contract.Requires(pathTable != null);
-            Contract.Requires(fileName != null);
+            Contract.RequiresNotNull(pathTable);
+            Contract.RequiresNotNull(fileName);
         }
 
         /// <summary>
@@ -199,7 +199,7 @@ namespace BuildXL.Processes
         public PathTable PathTable { get; }
 
         /// <summary>
-        /// White-list of allowed file accesses, and general file access reporting flags
+        /// Allow-list of allowed file accesses, and general file access reporting flags
         /// </summary>
         public FileAccessManifest FileAccessManifest { get; }
 
@@ -254,6 +254,14 @@ namespace BuildXL.Processes
         /// Working directory (can be null)
         /// </summary>
         public string WorkingDirectory { get; set; }
+
+        /// <summary>
+        /// Root jail information (can be null)
+        /// </summary>
+        /// <remarks>
+        /// Currently implemented for Mac/Linux only using <c>chroot</c> and requires NOPASSWD sudo privileges.
+        /// </remarks>
+        public RootJailInfo? RootJailInfo { get; set; } 
 
         /// <summary>
         /// Environment variables (can be null)
@@ -312,6 +320,11 @@ namespace BuildXL.Processes
         /// Number of bytes for output buffers
         /// </summary>
         public static int BufferSize => BufSize;
+
+        /// <summary>
+        /// File where Detours log failure message, e.g., communication failure, injection failure, etc.
+        /// </summary>
+        public string DetoursFailureFile { get; set; }
 
         /// <summary>
         /// Gets the command line, comprised of the executable file name and the arguments.
@@ -431,7 +444,7 @@ namespace BuildXL.Processes
         public string Provenance => $"[Pip{PipSemiStableHash:X16} -- {PipDescription}] ";
 
         /// <summary>
-        /// Overrides <see cref="SandboxedProcessMac.ReportQueueProcessTimeout"/> when running tests
+        /// Overrides <see cref="SandboxedProcessUnix.ReportQueueProcessTimeout"/> when running tests
         /// </summary>
         public TimeSpan? ReportQueueProcessTimeoutForTests { get; internal set; }
 
@@ -450,6 +463,7 @@ namespace BuildXL.Processes
                 writer.Write(StandardOutputEncoding, (w, v) => w.Write(v));
                 writer.Write(StandardErrorEncoding, (w, v) => w.Write(v));
                 writer.WriteNullableString(WorkingDirectory);
+                writer.Write(RootJailInfo, (w, v) => v.Serialize(w));
                 writer.Write(
                     EnvironmentVariables,
                     (w, v) => w.WriteReadOnlyList(
@@ -494,6 +508,7 @@ namespace BuildXL.Processes
 
                 writer.Write(SidebandWriter, (w, v) => v.Serialize(w));
                 writer.Write(CreateJobObjectForCurrentProcess);
+                writer.WriteNullableString(DetoursFailureFile);
 
                 // File access manifest should be serialized the last.
                 writer.Write(FileAccessManifest, (w, v) => FileAccessManifest.Serialize(stream));
@@ -513,6 +528,7 @@ namespace BuildXL.Processes
                 Encoding standardOutputEncoding = reader.ReadNullable(r => r.ReadEncoding());
                 Encoding standardErrorEncoding = reader.ReadNullable(r => r.ReadEncoding());
                 string workingDirectory = reader.ReadNullableString();
+                RootJailInfo? rootJailInfo = reader.ReadNullableStruct(r => BuildXL.Processes.RootJailInfo.Deserialize(r));
                 IBuildParameters buildParameters = null;
                 var envVars = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => new KeyValuePair<string, string>(r2.ReadString(), r2.ReadString())));
                 if (envVars != null)
@@ -535,6 +551,7 @@ namespace BuildXL.Processes
 
                 var sidebandWritter = reader.ReadNullable(r => SidebandWriter.Deserialize(r));
                 var createJobObjectForCurrentProcess = reader.ReadBoolean();
+                var detoursFailureFile = reader.ReadNullableString();
                 var fam = reader.ReadNullable(r => FileAccessManifest.Deserialize(stream));
 
                 return new SandboxedProcessInfo(
@@ -556,6 +573,7 @@ namespace BuildXL.Processes
                     StandardOutputEncoding = standardOutputEncoding,
                     StandardErrorEncoding = standardErrorEncoding,
                     WorkingDirectory = workingDirectory,
+                    RootJailInfo = rootJailInfo,
                     EnvironmentVariables = buildParameters,
                     AllowedSurvivingChildProcessNames = allowedSurvivingChildNames,
                     MaxLengthInMemory = maxLengthInMemory,
@@ -568,7 +586,8 @@ namespace BuildXL.Processes
                     SandboxedProcessStandardFiles = sandboxedProcessStandardFiles,
                     StandardInputSourceInfo = standardInputSourceInfo,
                     StandardObserverDescriptor = standardObserverDescriptor,
-                    RedirectedTempFolders = redirectedTempFolder
+                    RedirectedTempFolders = redirectedTempFolder,
+                    DetoursFailureFile = detoursFailureFile
                 };
             }
         }

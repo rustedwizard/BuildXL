@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Diagnostics.ContractsLight;
+using System.Text.RegularExpressions;
 using BuildXL.FrontEnd.Script.Values;
 using BuildXL.Pips;
 using BuildXL.Utilities;
@@ -173,6 +174,18 @@ namespace BuildXL.FrontEnd.Script.Evaluator
         }
 
         /// <nodoc />
+        public static ObjectLiteral AsObjectLiteralOptional(EvaluationStackFrame args, int index)
+        {
+            if (index >= args.Length || args[index].IsUndefined)
+            {
+                return null;
+            }
+
+            CheckArgumentIndex(args, index);
+            return Converter.ExpectObjectLiteral(args[index], context: new ConversionContext(pos: checked(index + 1)));
+        }
+
+        /// <nodoc />
         public static ArrayLiteral AsArrayLiteral(EvaluationStackFrame args, int index)
         {
             CheckArgumentIndex(args, index);
@@ -311,6 +324,27 @@ namespace BuildXL.FrontEnd.Script.Evaluator
             }
 
             return AsArrayLiteral(args, index);
+        }
+
+
+        /// <nodoc />
+        public static Regex AsRegex(EvaluationStackFrame args, int index)
+        {
+            Contract.Requires(args != null);
+
+            CheckArgumentIndex(args, index);
+            return Converter.ExpectRegex(args[index], context: new ConversionContext(pos: checked(index + 1)));
+        }
+
+        /// <nodoc />
+        public static Regex AsRegexOptional(EvaluationStackFrame args, int index)
+        {
+            if (index >= args.Length || args[index].IsUndefined)
+            {
+                return null;
+            }
+
+            return AsRegex(args, index);
         }
     }
 }

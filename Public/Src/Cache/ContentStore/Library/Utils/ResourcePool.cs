@@ -22,7 +22,9 @@ namespace BuildXL.Cache.ContentStore.Utils
     /// </summary>
     /// <typeparam name="TKey">Identifier for a given resource.</typeparam>
     /// <typeparam name="TObject">Type of the pooled object.</typeparam>
-    public class ResourcePool<TKey, TObject> : IDisposable where TObject : IStartupShutdownSlim
+    public class ResourcePool<TKey, TObject> : IDisposable
+        where TKey: notnull
+        where TObject : IStartupShutdownSlim
     {
         private readonly int _maxResourceCount;
         private readonly int _maximumAgeInMinutes;
@@ -45,7 +47,7 @@ namespace BuildXL.Cache.ContentStore.Utils
         /// <param name="maxAgeMinutes">Maximum age of cached clients.</param>
         /// <param name="resourceFactory">Constructor for a new resource.</param>
         /// <param name="clock">Clock to use for TTL</param>
-        public ResourcePool(Context context, int maxResourceCount, int maxAgeMinutes, Func<TKey, TObject> resourceFactory, IClock clock = null)
+        public ResourcePool(Context context, int maxResourceCount, int maxAgeMinutes, Func<TKey, TObject> resourceFactory, IClock? clock = null)
         {
             _context = context;
             _maxResourceCount = maxResourceCount;
@@ -59,12 +61,19 @@ namespace BuildXL.Cache.ContentStore.Utils
         /// <summary>
         /// Use an existing resource if possible, else create a new one.
         /// </summary>
-        /// <param name="key">Key to lookup an exisiting resource, if one exists.</param>
+        /// <param name="key">Key to lookup an existing resource, if one exists.</param>
+        /// <exception cref="ObjectDisposedException">If the pool has already been disposed</exception>
         public async Task<ResourceWrapper<TObject>> CreateAsync(TKey key)
         {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(objectName: _tracer.Name, message: "Attempt to obtain resource after dispose");
+            }
+
             using (Counter[ResourcePoolCounters.CreationTime].Start())
             {
-                using (await _semaphore.WaitToken())
+                // NOTE: if dispose has happened at this point, we will fail to take the semaphore
+                using (await _semaphore.WaitTokenAsync())
                 {
                     // Remove anything that has expired.
                     await CleanupAsync(force: false, numberToRelease: int.MaxValue);
@@ -141,25 +150,20 @@ namespace BuildXL.Cache.ContentStore.Utils
                     {
                         _resourceDict.Remove(kvp.Key);
 
-                        // Cannot await within a lock
+                        // Shutting down all the resources in parallel
                         shutdownTasks.Add(resourceValue.ShutdownAsync(_context));
                         amountRemoved++;
                     }
                 }
 
-                var allTasks = Task.WhenAll(shutdownTasks.ToArray());
-                try
+                var shutdownTasksArray = shutdownTasks.ToArray();
+                if (shutdownTasksArray.Length == 0)
                 {
-                    await allTasks;
+                    // Early return to avoid extra async steps and unnecessary traces that we "cleaned up 0" resources.
+                    return;
                 }
-#pragma warning disable ERP022 // Unobserved exception in generic exception handler
-                catch (Exception)
-                {
-                    // If Task.WhenAll throws in an await, it unwraps the AggregateException and only
-                    // throws the first inner exception. We want to see all failed shutdowns.
-                    _tracer.Error(_context, $"Shutdown of unused resource failed after removal from resource cache. {allTasks.Exception}");
-                }
-#pragma warning restore ERP022 // Unobserved exception in generic exception handler
+
+                await ShutdownGrpcClientsAsync(shutdownTasksArray);
 
                 Counter[ResourcePoolCounters.Cleaned].Add(shutdownTasks.Count);
 
@@ -180,37 +184,34 @@ namespace BuildXL.Cache.ContentStore.Utils
                 return;
             }
 
-            _disposed = true;
+            using (_semaphore.WaitToken())
+            {
+                _disposed = true;
+
+                var shutdownTasks = _resourceDict.Select(resourceKvp => resourceKvp.Value.Value.ShutdownAsync(_context)).ToArray();
+                ShutdownGrpcClientsAsync(shutdownTasks).GetAwaiter().GetResult();
+            }
 
             _tracer.Debug(_context, string.Join(Environment.NewLine, Counter.AsStatistics(nameof(ResourcePool<TKey, TObject>)).Select(kvp => $"{kvp.Key} : {kvp.Value}")));
 
-            if (_semaphore.CurrentCount == 0)
-            {
-                throw new InvalidOperationException("No one should be holding the lock on Dispose");
-            }
+            _semaphore.Dispose();
+        }
 
-            var taskList = new List<Task>();
-            foreach (var resourceKvp in _resourceDict)
-            {
-                // Check boolresult.
-                taskList.Add(resourceKvp.Value.Value.ShutdownAsync(_context));
-            }
-
-            var allTasks = Task.WhenAll(taskList.ToArray());
+        private async Task ShutdownGrpcClientsAsync(Task<BoolResult>[] shutdownTasks)
+        {
+            var allTasks = Task.WhenAll(shutdownTasks);
             try
             {
-                allTasks.GetAwaiter().GetResult();
+                // If the shutdown failed with unsuccessful BoolResult, then the result is already traced. No need to any extra steps.
+                await allTasks;
             }
-#pragma warning disable ERP022 // Unobserved exception in generic exception handler
-            catch (Exception)
+            catch (Exception e)
             {
+                new ErrorResult(e).IgnoreFailure();
                 // If Task.WhenAll throws in an await, it unwraps the AggregateException and only
                 // throws the first inner exception. We want to see all failed shutdowns.
-                _tracer.Error(_context, $"Shutdown of unused resources failed after removal from resource cache. {allTasks.Exception}");
+                _tracer.Error(_context, $"Shutdown of unused resource failed after removal from resource cache. {allTasks.Exception}");
             }
-#pragma warning restore ERP022 // Unobserved exception in generic exception handler
-            
-            _semaphore.Dispose();
         }
     }
 }

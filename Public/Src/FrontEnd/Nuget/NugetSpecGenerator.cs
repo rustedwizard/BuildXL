@@ -32,7 +32,7 @@ namespace BuildXL.FrontEnd.Nuget
         private readonly PathAtom m_pdbExtension;
 
         /// <summary>Current spec generation format version</summary>
-        public const int SpecGenerationFormatVersion = 6;
+        public const int SpecGenerationFormatVersion = 8;
 
         /// <nodoc />
         public NugetSpecGenerator(PathTable pathTable, NugetAnalyzedPackage analyzedPackage)
@@ -185,7 +185,7 @@ namespace BuildXL.FrontEnd.Nuget
                         new CaseClause(
                             new LiteralExpression(monikers.Last().ToString(m_pathTable.StringTable)),
                             new ReturnStatement(
-                                new CallExpression(
+                                Call(
                                     PropertyAccess("Managed", "Factory", "createNugetPackage"),
                                     new LiteralExpression(analyzedPackage.Id),
                                     new LiteralExpression(analyzedPackage.Version),
@@ -261,7 +261,8 @@ namespace BuildXL.FrontEnd.Nuget
                 pkgType = new TypeReferenceNode("NugetPackage");
                 pkgExpression = ObjectLiteral(
                     (name: "contents", PropertyAccess("Contents", "all")),
-                    (name: "dependencies", Array(package.Dependencies.Select(CreateImportFromForDependency).ToArray())));
+                    (name: "dependencies", Array(package.Dependencies.Select(CreateImportFromForDependency).ToArray())),
+                    (name: "version", new LiteralExpression(package.Version)));
             }
 
             return
@@ -385,7 +386,7 @@ namespace BuildXL.FrontEnd.Nuget
             var pdbPath = binaryFile.ChangeExtension(m_pathTable.StringTable, m_pdbExtension);
             var xmlPath = binaryFile.ChangeExtension(m_pathTable.StringTable, m_xmlExtension);
 
-            return new CallExpression(
+            return Call(
                 PropertyAccess("Managed", "Factory", "createBinaryFromFiles"),
                 GetFileExpressionForPath(binaryFile),
                 m_packageOnDisk.Contents.Contains(pdbPath) ? GetFileExpressionForPath(pdbPath) : null,

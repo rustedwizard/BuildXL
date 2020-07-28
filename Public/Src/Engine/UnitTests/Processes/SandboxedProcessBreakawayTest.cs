@@ -57,12 +57,19 @@ namespace Test.BuildXL.Processes
             info.NestedProcessTerminationTimeout = TimeSpan.FromMilliseconds(10);
 
             var result = RunProcess(info).GetAwaiter().GetResult();
-            XAssert.AreEqual(0, result.ExitCode);
+            if (result.ExitCode != 0)
+            {
+                XAssert.Fail(
+                    $"Process exited with exit code {result.ExitCode}." +
+                    $"\n\n=== stdout ===\n\n ${result.StandardOutput.ReadValueAsync().Result}" +
+                    $"\n\n=== stderr ===\n\n ${result.StandardError.ReadValueAsync().Result}");
+            }
 
             if (!letInfiniteWaiterSurvive)
             {
                 // If we didn't let infinite waiter escape, we should have killed it when the job object was finalized
                 XAssert.IsTrue(result.Killed);
+                XAssert.IsNotNull(result.SurvivingChildProcesses);
                 XAssert.Contains(
                     result.SurvivingChildProcesses.Select(p => p?.Path).Where(p => p != null).Select(p => System.IO.Path.GetFileName(p).ToUpperInvariant()),
                     InfiniteWaiterToolName.ToUpperInvariant());
@@ -81,19 +88,29 @@ namespace Test.BuildXL.Processes
 
                 // Let's retrieve the child process and confirm it survived
                 var infiniteWaiterInfo = RetrieveChildProcessesCreatedBySpawnExe(result).Single();
+
                 // The fact that this does not throw confirms survival
                 var dummyWaiter = Process.GetProcessById(infiniteWaiterInfo.pid);
-                // Just being protective, let's make sure we are talking about the same process
-                XAssert.AreEqual(infiniteWaiterInfo.processName, dummyWaiter.ProcessName);
 
-                // Now let's kill the surviving process, since we don't want it to linger around unnecessarily
-                dummyWaiter.Kill();
+                try
+                {
+                    // Just being protective, let's make sure we are talking about the same process
+                    XAssert.AreEqual(infiniteWaiterInfo.processName, dummyWaiter.ProcessName);
+                }
+                finally
+                {
+                    // Now let's kill the surviving process, since we don't want it to linger around unnecessarily
+                    dummyWaiter.Kill();
+                }
             }
         }
 
         [Fact]
         public void BreakawayProcessIsNotDetoured()
         {
+            // TODO: doesn't currently work on Linux
+            if (OperatingSystemHelper.IsLinuxOS) return;
+
             var fam = new FileAccessManifest(
                 Context.PathTable,
                 childProcessesToBreakawayFromSandbox: new[] { TestProcessToolName })

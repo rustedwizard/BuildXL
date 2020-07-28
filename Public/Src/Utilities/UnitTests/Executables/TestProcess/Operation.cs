@@ -124,6 +124,11 @@ namespace Test.BuildXL.Executables.TestProcess
             CopyFile,
 
             /// <summary>
+            /// Type for copying a symbolic link
+            /// </summary>
+            CopySymlink,
+
+            /// <summary>
             /// Type for probing a file
             /// </summary>
             Probe,
@@ -212,6 +217,11 @@ namespace Test.BuildXL.Executables.TestProcess
             /// A write file access informed to detours without doing any real IO
             /// </summary>
             AugmentedWriteFile,
+
+            /// <summary>
+            /// Invokes some native code that crashes hard (by segfaulting or something)
+            /// </summary>
+            CrashHardNative,
         }
 
         /// <summary>
@@ -319,12 +329,12 @@ namespace Test.BuildXL.Executables.TestProcess
         public int RetriesOnWrite { get; }
 
         private Operation(
-            Type type, 
-            FileOrDirectoryArtifact? path = null, 
-            string content = null, 
-            FileOrDirectoryArtifact? linkPath = null, 
-            SymbolicLinkFlag? symLinkFlag = null, 
-            bool? doNotInfer = null, 
+            Type type,
+            FileOrDirectoryArtifact? path = null,
+            string content = null,
+            FileOrDirectoryArtifact? linkPath = null,
+            SymbolicLinkFlag? symLinkFlag = null,
+            bool? doNotInfer = null,
             string additionalArgs = null, 
             int retriesOnWrite = 5)
         {
@@ -406,6 +416,9 @@ namespace Test.BuildXL.Executables.TestProcess
                     case Type.CopyFile:
                         DoCopyFile();
                         return;
+                    case Type.CopySymlink:
+                        DoCopySymlink();
+                        return;
                     case Type.MoveDir:
                         DoMoveDir();
                         return;
@@ -450,6 +463,9 @@ namespace Test.BuildXL.Executables.TestProcess
                         return;
                     case Type.Fail:
                         DoFail();
+                        return;
+                    case Type.CrashHardNative:
+                        DoCrashHardNative();
                         return;
                     case Type.WriteFileIfInputEqual:
                         DoWriteFileIfInputEqual();
@@ -619,6 +635,14 @@ namespace Test.BuildXL.Executables.TestProcess
         }
 
         /// <summary>
+        /// Creates a copy symlink operation
+        /// </summary>
+        public static Operation CopySymlink(FileArtifact srcPath, FileArtifact destPath, SymbolicLinkFlag symLinkFlag, bool doNotInfer = false)
+        {
+            return new Operation(Type.CopySymlink, path: srcPath, linkPath: destPath, symLinkFlag: symLinkFlag, doNotInfer: doNotInfer);
+        }
+
+        /// <summary>
         /// Creates a move directory operation
         /// </summary>
         public static Operation MoveDir(DirectoryArtifact srcPath, DirectoryArtifact destPath)
@@ -636,8 +660,9 @@ namespace Test.BuildXL.Executables.TestProcess
 
         /// <summary>
         /// Creates a enumerate directory operation
+        /// The path is a FileOrDirectoryArtifact, because we can enumerate directories through directory symlinks - which are FileArtifacts.
         /// </summary>
-        public static Operation EnumerateDir(DirectoryArtifact path, bool doNotInfer = false, string enumeratePattern = null)
+        public static Operation EnumerateDir(FileOrDirectoryArtifact path, bool doNotInfer = false, string enumeratePattern = null)
         {
             return new Operation(Type.EnumerateDir, path, doNotInfer: doNotInfer, additionalArgs: enumeratePattern);
         }
@@ -805,6 +830,14 @@ namespace Test.BuildXL.Executables.TestProcess
         }
 
         /// <summary>
+        /// Invokes some native code that crashes hard (by segfaulting or something)
+        /// </summary>
+        public static Operation CrashHardNative()
+        {
+            return new Operation(Type.CrashHardNative);
+        }
+
+        /// <summary>
         /// Process that fails on first invocation and succeeds on second invocation.
         /// </summary>
         /// <param name="untrackedStateFilePath">File used to track state. This path should be untracked when scheduling the pip</param>
@@ -884,7 +917,7 @@ namespace Test.BuildXL.Executables.TestProcess
 
         private void DoDeleteFile()
         {
-            File.Delete(PathAsString);
+            FileUtilities.DeleteFile(PathAsString);
         }
 
         private void DoDeleteDir()
@@ -1055,6 +1088,24 @@ namespace Test.BuildXL.Executables.TestProcess
         private void DoCopyFile()
         {
             File.Copy(PathAsString, LinkPathAsString, overwrite: true);
+        }
+
+        private void DoCopySymlink()
+        {
+            var possibleTarget = FileUtilities.TryGetReparsePointTarget(null, PathAsString);
+            if (!possibleTarget.Succeeded)
+            {
+                possibleTarget.Failure.Throw();
+            }
+
+            var reparsepointTarget = possibleTarget.Result;
+            FileUtilities.DeleteFile(LinkPathAsString);
+
+            var maybeSymlink = FileUtilities.TryCreateSymbolicLink(LinkPathAsString, reparsepointTarget, isTargetFile: SymLinkFlag == SymbolicLinkFlag.FILE);
+            if (!maybeSymlink.Succeeded)
+            {
+                throw maybeSymlink.Failure.CreateException();
+            }
         }
 
         private void DoMoveDir()
@@ -1249,13 +1300,31 @@ namespace Test.BuildXL.Executables.TestProcess
             // Log the the process that was launched with its id so it can be retrieved by bxl tests later
             // This is used when the child process is launched to breakaway from the job object, so we actually
             // don't get its information back as part of a reported process
-            LogSpawnExeChildProcess(process);
+            string processName;
+            try
+            {
+                // process.ProcessName throws if process has already exited
+                processName = process.ProcessName;
+            }
+#pragma warning disable ERP022 // Unobserved exception in generic exception handler
+            catch
+            {
+                processName = PathAsString;
+            }
+#pragma warning restore ERP022 // Unobserved exception in generic exception handler
+
+            LogSpawnExeChildProcess(processName, process.Id);
         }
 
         private void DoFail()
         {
             int exitCode = int.TryParse(Content, out var result) ? result : -1;
             Environment.Exit(exitCode);
+        }
+
+        private void DoCrashHardNative()
+        {
+            global::BuildXL.Interop.Dispatch.ForceQuit();
         }
 
         private void DoSucceedOnRetry()
@@ -1405,9 +1474,9 @@ namespace Test.BuildXL.Executables.TestProcess
         /// <summary>
         /// Keep in sync with <see cref="RetrieveChildProcessesCreatedBySpawnExe"/>
         /// </summary>
-        private void LogSpawnExeChildProcess(Process childProcess)
+        private void LogSpawnExeChildProcess(string processName, long processId)
         {
-            Console.WriteLine($"{SpawnExePrefix}{childProcess.ProcessName}:{childProcess.Id}");
+            Console.WriteLine($"{SpawnExePrefix}{processName}:{processId}");
         }
 
         /*** TO STRING HELPER FUNCTIONS ***/

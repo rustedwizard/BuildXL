@@ -25,8 +25,13 @@ namespace Test.BuildXL.Processes
 {
     public sealed class SandboxedProcessTest : SandboxedProcessTestBase
     {
+        private ITestOutputHelper TestOutput { get; }
+
         public SandboxedProcessTest(ITestOutputHelper output)
-            : base(output) { }
+            : base(output)
+        { 
+            TestOutput = output;
+        }
 
         private sealed class MyListener : IDetoursEventListener
         {
@@ -44,7 +49,7 @@ namespace Test.BuildXL.Processes
                 DebugMessageCount++;
             }
 
-            public override void HandleFileAccess(long pipId, string pipDescription, ReportedFileOperation operation, RequestedAccess requestedAccess, FileAccessStatus status, bool explicitlyReported, uint processId, uint error, DesiredAccess desiredAccess, ShareMode shareMode, CreationDisposition creationDisposition, FlagsAndAttributes flagsAndAttributes, string path, string processArgs)
+            public override void HandleFileAccess(long pipId, string pipDescription, ReportedFileOperation operation, RequestedAccess requestedAccess, FileAccessStatus status, bool explicitlyReported, uint processId, uint error, DesiredAccess desiredAccess, ShareMode shareMode, CreationDisposition creationDisposition, FlagsAndAttributes flagsAndAttributes, string path, string processArgs, bool isAnAugmentedFileAccess)
             {
                 if (operation == ReportedFileOperation.Process)
                 {
@@ -59,7 +64,7 @@ namespace Test.BuildXL.Processes
                 ProcessDataMessageCount++;
             }
 
-            public override void HandleProcessDetouringStatus(ulong processId, uint reportStatus, string processName, string startApplicationName, string startCommandLine, bool needsInjection, ulong hJob, bool disableDetours, uint creationFlags, bool detoured, uint error, uint createProcessStatusReturn)
+            public override void HandleProcessDetouringStatus(ProcessDetouringStatusData data)
             {
                 ProcessDetouringStatusMessageCount++;
             }
@@ -264,9 +269,10 @@ namespace Test.BuildXL.Processes
                         "Expected a non-zero user+kernel time.");
                 }
 
-                XAssert.AreNotEqual(0, accounting.MemoryCounters.PeakVirtualMemoryUsageMb, "Expecting non-zero memory usage");
                 XAssert.AreNotEqual(0, accounting.MemoryCounters.PeakWorkingSetMb, "Expecting non-zero memory usage");
-                XAssert.AreNotEqual(0, accounting.MemoryCounters.PeakCommitUsageMb, "Expecting non-zero pagefile usage");
+                XAssert.AreNotEqual(0, accounting.MemoryCounters.AverageCommitSizeMb, "Expecting non-zero memory usage");
+                XAssert.AreNotEqual(0, accounting.MemoryCounters.PeakCommitSizeMb, "Expecting non-zero pagefile usage");
+                XAssert.AreNotEqual(0, accounting.MemoryCounters.AverageCommitSizeMb, "Expecting non-zero pagefile usage");
 
                 // Prior to Win10, cmd.exe launched within a job but its associated conhost.exe was exempt from the job.
                 // That changed with Bug #633552
@@ -1008,12 +1014,24 @@ namespace Test.BuildXL.Processes
         [Fact]
         public async Task StartFileDoesNotExist()
         {
+            if (OperatingSystemHelper.IsUnixOS)
+            {
+                // On Linux we don't require that the process exists ahead of time.  Instead,
+                // we run a shell (e.g., /bin/sh) and then exec that process from the shell.
+                // The actual process executable may be a path relative to a virtual filesystem
+                // root in which the process will be executing, so the executable need not exist
+                // now and it can still be fetched dynamically (by the virtual file system) once
+                // the shell starts executing.
+                return;
+            }
+
             var pt = new PathTable();
             var info = new SandboxedProcessInfo(pt, this, "DoesNotExistIHope", disableConHostSharing: false, sandboxConnection: GetSandboxConnection(), loggingContext: LoggingContext)
             {
                 PipSemiStableHash = 0,
                 PipDescription = DiscoverCurrentlyExecutingXunitTestMethodFQN(),
             };
+            info.FileAccessManifest.PipId = 1;
 
             try
             {
@@ -1088,7 +1106,7 @@ namespace Test.BuildXL.Processes
                     {
                         PipSemiStableHash = 0,
                         PipDescription = DiscoverCurrentlyExecutingXunitTestMethodFQN(),
-                        Arguments = $"touch '{tempFileName}'",
+                        Arguments = $"/usr/bin/touch '{tempFileName}'",
                     };
                 info.FileAccessManifest.PipId = GetNextPipId();
                 info.FileAccessManifest.ReportFileAccesses = true;
@@ -1213,6 +1231,37 @@ namespace Test.BuildXL.Processes
             }
         }
 
+        [Theory]
+        [MemberData(nameof(TruthTable.GetTable), 3, MemberType = typeof(TruthTable))]
+        public async Task HandleHardNativeCrash(bool shouldParentCrash, bool shouldChildCrash, bool waitForChildToFinish)
+        {
+            var outFile = CreateOutputFileArtifact();
+            var info = ToProcessInfo(ToProcess(
+                Operation.WriteFile(outFile),
+                Operation.Spawn(Context.PathTable, waitToFinish: waitForChildToFinish, 
+                    shouldChildCrash ? Operation.CrashHardNative() : Operation.Echo("Child :: not crashing")),
+                shouldParentCrash
+                    ? Operation.CrashHardNative()
+                    : Operation.Echo("Parent :: not crashing")));
+
+            var result = await RunProcess(info);
+            var msg = 
+                $"Code: {result.ExitCode}, Killed: {result.Killed}, Num Survivors: {result.SurvivingChildProcesses?.Count()}, Stdout:{Environment.NewLine}" +
+                await result.StandardOutput.ReadValueAsync();
+            TestOutput.WriteLine(msg);
+
+            XAssert.IsFalse(result.Killed);
+            XAssert.IsNull(result.SurvivingChildProcesses);
+            if (shouldParentCrash)
+            {
+                XAssert.AreNotEqual(0, result.ExitCode);
+            }
+            else
+            {
+                XAssert.AreEqual(0, result.ExitCode);
+            }
+        }
+
         private static ReportedFileAccess GetFileAccessForReadFileOperation(
             AbsolutePath path,
             ReportedProcess process,
@@ -1270,9 +1319,6 @@ namespace Test.BuildXL.Processes
 
         public override bool Equals(ReportedFileAccess x, ReportedFileAccess y)
         {
-            if (x == null || y == null)
-                return x == y;
-
             return RelevantFieldsToString(x).Equals(RelevantFieldsToString(y));
         }
 

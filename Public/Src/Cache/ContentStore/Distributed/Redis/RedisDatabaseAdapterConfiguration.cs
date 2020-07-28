@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 using System;
 using Microsoft.Practices.TransientFaultHandling;
@@ -17,13 +17,22 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
 
         public string KeySpace { get; }
 
+        /// <inheritdoc cref="RedisContentLocationStoreConfiguration.RedisConnectionErrorLimit"/>
         public int RedisConnectionErrorLimit { get; }
 
+        /// <inheritdoc cref="RedisContentLocationStoreConfiguration.RedisReconnectionLimitBeforeServiceRestart"/>
+        public int RedisReconnectionLimitBeforeServiceRestart { get; }
+
+        /// <inheritdoc cref="RedisContentLocationStoreConfiguration.TraceRedisFailures"/>
         public bool TraceOperationFailures { get; }
 
+        /// <inheritdoc cref="RedisContentLocationStoreConfiguration.TraceRedisTransientFailures"/>
         public bool TraceTransientFailures { get; }
 
         public string DatabaseName { get; }
+
+        /// <inheritdoc cref="RedisContentLocationStoreConfiguration.MinRedisReconnectInterval"/>
+        public TimeSpan MinReconnectInterval { get; }
 
         public RetryPolicy CreateRetryPolicy(Action<Exception> onRedidException)
         {
@@ -40,17 +49,21 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         public RedisDatabaseAdapterConfiguration(
             string keySpace,
             int redisConnectionErrorLimit = int.MaxValue,
+            int redisReconnectionLimitBeforeServiceRestart = int.MaxValue,
             bool traceOperationFailures = false,
             bool traceTransientFailures = false,
             int? retryCount = null,
-            string? databaseName = null)
+            string? databaseName = null,
+            TimeSpan? minReconnectInterval = null)
         {
             _retryCount = retryCount;
             KeySpace = keySpace;
             RedisConnectionErrorLimit = redisConnectionErrorLimit;
+            RedisReconnectionLimitBeforeServiceRestart = redisReconnectionLimitBeforeServiceRestart;
             TraceOperationFailures = traceOperationFailures;
             TraceTransientFailures = traceTransientFailures;
             DatabaseName = databaseName ?? "Default";
+            MinReconnectInterval = minReconnectInterval ?? TimeSpan.Zero;
         }
     }
 }

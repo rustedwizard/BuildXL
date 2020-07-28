@@ -21,6 +21,7 @@ using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tasks;
 using Microsoft.VisualStudio.Services.Common;
 using Microsoft.VisualStudio.Services.Drop.WebApi;
+using Microsoft.VisualStudio.Services.Graph;
 using Microsoft.VisualStudio.Services.WebApi;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -154,22 +155,6 @@ namespace Tool.DropDaemon
         {
             ShortName = "d",
             HelpText = "Relative drop path",
-            IsRequired = false,
-            IsMultiValue = true,
-        };       
-
-        internal static readonly StrOption Directory = new StrOption("directory")
-        {
-            ShortName = "dir",
-            HelpText = "Directory path",
-            IsRequired = false,
-            IsMultiValue = true,
-        };
-
-        internal static readonly StrOption DirectoryId = new StrOption("directoryId")
-        {
-            ShortName = "dirid",
-            HelpText = "BuildXL directory identifier",
             IsRequired = false,
             IsMultiValue = true,
         };
@@ -672,7 +657,9 @@ namespace Tool.DropDaemon
                 verbose: conf.Get(Verbose),
                 enableTelemetry: conf.Get(EnableTelemetry),
                 enableChunkDedup: conf.Get(EnableChunkDedup),
-                logDir: conf.Get(LogDir));
+                logDir: conf.Get(LogDir),
+                artifactLogName: conf.Get(ArtifactLogName),
+                batchSize: conf.Get(BatchSize));
         }
 
         private static T RegisterDropConfigOption<T>(T option) where T : Option => RegisterOption(DropConfigOptions, option);
@@ -821,8 +808,11 @@ namespace Tool.DropDaemon
 
             return (directoryContent.Select(file =>
             {
-                // we need to convert '\' into '/' because this path would be a part of a drop url
-                var remoteFileName = I($"{dropPath}/{GetRelativePath(directoryPath, file.FileName).Replace('\\', '/')}");
+                // We need to convert '\' into '/' because this path would be a part of a drop url
+                // The dropPath can be an empty relative path (i.e. '.') which we need to remove since even though it is not a valid
+                // directory name for a Windows file system, it is a valid name for a drop and it doesn't get resolved properly
+                var resolvedDropPath = dropPath == "." ? string.Empty : I($"{dropPath}/");
+                var remoteFileName = I($"{resolvedDropPath}{GetRelativePath(directoryPath, file.FileName).Replace('\\', '/')}");
 
                 return new DropItemForBuildXLFile(
                     daemon.ApiClient,

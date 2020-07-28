@@ -94,6 +94,27 @@ namespace BuildXL.Cache.ContentStore.Hashing
             _bytes = new ReadOnlyFixedBytes(buffer, hashBytesLength, offset);
         }
 
+#if NET_COREAPP
+
+        /// <summary>
+        ///     Initializes a new instance of the <see cref="ContentHash" /> struct from byte array
+        /// </summary>
+        public ContentHash(HashType hashType, ReadOnlySpan<byte> buffer, int offset = 0)
+        {
+            Contract.Requires(hashType != HashType.Unknown);
+
+            int hashBytesLength = HashInfoLookup.Find(hashType).ByteLength;
+            if (buffer.Length < (hashBytesLength + offset))
+            {
+                throw new ArgumentException($"Buffer undersized length=[{buffer.Length}] for hash type=[{hashType}]");
+            }
+
+            _hashType = hashType;
+            _bytes = new ReadOnlyFixedBytes(buffer, hashBytesLength, offset);
+        }
+
+#endif
+
         /// <summary>
         ///     Initializes a new instance of the <see cref="ContentHash" /> struct from byte array
         /// </summary>
@@ -139,7 +160,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// ContentHash is a structure whose default initial state is invalid.
         /// </remarks>
         [Pure]
-        public bool IsValid => HashType != HashType.Unknown && _bytes != null && _bytes.Length != 0;
+        public bool IsValid => HashType != HashType.Unknown && _bytes.Length != 0;
 
         /// <summary>
         ///     Gets hashType
@@ -191,7 +212,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         }
 
         /// <inheritdoc />
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         {
             return StructUtilities.Equals(this, obj);
         }

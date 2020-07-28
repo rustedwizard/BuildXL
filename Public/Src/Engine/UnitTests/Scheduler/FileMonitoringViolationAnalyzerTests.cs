@@ -343,7 +343,7 @@ namespace Test.BuildXL.Scheduler
                 analyzer.AnalyzePipViolations(
                     violator,
                     new[] { CreateViolation(RequestedAccess.Read, producerOutput) },
-                    null, // whitelisted accesses
+                    null, // allowlisted accesses
                     exclusiveOpaqueDirectoryContent: null,
                     sharedOpaqueDirectoryWriteAccesses: null,
                     allowedUndeclaredReads: null,
@@ -805,14 +805,16 @@ namespace Test.BuildXL.Scheduler
 
             // Create the path where the double write will occur, and a random file content that will be used for both producers
             AbsolutePath doubleWriteOutput = CreateAbsolutePath(context, JunkPath);
+            var doubleWriteOutputArtifact = FileArtifact.CreateOutputFile(doubleWriteOutput);
             ContentHash contentHash = ContentHashingUtilities.CreateRandom();
             var fileContentInfo = new FileContentInfo(contentHash, contentHash.Length);
             var outputsContent = new (FileArtifact, FileMaterializationInfo, PipOutputOrigin)[]
                 {
-                    (FileArtifact.CreateOutputFile(doubleWriteOutput), new FileMaterializationInfo(fileContentInfo, doubleWriteOutput.GetName(context.PathTable)), PipOutputOrigin.NotMaterialized)
+                    (doubleWriteOutputArtifact, new FileMaterializationInfo(fileContentInfo, doubleWriteOutput.GetName(context.PathTable)), PipOutputOrigin.NotMaterialized)
                 }.ToReadOnlyArray();
             var sharedOpaqueRoot = doubleWriteOutput.GetParent(context.PathTable);
-            var sharedOpaqueDirectoryWriteAccesses = new Dictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>> { [sharedOpaqueRoot] = new AbsolutePath[] { doubleWriteOutput } };
+            var sharedOpaqueDirectoryWriteAccesses = new Dictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> { [sharedOpaqueRoot] = 
+                new FileArtifactWithAttributes[] { FileArtifactWithAttributes.Create(doubleWriteOutputArtifact, FileExistence.Required) } };
 
             // Create two processes that claim to produce some arbitrary static output files. We are not really use those outputs but tell
             // the analyzer that these processes wrote into shared opaques
@@ -917,7 +919,7 @@ namespace Test.BuildXL.Scheduler
             analyzer.AnalyzePipViolations(
                 prober,
                 violations: null,
-                whitelistedAccesses: null,
+                allowlistedAccesses: null,
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
@@ -926,15 +928,15 @@ namespace Test.BuildXL.Scheduler
                 out _);
 
             var producer = graph.AddProcess(CreateAbsolutePath(context, X("/x/out/producer-out.txt")));
-            var sodWrites = new Dictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>>
+            var sodWrites = new Dictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>>
             {
-                [sodPath] = new[] { writePath }
+                [sodPath] = new[] { FileArtifactWithAttributes.Create(FileArtifact.CreateOutputFile(writePath), FileExistence.Required) }
             };
 
             analyzer.AnalyzePipViolations(
                 producer,
                 violations: null,
-                whitelistedAccesses: null,
+                allowlistedAccesses: null,
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: sodWrites,
                 allowedUndeclaredReads: null,
@@ -999,7 +1001,7 @@ namespace Test.BuildXL.Scheduler
                 flagsAndAttributes: FlagsAndAttributes.FILE_ATTRIBUTE_NORMAL,
                 AbsolutePath.Invalid,
                 path: path,
-                enumeratePatttern: null);
+                enumeratePattern: null);
         }
     }
 
@@ -1022,14 +1024,14 @@ namespace Test.BuildXL.Scheduler
             AccessLevel accessLevel,
             AbsolutePath path,
             Process violator,
-            bool isWhitelistedViolation,
+            bool isAllowlistedViolation,
             Pip related,
             AbsolutePath processPath)
         {
             ReportedViolation reportedViolation = new ReportedViolation(true, violationType, path, violator.PipId, related?.PipId, processPath);
             if (m_doLogging)
             {
-                reportedViolation = base.HandleDependencyViolation(violationType, accessLevel, path, violator, isWhitelistedViolation, related, processPath);
+                reportedViolation = base.HandleDependencyViolation(violationType, accessLevel, path, violator, isAllowlistedViolation, related, processPath);
             }
 
             // Always collect error violations, and also collect other non-errors if asked to.

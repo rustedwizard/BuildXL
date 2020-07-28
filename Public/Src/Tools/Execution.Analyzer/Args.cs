@@ -10,6 +10,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using BuildXL.Native.IO;
 using BuildXL.Pips.Operations;
 using BuildXL.Storage;
 using BuildXL.ToolSupport;
@@ -28,7 +29,7 @@ namespace BuildXL.Execution.Analyzer
         {
         }
 
-        protected override void Output(EventLevel level, int id, string eventName, EventKeywords eventKeywords, string text, bool doNotTranslatePaths = false)
+        protected override void Output(EventLevel level, EventWrittenEventArgs eventData, string text, bool doNotTranslatePaths = false)
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss.ff}] {text}");
         }
@@ -242,7 +243,8 @@ namespace BuildXL.Execution.Analyzer
                     }
                     break;
                 case AnalysisMode.Whitelist:
-                    m_analyzer = InitializeWhitelistAnalyzer();
+                case AnalysisMode.Allowlist:
+                    m_analyzer = InitializeAllowlistAnalyzer();
                     break;
                 case AnalysisMode.IdeGenerator:
                     m_analyzer = InitializeIdeGenerator();
@@ -339,11 +341,6 @@ namespace BuildXL.Execution.Analyzer
                 case AnalysisMode.CopyFile:
                     m_analyzer = InitializeCopyFilesAnalyzer();
                     break;
-#if NET_FRAMEWORK
-                case AnalysisMode.ContentPlacement:
-                    m_analyzer = InitializeContentPlacementAnalyzer();
-                    break;
-#endif
                 case AnalysisMode.XlgToDb:
                     m_analyzer = InitializeXLGToDBAnalyzer();
                     break;
@@ -351,6 +348,9 @@ namespace BuildXL.Execution.Analyzer
                     ConsoleListener.RegisterEventSource(ETWLogger.Log);
                     ConsoleListener.RegisterEventSource(FrontEnd.Script.Debugger.ETWLogger.Log);
                     m_analyzer = InitializeDebugLogsAnalyzer();
+                    break;
+                case AnalysisMode.JavaScriptDependencyFixer:
+                    m_analyzer = JavaScriptDependencyFixerAnalyzer();
                     break;
                 default:
                     Contract.Assert(false, "Unhandled analysis mode");
@@ -373,7 +373,7 @@ namespace BuildXL.Execution.Analyzer
             Console.ForegroundColor = ConsoleColor.Red;
             Console.Error.WriteLine("ERROR: " + e.Message);
             Console.ForegroundColor = originalColor;
-            var path = Path.GetTempFileName();
+            var path = FileUtilities.GetTempFileName();
             File.WriteAllText(path, e.ToString());
             Console.WriteLine("Full stack trace saved to " + path);
         }
@@ -579,7 +579,7 @@ namespace BuildXL.Execution.Analyzer
             WriteProcessRunScriptAnalyzerHelp(writer);
 
             writer.WriteLine("");
-            WriteWhitelistAnalyzerHelp(writer);
+            WriteAllowlistAnalyzerHelp(writer);
 
             writer.WriteLine("");
             WriteSummaryAnalyzerHelp(writer);
@@ -649,12 +649,11 @@ namespace BuildXL.Execution.Analyzer
             writer.WriteLine("");
             WriteXLGToDBHelp(writer);
 
-//writer.WriteLine("");
-//WriteDominoInvocationHelp(writer);
-#if NET_FRAMEWORK
             writer.WriteLine("");
-            WriteContentPlacementAnalyzerHelp(writer);
-#endif
+            WriteJavaScriptDependencyFixerHelp(writer);
+
+            writer.WriteLine("");
+            WriteFileConsumptionAnalyzerHelp(writer);
         }
 
         public void LogEventSummary()

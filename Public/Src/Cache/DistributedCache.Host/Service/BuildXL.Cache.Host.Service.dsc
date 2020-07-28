@@ -10,6 +10,8 @@ namespace Service {
         skipDocumentationGeneration: true,
         references: [
             Configuration.dll,
+            ...importFrom("BuildXL.Cache.ContentStore").getSerializationPackages(true),
+
             importFrom("BuildXL.Cache.ContentStore").Library.dll,
             importFrom("BuildXL.Cache.ContentStore").Distributed.dll,
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
@@ -25,15 +27,20 @@ namespace Service {
             importFrom("BuildXL.Utilities").dll,
             importFrom("BuildXL.Utilities").Branding.dll,
 
-            importFrom("Newtonsoft.Json").pkg,
-
             importFrom("BuildXL.Cache.Logging").Library.dll,
             importFrom("WindowsAzure.Storage").pkg,
             importFrom("NLog").pkg,
+
+            ...BuildXLSdk.bclAsyncPackages,
+
             ...addIf(BuildXLSdk.isFullFramework,
+                NetFx.System.Web.dll,
                 NetFx.System.Xml.dll
             ),
         ],
-        allowUnsafeBlocks: false
+        allowUnsafeBlocks: false,
+        internalsVisibleTo: [
+            "BuildXL.Cache.Host.Test",
+        ]
     });
 }

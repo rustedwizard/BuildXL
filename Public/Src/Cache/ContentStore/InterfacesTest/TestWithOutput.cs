@@ -5,7 +5,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
+using BuildXL.Cache.ContentStore.Tracing;
 using Xunit.Abstractions;
 
 namespace BuildXL.Cache.ContentStore.InterfacesTest
@@ -50,6 +52,11 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest
         /// Gets the full output "printed" to the console.
         /// </summary>
         public string GetFullOutput() => string.Join(Environment.NewLine, _outputLines);
+
+        /// <summary>
+        /// Gets all the output messages.
+        /// </summary>
+        public IEnumerable<string> GetOutputLines() => _outputLines;
     }
 
     /// <summary>
@@ -57,6 +64,7 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest
     /// </summary>
     public abstract class TestWithOutput : IDisposable
     {
+        private readonly bool _oldEnableTraceAtShutdownValue;
         private readonly TextWriter _oldConsoleOutput;
         private readonly TextWriter _oldConsoleErrorOutput;
 
@@ -72,9 +80,15 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest
         /// </summary>
         protected string GetFullOutput() => _outputTextWriter?.GetFullOutput() ?? string.Empty;
 
-        /// <inheritdoc />
+        /// <inheritdoc cref="XUnitTestOutputTextWriter.GetOutputLines"/>
+        protected IEnumerable<string> GetOutputLines() => _outputTextWriter?.GetOutputLines() ?? Enumerable.Empty<string>();
+
+        /// <nodoc />
         protected TestWithOutput(ITestOutputHelper output)
         {
+            _oldEnableTraceAtShutdownValue = GlobalTracerConfiguration.EnableTraceStatisticsAtShutdown;
+            GlobalTracerConfiguration.EnableTraceStatisticsAtShutdown = false;
+
             Output = output;
             if (output != null)
             {
@@ -88,12 +102,24 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest
 
         ~TestWithOutput()
         {
-            Debug.Assert(false, $"Instance of type {GetType()} was not disposed!");
+            var output = Output;
+            if (output != null)
+            {
+                try
+                {
+                    output.WriteLine($"Instance of type {GetType()} was not disposed!");
+                }
+                catch(Exception e)
+                {
+                    Console.WriteLine($"WriteLine failed: {e}");
+                }
+            }
         }
 
         /// <inheritodc />
         public virtual void Dispose()
         {
+            GlobalTracerConfiguration.EnableTraceStatisticsAtShutdown = _oldEnableTraceAtShutdownValue;
             if (Output != null)
             {
                 // Need to restore an old console output to prevent invalid operation exceptions when tracing is happening after all the tests are finished.

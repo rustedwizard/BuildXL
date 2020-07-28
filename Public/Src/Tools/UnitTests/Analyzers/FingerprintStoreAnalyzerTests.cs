@@ -40,7 +40,9 @@ namespace Test.Tool.Analyzers
         {
             Configuration.Logging.CacheMissAnalysisOption = BuildXLConfiguration.CacheMissAnalysisOption.LocalMode();
             Configuration.Logging.StoreFingerprints = true;
-            
+            Configuration.Logging.SaveFingerprintStoreToLogs = true;
+            RuntimeCacheMissAnalyzer.s_numberOfBatchesLogged = 0;
+
             AnalysisMode = AnalysisMode.CacheMiss;
 
             string outputDirectory = Path.Combine(TemporaryDirectory, "cachemiss");
@@ -169,19 +171,19 @@ namespace Test.Tool.Analyzers
         }
 
         [Fact]
-        public void NonCacheableWhitelistPipMiss()
+        public void NonCacheableAllowlistPipMiss()
         {
-            FileArtifact whitelistFile = CreateSourceFile();
-            var entry = new BuildXLConfiguration.Mutable.FileAccessWhitelistEntry()
+            FileArtifact allowlistFile = CreateSourceFile();
+            var entry = new BuildXLConfiguration.Mutable.FileAccessAllowlistEntry()
             {
                 Value = "testValue",
-                PathFragment = ArtifactToString(whitelistFile),
+                PathFragment = ArtifactToString(allowlistFile),
             };
-            Configuration.FileAccessWhiteList.Add(entry);
+            Configuration.FileAccessAllowList.Add(entry);
 
             Process pip = CreateAndSchedulePipBuilder(new Operation[]
             {
-                Operation.ReadFile(whitelistFile, doNotInfer: true),
+                Operation.ReadFile(allowlistFile, doNotInfer: true),
                 Operation.WriteFile(CreateOutputFileArtifact())
             }).Process;
 

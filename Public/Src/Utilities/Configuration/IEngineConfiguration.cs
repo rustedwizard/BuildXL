@@ -92,11 +92,6 @@ namespace BuildXL.Utilities.Configuration
         IReadOnlyList<AbsolutePath> ScrubDirectories { get; }
 
         /// <summary>
-        /// Directories to eagerly populate with symlinks
-        /// </summary>
-        IReadOnlyList<AbsolutePath> PopulateSymlinkDirectories { get; }
-
-        /// <summary>
         /// Directories under the object directory root will get shortened to avoid too long path names. Defaults to 64 characters for relative output directories.
         /// </summary>
         /// <remarks>
@@ -160,6 +155,16 @@ namespace BuildXL.Utilities.Configuration
         /// Whether to track the builds in a textfile in the user folder.
         /// </summary>
         bool TrackBuildsInUserFolder { get; }
+
+        /// <summary>
+        /// Whether to track GVFS projection files (found in .gvfs/GVFS_projection).
+        /// Tracking these files will ensure that features that depend on USN journal scanning
+        /// (e.g., incremental scheduling) are disabled whenever a GVFS projection changes.
+        /// 
+        /// Reason: whenever GVFS projection changes there could exist pending filed
+        ///         materializations for which USN records don't exist yet).
+        /// </summary>
+        bool TrackGvfsProjections { get; }
 
         /// <summary>
         /// Whether or not to use file content table.

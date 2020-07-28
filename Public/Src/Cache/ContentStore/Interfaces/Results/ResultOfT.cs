@@ -87,17 +87,19 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
             get
             {
                 // Using Assert instead of Requires in order to skip message computation for successful cases.
-                if (!Succeeded)
-                {
-                    Contract.Assert(false, $"The operation should succeed in order to get the resulting value. Failure: {ToString()}.");
-                }
-
+                Contract.Check(Succeeded)?.Assert($"The operation should succeed in order to get the resulting value. Failure: {ToString()}.");
                 return _result;
             }
         }
 
         /// <nodoc />
         public static implicit operator Result<T>(T result)
+        {
+            return new Result<T>(result);
+        }
+
+        /// <nodoc />
+        public static implicit operator Result<T>(ErrorResult result)
         {
             return new Result<T>(result);
         }

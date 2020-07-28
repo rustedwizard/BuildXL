@@ -360,6 +360,9 @@ namespace BuildXL.Native.IO.Unix
         public string GetFinalPathNameByHandle(SafeFileHandle handle, bool volumeGuidPath = false) => throw new NotImplementedException();
 
         /// <inheritdoc />
+        public bool TryGetFinalPathNameByPath(string path, out string finalPath, out int nativeErrorCode, bool volumeGuidPath = false) => throw new NotImplementedException();
+
+        /// <inheritdoc />
         public OpenFileResult TryOpenFileById(
             SafeFileHandle existingHandleOnVolume,
             FileId fileId,
@@ -681,6 +684,8 @@ namespace BuildXL.Native.IO.Unix
                         return CreateHardLinkStatus.FailedDueToPerFileLinkLimit;
                     case (int)Errno.EPERM:
                         return CreateHardLinkStatus.FailedAccessDenied;
+                    case (int)Errno.EEXIST:
+                        return CreateHardLinkStatus.FailedDestinationExists;
                     default:
                         return CreateHardLinkStatus.Failed;
                 }
@@ -804,7 +809,13 @@ namespace BuildXL.Native.IO.Unix
         /// <inheritdoc />
         public bool IsReparsePointActionable(ReparsePointType reparsePointType)
         {
-            return reparsePointType == ReparsePointType.SymLink;
+            return reparsePointType == ReparsePointType.UnixSymlink;
+        }
+
+        /// <inheritdoc />
+        public bool IsReparsePointSymbolicLink(ReparsePointType reparsePointType)
+        {
+            return IsReparsePointActionable(reparsePointType);
         }
 
         /// <inheritdoc />
@@ -815,7 +826,12 @@ namespace BuildXL.Native.IO.Unix
 
         private static Possible<ReparsePointType> GetReparsePointType(string path)
         {
-            return IsSymlink(path) ? ReparsePointType.SymLink : ReparsePointType.None;
+            if (IsSymlink(path))
+            {
+                return ReparsePointType.UnixSymlink;
+            }
+            
+            return ReparsePointType.None;
         }
 
         /// <inheritdoc />
@@ -1115,7 +1131,7 @@ namespace BuildXL.Native.IO.Unix
         private bool SupportPreciseFileVersion()
         {
             // Use temp file name as an approximation whether file system supports precise file version.
-            string path = Path.GetTempFileName();
+            string path = FileUtilities.GetTempFileName();
             bool result = false;
 
             using (var fileStream = CreateFileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.None, false))
@@ -1153,7 +1169,7 @@ namespace BuildXL.Native.IO.Unix
         private bool SupportCopyOnWrite()
         {
             // Use temp file name as an approximation whether file system supports copy-on-write.
-            string path = Path.GetTempFileName();
+            string path = FileUtilities.GetTempFileName();
             bool result = false;
 
             using (var fileStream = CreateFileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.None, false))
@@ -1231,7 +1247,7 @@ namespace BuildXL.Native.IO.Unix
         public bool IsDirectorySymlinkOrJunction(string path)
         {
             var reparsePointType = TryGetReparsePointType(path);
-            return reparsePointType.Succeeded && reparsePointType.Result == ReparsePointType.SymLink && Directory.Exists(path);
+            return reparsePointType.Succeeded && reparsePointType.Result == ReparsePointType.UnixSymlink;
         }
 
         /// <inheritdoc/>

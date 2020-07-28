@@ -3,6 +3,8 @@
 
 using System;
 using System.Runtime.InteropServices;
+using BuildXL.Interop.Unix;
+using static BuildXL.Interop.Windows.Memory;
 
 namespace BuildXL.Interop
 {
@@ -55,6 +57,28 @@ namespace BuildXL.Interop
             : Unix.Process.IsElevated();
 
         /// <summary>
+        /// Checks if a process with id <paramref name="pid"/> exists.
+        /// </summary>
+        /// <param name="pid">ID of the process to check</param>
+        public static bool IsProcessAlive(int pid) => IsWinOS
+            ? Windows.Process.IsAlive(pid)
+            : Unix.Process.IsAlive(pid);
+
+        /// <summary>
+        /// Forcefully terminates a process with id <paramref name="pid"/>.
+        /// The return value indicates success.
+        /// </summary>
+        /// <param name="pid">ID of the process to kill</param>
+        public static bool ForceQuit(int pid) => IsWinOS
+            ? Windows.Process.ForceQuit(pid)
+            : Unix.Process.ForceQuit(pid);
+
+        /// <summary>
+        /// Forcefully terminates this process.
+        /// </summary>
+        public static void ForceQuit() => ForceQuit(System.Diagnostics.Process.GetCurrentProcess().Id);
+
+        /// <summary>
         /// Returns total processor time for a given process.  The process must be running or else an exception is thrown.
         /// </summary>
         public static TimeSpan TotalProcessorTime(System.Diagnostics.Process proc)
@@ -89,6 +113,45 @@ namespace BuildXL.Interop
                     return Unix.Memory.GetPeakWorkingSetSize(pid, ref peakMemoryUsage) == MACOS_INTEROP_SUCCESS
                         ? peakMemoryUsage
                         : (ulong?)null;
+            }
+        }
+
+        /// <summary>
+        /// Returns the memory counters of a specific process
+        /// </summary>
+        /// <param name="handle">When calling from Windows the SafeProcessHandle is required</param>
+        /// <param name="pid">On non-windows systems a process id has to be provided</param>
+        public static ProcessMemoryCountersSnapshot? GetMemoryCountersSnapshot(IntPtr handle, int pid)
+        {
+            switch (s_currentOS)
+            {
+                case OperatingSystem.Win:
+                    var counters = Windows.Memory.GetMemoryUsageCounters(handle);
+                    if (counters != null)
+                    {
+                        return ProcessMemoryCountersSnapshot.CreateFromBytes(
+                            counters.PeakWorkingSetSize,
+                            counters.WorkingSetSize,
+                            (counters.WorkingSetSize + counters.PeakWorkingSetSize) / 2,
+                            counters.PeakPagefileUsage,
+                            counters.PagefileUsage);
+                    }
+
+                    return null;
+
+                default:
+                    ulong peakMemoryUsage = 0;
+                    if (Unix.Memory.GetPeakWorkingSetSize(pid, ref peakMemoryUsage) == MACOS_INTEROP_SUCCESS)
+                    { 
+                        return ProcessMemoryCountersSnapshot.CreateFromBytes(
+                            peakWorkingSet: peakMemoryUsage,
+                            lastWorkingSet: peakMemoryUsage,
+                            averageWorkingSet: peakMemoryUsage,
+                            peakCommitSize: 0,
+                            lastCommitSize: 0);
+                    }
+                    
+                    return null;
             }
         }
     }

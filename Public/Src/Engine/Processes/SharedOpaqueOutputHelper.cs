@@ -24,7 +24,7 @@ namespace BuildXL.Processes
     /// </remarks>
     public static class SharedOpaqueOutputHelper
     {
-        private static class Win
+        private static class TimestampBased
         {
             /// <summary>
             /// Flags the given path as being an output under a shared opaque by setting the creation time to 
@@ -70,17 +70,18 @@ namespace BuildXL.Processes
             }
 
             /// <summary>
-            /// Checks if the given path is an output under a shared opaque by verifying whether <see cref="WellKnownTimestamps.OutputInSharedOpaqueTimestamp"/> is the creation time of the file
+            /// Checks if the given path is an output under a shared opaque by verifying whether <see cref="WellKnownTimestamps.OutputInSharedOpaqueTimestamp"/>
+            /// is the creation on Mac or modification on Linux time of the file
             /// </summary>
-            /// <remarks>
-            /// If the given path is a directory, it is always considered part of a shared opaque
-            /// </remarks>
             public static bool IsSharedOpaqueOutput(string expandedPath)
             {
                 try
                 {
-                    var creationTime = FileUtilities.GetFileTimestamps(expandedPath).CreationTime;
-                    return creationTime == WellKnownTimestamps.OutputInSharedOpaqueTimestamp;
+                    var times = FileUtilities.GetFileTimestamps(expandedPath);
+                    var timestampOfInterest = OperatingSystemHelper.IsLinuxOS
+                        ? times.LastWriteTime // on Linux, only atime and mtime are settable
+                        : times.CreationTime ;
+                    return timestampOfInterest == WellKnownTimestamps.OutputInSharedOpaqueTimestamp;
                 }
                 catch (BuildXLException ex)
                 {
@@ -89,34 +90,12 @@ namespace BuildXL.Processes
             }
         }
 
-        private static unsafe class Unix
+        private static unsafe class XattrBased
         {
             private const string BXL_SHARED_OPAQUE_XATTR_NAME = "com.microsoft.buildxl:shared_opaque_output";
 
             // arbitrary value; in the future, we could store something more useful here (e.g., the producer PipId or something)
             private const long BXL_SHARED_OPAQUE_XATTR_VALUE = 42;
-
-            // from xattr.h:
-            // #define XATTR_NOFOLLOW   0x0001     /* Don't follow symbolic links */
-            private const int XATTR_NOFOLLOW = 1;
-
-            [DllImport("libc", EntryPoint = "setxattr", SetLastError = true)]
-            private static extern int SetXattr(
-                [MarshalAs(UnmanagedType.LPStr)] string path,
-                [MarshalAs(UnmanagedType.LPStr)] string name,
-                void *value,
-                ulong size,
-                uint position,
-                int options);
-
-            [DllImport("libc", EntryPoint = "getxattr", SetLastError = true)]
-            private static extern long GetXattr(
-                [MarshalAs(UnmanagedType.LPStr)] string path,
-                [MarshalAs(UnmanagedType.LPStr)] string name,
-                void *value,
-                ulong size,
-                uint position,
-                int options);
 
             private const Interop.Unix.IO.FilePermissions S_IWUSR = Interop.Unix.IO.FilePermissions.S_IWUSR;
 
@@ -138,7 +117,7 @@ namespace BuildXL.Processes
 
                 // set xattr
                 long value = BXL_SHARED_OPAQUE_XATTR_VALUE;
-                var err = SetXattr(expandedPath, BXL_SHARED_OPAQUE_XATTR_NAME, &value, sizeof(long), 0, XATTR_NOFOLLOW);
+                var err = Interop.Unix.IO.SetXattrNoFollow(expandedPath, BXL_SHARED_OPAQUE_XATTR_NAME, value);
                 var xattrErrorCode = err != 0 ? Marshal.GetLastWin32Error() : 0;
 
                 // reset permissions if we changed them
@@ -148,7 +127,7 @@ namespace BuildXL.Processes
                 }
 
                 // throw if neither SetXattr succeeded nor the path is properly marked
-                if (xattrErrorCode != 0 && !IsSharedOpaqueOutputWithFallback(expandedPath, checkFallback: false))
+                if (xattrErrorCode != 0 && !IsSharedOpaqueOutput(expandedPath))
                 {
                     throw new BuildXLException(I($"Failed to set '{BXL_SHARED_OPAQUE_XATTR_NAME}' extended attribute for file '{expandedPath}'. Error: {xattrErrorCode}."));
                 }
@@ -158,25 +137,11 @@ namespace BuildXL.Processes
             /// Checks if the given path is an output under a shared opaque by checking if
             /// it contains extended attribute by <see cref="BXL_SHARED_OPAQUE_XATTR_NAME"/> name.
             /// </summary>
-            public static bool IsSharedOpaqueOutput(string expandedPath) => IsSharedOpaqueOutputWithFallback(expandedPath, checkFallback: true);
-
-            // TODO: delete the fallback logic after a successful transition from old to new logic
-            private static bool IsSharedOpaqueOutputWithFallback(string expandedPath, bool checkFallback)
+            public static bool IsSharedOpaqueOutput(string expandedPath)
             {
                 long value = 0;
-                uint valueSize = sizeof(long);
-                var resultSize = GetXattr(expandedPath, BXL_SHARED_OPAQUE_XATTR_NAME, &value, valueSize, 0, XATTR_NOFOLLOW);
-                if (resultSize == valueSize && value == BXL_SHARED_OPAQUE_XATTR_VALUE)
-                {
-                    return true;
-                }
-
-                if (checkFallback && FileUtilities.GetFileTimestamps(expandedPath).CreationTime == WellKnownTimestamps.OutputInSharedOpaqueTimestamp)
-                {
-                    return true;
-                }
-
-                return false;
+                var resultSize = Interop.Unix.IO.GetXattrNoFollow(expandedPath, BXL_SHARED_OPAQUE_XATTR_NAME, ref value);
+                return value == BXL_SHARED_OPAQUE_XATTR_VALUE;
             }
         }
 
@@ -217,13 +182,13 @@ namespace BuildXL.Processes
 
                 try
                 {
-                    if (OperatingSystemHelper.IsUnixOS)
+                    if (OperatingSystemHelper.IsMacOS)
                     {
-                        Unix.SetPathAsSharedOpaqueOutput(expandedPath);
+                        XattrBased.SetPathAsSharedOpaqueOutput(expandedPath);
                     }
                     else
                     {
-                        Win.SetPathAsSharedOpaqueOutput(expandedPath);
+                        TimestampBased.SetPathAsSharedOpaqueOutput(expandedPath);
                     }
 
                     return;
@@ -239,12 +204,20 @@ namespace BuildXL.Processes
         }
 
         /// <summary>
+        /// <see cref="IsSharedOpaqueOutput(string, out PathExistence)"/>
+        /// </summary>
+        public static bool IsSharedOpaqueOutput(string expandedPath)
+        {
+            return IsSharedOpaqueOutput(expandedPath, out _);
+        }
+
+        /// <summary>
         /// Checks if the given path is an output under a shared opaque by verifying whether <see cref="WellKnownTimestamps.OutputInSharedOpaqueTimestamp"/> is the creation time of the file
         /// </summary>
         /// <remarks>
         /// If the given path is a directory, it is always considered part of a shared opaque
         /// </remarks>
-        public static bool IsSharedOpaqueOutput(string expandedPath)
+        public static bool IsSharedOpaqueOutput(string expandedPath, out PathExistence pathExistence)
         {
             // On Windows: FOLLOW symlinks
             //   - directory symlinks are not fully supported (e.g., producing directory symlinks)
@@ -263,6 +236,7 @@ namespace BuildXL.Processes
             var maybeResult = FileUtilities.TryProbePathExistence(expandedPath, followSymlink);
             if (maybeResult.Succeeded && maybeResult.Result == PathExistence.Nonexistent)
             {
+                pathExistence = PathExistence.Nonexistent;
                 return true;
             }
 
@@ -271,12 +245,15 @@ namespace BuildXL.Processes
             // It is important to track directory symlinks, because they are considered files for sake of shared opaque scrubbing.
             if (maybeResult.Succeeded && maybeResult.Result == PathExistence.ExistsAsDirectory)
             {
+                pathExistence = PathExistence.ExistsAsDirectory;
                 return true;
             }
 
-            return OperatingSystemHelper.IsUnixOS
-                ? Unix.IsSharedOpaqueOutput(expandedPath)
-                : Win.IsSharedOpaqueOutput(expandedPath);
+            pathExistence = PathExistence.ExistsAsFile;
+
+            return OperatingSystemHelper.IsMacOS
+                ? XattrBased.IsSharedOpaqueOutput(expandedPath)
+                : TimestampBased.IsSharedOpaqueOutput(expandedPath);
         }
 
         /// <summary>

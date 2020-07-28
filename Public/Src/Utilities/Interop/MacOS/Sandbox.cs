@@ -5,6 +5,8 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
+using static BuildXL.Interop.Dispatch;
+
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member 
 
 namespace BuildXL.Interop.Unix
@@ -17,24 +19,45 @@ namespace BuildXL.Interop.Unix
         public static readonly int ReportQueueSuccessCode = 0x1000;
         public static readonly int SandboxSuccess = 0x0;
 
-        [DllImport(Libraries.BuildXLInteropLibMacOS)]
-        public static extern unsafe int NormalizePathAndReturnHash(byte[] pPath, byte* buffer, int bufferLength);
+        public static unsafe int NormalizePathAndReturnHash(byte[] pPath, byte[] normalizedPath)
+        {
+            if (IsMacOS)
+            {
+                fixed (byte* outBuffer = &normalizedPath[0])
+                {
+                    return Impl_Mac.NormalizePathAndReturnHash(pPath, outBuffer, normalizedPath.Length);
+                }
+            }
+            else
+            {
+                return Impl_Linux.NormalizePathAndReturnHash(pPath, normalizedPath);
+            }
+        }
+
+        public enum Configuration : int
+        {
+            EndpointSecuritySandboxType = 0,
+            DetoursSandboxType,
+            HybridSandboxType,
+            KextType
+        }
 
         [StructLayout(LayoutKind.Sequential)]
-        public struct ESConnectionInfo
+        public struct SandboxConnectionInfo
         {
+            public Configuration Config;
             public int Error;
         }
 
         [DllImport(Libraries.BuildXLInteropLibMacOS, SetLastError = true)]
-        public static extern void InitializeEndpointSecuritySandbox(ref ESConnectionInfo info, int host);
+        public static extern void InitializeSandbox(ref SandboxConnectionInfo info, int host);
 
         [DllImport(Libraries.BuildXLInteropLibMacOS, SetLastError = true)]
-        public static extern void DeinitializeEndpointSecuritySandbox(ESConnectionInfo info);
+        public static extern void DeinitializeSandbox();
 
         [DllImport(Libraries.BuildXLInteropLibMacOS, CallingConvention=CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public static extern void ObserverFileAccessReports(
-            ref ESConnectionInfo info,
+            ref SandboxConnectionInfo info,
             [MarshalAs(UnmanagedType.FunctionPtr)] AccessReportCallback callbackPointer,
             long accessReportSize);
 

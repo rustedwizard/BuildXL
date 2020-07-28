@@ -73,8 +73,21 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
     // Check if we need to update or create the App.Config file for assembly binding redirects.
     let appConfig = processAppConfigAndBindingRedirects(args, framework);
 
+    // Adding helper tags that allow building only a subset of the codebase.
+    // For instance, bxl CompileDebugNet472 will only compile all the sources and target net472
+    // and bxl CompileWin will compile sources for two key qualifiers for Windows - for net472 and for .net core app.
+    let helperTags = [
+        ...addIf(qualifier.targetRuntime === "win-x64" && qualifier.targetFramework === "net472" && qualifier.configuration === "debug", "CompileDebugNet472", "CompileWin"),
+        ...addIf(qualifier.targetRuntime === "win-x64" && qualifier.targetFramework === "netstandard2.0" && qualifier.configuration === "debug", "CompileNetStandard20", "CompileWin"),
+        ...addIf(qualifier.targetRuntime === "win-x64" && qualifier.targetFramework === "netcoreapp3.1" && qualifier.configuration === "debug", "CompileDebugNetCoreWin", "CompileWin"),
+        ...addIf(qualifier.targetRuntime === "osx-x64" && qualifier.targetFramework === "netcoreapp3.1" && qualifier.configuration === "debug", "CompileOsx"),
+        ...addIf(qualifier.targetRuntime === "linux-x64" && qualifier.targetFramework === "netcoreapp3.1" && qualifier.configuration === "debug", "CompileLinux"),
+        ];
+
     // csc
     let outputFileName = name + targetTypeToFileExtension(targetType, args.deploymentStyle);
+
+    let debugType: Csc.DebugType = args.embedPdbs ? "embedded" : (framework.requiresPortablePdb ? "portable" : "full");
     let cscArgs : Csc.Arguments = {
         sources: [
             assemblyInfo,
@@ -92,7 +105,7 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
         doc: args.skipDocumentationGeneration === true ? undefined : name + ".xml",
         out: outputFileName,
         pdb: name + ".pdb",
-        debugType: framework.requiresPortablePdb ? "portable" : "full",
+        debugType: debugType,
         allowUnsafeBlocks: args.allowUnsafeBlocks || false,
         appConfig: appConfig,
         implicitSources: args.implicitSources,
@@ -106,6 +119,7 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
         ],
         nullable: args.nullable,
         nullabilityContext: args.nullabilityContext,
+        tags: helperTags
     };
 
     const references = [
@@ -116,8 +130,6 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
     if (args.tools && args.tools.csc) {
         cscArgs = Object.merge(args.tools.csc, cscArgs);
     }
-
-    cscArgs = Object.merge(Helpers.patchReferencesForSystemInteractiveAsync(references), cscArgs);
 
     let cscResult =  Csc.compile(cscArgs);
 
@@ -414,6 +426,33 @@ export interface Arguments {
     /** Specify nullable context option enable|disable. */
     nullable?: boolean;
 
+    /**
+     * Whether to embed pdbs into the assemblies or not.
+     * True by default until the project opts out this feature.
+     */
+    embedPdbs?: boolean;
+
+    /**
+     * Whether to embed sources into pdbs.
+     */
+    embedSources?: boolean;
+    
+    /*
+     * If false then the file with non-nullable attributes won't be added to the project even when nullable flag is set to true.
+     * 
+     * For non-dotnet-core project specifying nullable flag forces the SDK to automatically include a special file
+     * with non-nullable attributes like [MaybeNull], [NonNullWhen] etc.
+     * 
+     * This is a good default behavior but it causes compilation warnings in the following case:
+     * Project A specifies nullable flag and has internals visibility with Project B.
+     * It means that the Project B can access all the internal members in Project A including all the non-nullability attributes.
+     * Adding the same set of attributes in Project B will cause compilation warnings and to avoid them 
+     * Project B needs to specify addNotNullAttributeFile: false.
+     * 
+     * The default is true if 'nullable' is true.
+     */
+    addNotNullAttributeFile?: boolean;
+
     /** Specify nullable context option enable|disable|safeonly|warnings|safeonlywarnings.*/
     nullabilityContext?: Csc.NullabilityContext;
 
@@ -587,4 +626,3 @@ function getTargetRuntimeDefines() : string[] {
             Contract.fail("Unexpected targetRuntime");
     }
 }
-

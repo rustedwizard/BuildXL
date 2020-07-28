@@ -64,6 +64,11 @@ namespace ContentStoreTest.Grpc
             return new PinResult(result);
         }
 
+        public Task<IEnumerable<Task<Indexed<PinResult>>>> PinAsync(Context context, IReadOnlyList<ContentHash> contentHashes, PinOperationConfiguration config)
+        {
+            throw new NotImplementedException();
+        }
+
         public async Task<OpenStreamResult> OpenStreamAsync(Context context, ContentHash contentHash, CancellationToken cts, UrgencyHint urgencyHint = UrgencyHint.Nominal)
         {
             BoolResult result = await UnresponsiveUntilCancelledAsync(context, nameof(OpenStreamAsync), cts);
@@ -139,6 +144,8 @@ namespace ContentStoreTest.Grpc
         {
             return Task.FromResult(0);
         }
+
+        public Task<BoolResult> ShutdownEvictionAsync(Context context) => BoolResult.SuccessTask;
 
         private async Task<BoolResult> UnresponsiveUntilCancelledAsync(Context context, string operationName, CancellationToken cts)
         {

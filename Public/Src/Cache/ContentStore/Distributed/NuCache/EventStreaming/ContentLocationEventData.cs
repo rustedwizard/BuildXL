@@ -7,6 +7,7 @@ using System.Diagnostics.ContractsLight;
 using System.Linq;
 using System.Text;
 using BuildXL.Cache.ContentStore.Hashing;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
@@ -74,7 +75,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
         protected ContentLocationEventData(EventKind kind, MachineId sender, IReadOnlyList<ShortHash> contentHashes)
         {
             Contract.Requires(contentHashes != null);
-            Contract.RequiresDebug(contentHashes.Count != 0); // We want to detect this precondition in tests/debug mode, but don't want to break in prod because of this.
 
             Kind = kind;
             Sender = sender;
@@ -146,10 +146,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
         /// <summary>
         /// Splits the current instance into a smaller instances
         /// </summary>
-        public IReadOnlyList<ContentLocationEventData> Split(long maxEstimatedSize)
+        public IReadOnlyList<ContentLocationEventData> Split(OperationContext context, long maxEstimatedSize)
         {
             // First, need to compute the number of hashes that will fit into maxEstimatedSize.
-            var maxHashCount = MaxContentHashesCount(maxEstimatedSize);
+            var maxHashCount = maxContentHashesCount(maxEstimatedSize);
 
             // Then we need to split the instance into a sequence of instances.
             var hashes = ContentHashes.Split(maxHashCount).ToList();
@@ -173,11 +173,18 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                     break;
             }
 
-            Contract.AssertDebug(result.TrueForAll(v => v.EstimateSerializedInstanceSize() < maxEstimatedSize));
+            foreach (var r in result)
+            {
+                var estimatedSize = r.EstimateSerializedInstanceSize();
+                if (estimatedSize > maxEstimatedSize)
+                {
+                    context.TraceDebug($"An estimated size is '{estimatedSize}' is greater then the max size '{maxEstimatedSize}' for event '{r.Kind}'.");
+                }
+            }
 
             return result;
 
-            int MaxContentHashesCount(long estimatedSize)
+            int maxContentHashesCount(long estimatedSize)
             {
                 switch (this)
                 {

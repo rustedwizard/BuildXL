@@ -48,7 +48,10 @@ namespace BuildXL.Engine
         /// <summary>
         /// Envelope for serialization
         /// </summary>
-        public static readonly FileEnvelope FileEnvelope = new FileEnvelope(name: "InputTracker", version: 5);
+        /// <remarks>
+        /// 6: Add top-level hash in composite graph fingerprint structure.
+        /// </remarks>
+        public static readonly FileEnvelope FileEnvelope = new FileEnvelope(name: "InputTracker", version: 6);
 
         /// <summary>
         /// If set this will cause there to always be a graph cache miss. This is an operational escape hatch in case
@@ -1013,7 +1016,7 @@ namespace BuildXL.Engine
                 // Loading the file change tracker succeeded, and the loaded file change tracker is in the tracking mode.
                 if (atomicSaveToken == fileChangeTracker.FileEnvelopeId)
                 {
-                    graphInputArtifactChanges = new GraphInputArtifactChanges(loggingContext);
+                    graphInputArtifactChanges = new GraphInputArtifactChanges(loggingContext, journalState.VolumeMap.GvfsProjections);
                 }
                 else
                 {

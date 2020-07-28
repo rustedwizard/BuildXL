@@ -7,6 +7,7 @@ using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
+using BuildXL.Interop;
 using BuildXL.Native.IO;
 using BuildXL.Utilities;
 
@@ -69,7 +70,13 @@ namespace BuildXL.Processes
         public virtual string GetAccessedFileName(ReportedFileAccess reportedFileAccess) => null;
 
         /// <inheritdoc />
-        public abstract ulong? GetActivePeakWorkingSet();
+        public abstract ProcessMemoryCountersSnapshot? GetMemoryCountersSnapshot();
+
+        /// <inheritdoc />
+        public abstract EmptyWorkingSetResult TryEmptyWorkingSet(bool isSuspend);
+
+        /// <inheritdoc />
+        public abstract bool TryResumeProcess();
 
         /// <inheritdoc />
         public virtual long GetDetoursMaxHeapSize() => 0;
@@ -173,16 +180,29 @@ namespace BuildXL.Processes
         /// <summary>
         /// Deserializes sandboxed process result from file.
         /// </summary>
-        /// <returns></returns>
         protected SandboxedProcessResult DeserializeSandboxedProcessResultFromFile()
         {
             string file = SandboxedProcessResultsFile;
+
+            Func<BuildXLReader, AbsolutePath> readPath = reader =>
+            {
+                bool isAbsolutePath = reader.ReadBoolean();
+                if (isAbsolutePath)
+                {
+                    return reader.ReadAbsolutePath();
+                }
+                else
+                {
+                    string path = reader.ReadString();
+                    return AbsolutePath.Create(SandboxedProcessInfo.PathTable, path);
+                }
+            };
 
             try
             {
                 using (FileStream stream = File.OpenRead(file))
                 {
-                    return SandboxedProcessResult.Deserialize(stream);
+                    return SandboxedProcessResult.Deserialize(stream, readPath);
                 }
             }
             catch (IOException ioException)

@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 import {Artifact, Cmd, Tool, Transformer} from "Sdk.Transformers";
+import * as Deployment from "Sdk.Deployment";
 
 namespace Node {
 
@@ -10,6 +11,14 @@ namespace Node {
     
     @@public
     export const npmCli = getNpmCli();
+
+    const nodeExecutablesDir : Directory = d`${getNodeTool().exe.parent}`;
+
+    /**
+     * Self-contained node executables. Platform dependent.
+     */
+    @@public
+    export const nodeExecutables : StaticDirectory = Transformer.sealDirectory(nodeExecutablesDir, globR(nodeExecutablesDir));
 
     @@public
     export function run(args: Transformer.ExecuteArguments) : Transformer.ExecuteResult {
@@ -42,11 +51,12 @@ namespace Node {
 
     const nodeWinDir = "node-v13.3.0-win-x64";
     const nodeOsxDir = "node-v13.3.0-darwin-x64";
+    const nodeLinuxDir = "node-v13.3.0-linux-x64";
 
     function getNodeTool() : Transformer.ToolDefinition {
         const host = Context.getCurrentHost();
     
-        Contract.assert(host.cpuArchitecture === "x64", "Only 64bit verisons supported.");
+        Contract.assert(host.cpuArchitecture === "x64", "Only 64bit versions supported.");
     
         let executable : RelativePath = undefined;
         let pkgContents : StaticDirectory = undefined;
@@ -59,6 +69,10 @@ namespace Node {
             case "macOS": 
                 pkgContents = importFrom("NodeJs.osx-x64").extracted;
                 executable = r`${nodeOsxDir}/bin/node`;
+                break;
+            case "unix": 
+                pkgContents = importFrom("NodeJs.linux-x64").extracted;
+                executable = r`${nodeLinuxDir}/bin/node`;
                 break;
             default:
                 Contract.fail(`The current NodeJs package doesn't support the current OS: ${host.os}. Esure you run on a supported OS -or- update the NodeJs package to have the version embdded.`);
@@ -92,8 +106,12 @@ namespace Node {
                 pkgContents = importFrom("NodeJs.osx-x64").extracted;
                 executable = r`${nodeOsxDir}/lib/node_modules/npm/bin/npm-cli.js`;
                 break;
+            case "unix": 
+                pkgContents = importFrom("NodeJs.linux-x64").extracted;
+                executable = r`${nodeLinuxDir}/lib/node_modules/npm/bin/npm-cli.js`;
+                break;
             default:
-                Contract.fail(`The current NodeJs package doesn't support the current OS: ${host.os}. Esure you run on a supported OS -or- update the NodeJs package to have the version embdded.`);
+                Contract.fail(`The current NodeJs package doesn't support the current OS: ${host.os}. Ensure you run on a supported OS -or- update the NodeJs package to have the version embedded.`);
         }
 
         return pkgContents.getFile(executable);
@@ -118,5 +136,79 @@ namespace Node {
         });
 
         return <SharedOpaqueDirectory>result.getOutputDirectory(outPath);
+    }
+
+    @@public 
+    export interface Arguments {
+        /** Static directories containing all the TypeScript files that need to be built. */
+        sources: StaticDirectory[];
+
+        /** Dependencies needed for running npm install */
+        npmDependencies?: Transformer.InputArtifact[];
+
+        /** Dependencies needed for compiling TypeScript sources */
+        dependencies?: Transformer.InputArtifact[];
+    }
+
+    /**
+     * Builds a collection of TypeScript files and produces a self-contained opaque directory that includes the compilation
+     * result and all the required node_modules dependencies
+     */
+    @@public
+    export function tscBuild(args: Arguments) : OpaqueDirectory {
+        
+        const sources = args.sources || [];
+
+        let displayName : PathAtom = sources.length === 0 ?
+            // Unlikely this will be an empty array, but let's be conservative
+            a`${Context.getLastActiveUseModuleName()}` :
+            sources[0].root.name;
+
+        // Copy all the sources to an output directory so we don't polute the source tree with outputs
+        const outputDir = Context.getNewOutputDirectory(a`node-build-${displayName}`);
+        const srcCopies = sources.map(source => Deployment.copyDirectory(
+            source.root, 
+            outputDir, 
+            source));
+
+        const srcCopy: SharedOpaqueDirectory = Transformer.composeSharedOpaqueDirectories(outputDir, srcCopies);
+
+        // Install required npm packages
+        const npmInstall = Npm.npmInstall(srcCopy, args.npmDependencies || []);
+
+        // Compile
+        const compileOutDir: SharedOpaqueDirectory = Node.tscCompile(
+            srcCopy.root, 
+            [ srcCopy, npmInstall, ...(args.dependencies || []) ]);
+
+        const outDir = Transformer.composeSharedOpaqueDirectories(
+            outputDir, 
+            [compileOutDir]);
+
+        const nodeModules = Deployment.createDeployableOpaqueSubDirectory(npmInstall, r`node_modules`);
+        const out = Deployment.createDeployableOpaqueSubDirectory(outDir, r`out`);
+
+        // The deployment also needs all node_modules folder that npm installed
+        // This is the final layout the tool needs
+        const privateDeployment : Deployment.Definition = {
+            contents: [
+                out,
+                {
+                    contents: [{subfolder: `node_modules`, contents: [nodeModules]}]
+                }
+            ]
+        };
+        
+        // We need to create a single shared opaque that contains the full layout
+        const sourceDeployment : Directory = Context.getNewOutputDirectory(a`private-deployment-${displayName}`);
+        const onDiskDeployment = Deployment.deployToDisk({definition: privateDeployment, targetDirectory: sourceDeployment, sealPartialWithoutScrubbing: true});
+
+        const finalOutput : SharedOpaqueDirectory = Deployment.copyDirectory(
+            sourceDeployment, 
+            Context.getNewOutputDirectory(a`output-${displayName}`),
+            onDiskDeployment.contents,
+            onDiskDeployment.targetOpaques);
+
+        return finalOutput;
     }
 }

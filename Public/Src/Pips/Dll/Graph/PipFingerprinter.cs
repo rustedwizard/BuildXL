@@ -287,12 +287,14 @@ namespace BuildXL.Pips.Graph
             fingerprinter.AddOrderIndependentCollection<AbsolutePath, ReadOnlyArray<AbsolutePath>>(nameof(Process.UntrackedPaths), process.UntrackedPaths, (h, p) => h.Add(p), m_pathTable.ExpandedPathComparer);
             fingerprinter.AddOrderIndependentCollection<AbsolutePath, ReadOnlyArray<AbsolutePath>>(nameof(Process.UntrackedScopes), process.UntrackedScopes, (h, p) => h.Add(p), m_pathTable.ExpandedPathComparer);
 
-            fingerprinter.AddOrderIndependentCollection<AbsolutePath, ReadOnlyArray<AbsolutePath>>(nameof(Process.PreserveOutputWhitelist), process.PreserveOutputWhitelist, (h, p) => h.Add(p), m_pathTable.ExpandedPathComparer);
+            fingerprinter.AddOrderIndependentCollection<AbsolutePath, ReadOnlyArray<AbsolutePath>>(nameof(Process.PreserveOutputAllowlist), process.PreserveOutputAllowlist, (h, p) => h.Add(p), m_pathTable.ExpandedPathComparer);
 
             fingerprinter.Add(nameof(Process.HasUntrackedChildProcesses), process.HasUntrackedChildProcesses ? 1 : 0);
             fingerprinter.Add(nameof(Process.AllowUndeclaredSourceReads), process.AllowUndeclaredSourceReads ? 1 : 0);
             fingerprinter.Add(nameof(Process.ProcessAbsentPathProbeInUndeclaredOpaquesMode), (byte)process.ProcessAbsentPathProbeInUndeclaredOpaquesMode);
             fingerprinter.Add(nameof(Process.TrustStaticallyDeclaredAccesses), process.TrustStaticallyDeclaredAccesses? 1 : 0);
+            fingerprinter.Add(nameof(Process.PreservePathSetCasing), process.PreservePathSetCasing ? 1 : 0);
+            fingerprinter.Add(nameof(Process.WritingToStandardErrorFailsExecution), process.WritingToStandardErrorFailsExecution ? 1 : 0);
 
             // When DisableCacheLookup is set, the pip is marked as perpetually dirty for incremental scheduling.
             // It must also go to the weak fingerprint so IS will get a miss when you change from the DisableCacheLookup = false
@@ -362,14 +364,15 @@ namespace BuildXL.Pips.Graph
                 fingerprinter.Add(nameof(Process.ChangeAffectedInputListWrittenFile), process.ChangeAffectedInputListWrittenFile);
             }
 
-            if (process.ChildProcessesToBreakawayFromSandbox != null)
-            {
-                fingerprinter.AddOrderIndependentCollection<StringId, ReadOnlyArray<StringId>>(
-                    nameof(Process.ChildProcessesToBreakawayFromSandbox), 
-                    process.ChildProcessesToBreakawayFromSandbox.Select(processName => processName.StringId).ToReadOnlyArray(), 
-                    (h, p) => h.Add(p),
-                    m_pathTable.StringTable.OrdinalComparer);
-            }
+            fingerprinter.AddOrderIndependentCollection<StringId, ReadOnlyArray<StringId>>(
+                nameof(Process.ChildProcessesToBreakawayFromSandbox), 
+                process.ChildProcessesToBreakawayFromSandbox.Select(processName => processName.StringId).ToReadOnlyArray(), 
+                (h, p) => h.Add(p),
+                m_pathTable.StringTable.OrdinalComparer);
+
+            fingerprinter.AddOrderIndependentCollection<AbsolutePath, ReadOnlyArray<AbsolutePath>>(
+                nameof(Process.OutputDirectoryExclusions), 
+                process.OutputDirectoryExclusions, (h, p) => h.Add(p), m_pathTable.ExpandedPathComparer);
 
             fingerprinter.Add(nameof(Process.PreserveOutputsTrustLevel), process.PreserveOutputsTrustLevel);
         }

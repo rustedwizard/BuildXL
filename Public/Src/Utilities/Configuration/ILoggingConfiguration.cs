@@ -84,9 +84,14 @@ namespace BuildXL.Utilities.Configuration
         bool? StoreFingerprints { get; }
 
         /// <summary>
-        /// <see cref="FingerprintStoreMode"/>.
+        /// <see cref="FingerprintStoreMode"/>
         /// </summary>
         FingerprintStoreMode FingerprintStoreMode { get; }
+
+        /// <summary>
+        /// Whether to save fingerprint stores to Logs
+        /// </summary>
+        bool? SaveFingerprintStoreToLogs { get;}
 
         /// <summary>
         /// The maximum entry age in minutes of an entry in the fingerprint store. Any entry older than this will
@@ -273,9 +278,19 @@ namespace BuildXL.Utilities.Configuration
         bool LogStatus { get; }
 
         /// <summary>
+        /// Logs the tracer.
+        /// </summary>
+        bool LogTracer { get; }
+
+        /// <summary>
         /// Logs the usage of resources and queues to a file specified by path. If a file path is not specified, one will be chosen based on the location of the main log file.
         /// </summary>
         AbsolutePath StatusLog { get; }
+
+        /// <summary>
+        /// Trace log
+        /// </summary>
+        AbsolutePath TraceLog { get; }
 
         /// <summary>
         /// Cache miss messages
@@ -351,5 +366,22 @@ namespace BuildXL.Utilities.Configuration
         /// Whether Vso annotations should be optimized for Azure DevOps output.
         /// </summary>
         bool OptimizeVsoAnnotationsForAzureDevOps { get; }
+
+        /// <summary>
+        /// Specifies the internal max message size to be allowed for each individual messages sent to Aria.
+        /// Current default set at 0.8Mb to have enough space for other fields specified in the same message.
+        /// </summary>
+        /// <remarks>
+        /// According to https://www.aria.ms/developers/deep-dives/input-constraints/, 
+        /// The maximum length of an event can be upto 2.5Mb.
+        /// However, it was found that the maximum length of a column in an event is 1MB.
+        /// There is no documentation found about this limit.
+        /// </remarks>
+        public int AriaIndividualMessageSizeLimitBytes { get; }
+
+        /// <summary>
+        /// Specifies the maximum number of PerProcessPipPerformanceInformation batched messages to be sent to Aria
+         /// </summary>
+        public int MaxNumPipTelemetryBatches { get; }
     }
 }

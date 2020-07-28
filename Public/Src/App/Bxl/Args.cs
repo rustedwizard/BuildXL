@@ -360,6 +360,10 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "disableProcessRetryOnResourceExhaustion",
                             sign => schedulingConfiguration.DisableProcessRetryOnResourceExhaustion = sign),
+                        // TODO: This is a temporary flag. Remove it once we no longer need it.
+                        OptionHandlerFactory.CreateBoolOption(
+                            "disableCompositeOpaqueFilters",
+                            sign => schedulingConfiguration.DisableCompositeOpaqueFilters = sign),
                         OptionHandlerFactory.CreateBoolOption(
                             "distributeCacheLookups",
                             sign => distributionConfiguration.DistributeCacheLookups = sign),
@@ -388,6 +392,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "enableAsyncLogging",
                             sign => loggingConfiguration.EnableAsyncLogging = sign),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "enableEmptyingWorkingSet",
+                            sign => schedulingConfiguration.EnableEmptyingWorkingSet = sign),
                         OptionHandlerFactory.CreateBoolOption(
                             "enableHistoricCommitMemoryProjection",
                             sign => schedulingConfiguration.EnableHistoricCommitMemoryProjection = sign),
@@ -424,6 +431,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOptionWithValue(
                             "enableLazyOutputs",
                             (opt, sign) => HandleLazyOutputMaterializationOption(opt, sign, schedulingConfiguration)),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "enableLessAggresiveMemoryProjection",
+                            sign => schedulingConfiguration.EnableLessAggresiveMemoryProjection = sign),
                         OptionHandlerFactory.CreateBoolOption(
                             "enableSetupCostWhenChoosingWorker",
                             sign => schedulingConfiguration.EnableSetupCostWhenChoosingWorker = sign),
@@ -513,17 +523,11 @@ namespace BuildXL
                             "forcePopulatePackageCache",
                             sign => frontEndConfiguration.ForcePopulatePackageCache = sign),
                         OptionHandlerFactory.CreateBoolOption(
-                            "usePackagesFromFileSystem",
-                            sign => frontEndConfiguration.UsePackagesFromFileSystem = sign),
-                        OptionHandlerFactory.CreateBoolOption(
                             "forceUseEngineInfoFromCache",
                             sign => schedulingConfiguration.ForceUseEngineInfoFromCache = sign),
                         OptionHandlerFactory.CreateOption(
                             "generateCgManifestForNugets",
                             opt => frontEndConfiguration.GenerateCgManifestForNugets = CommandLineUtilities.ParsePathOption(opt, pathTable)),
-                        OptionHandlerFactory.CreateOption(
-                            "validateCgManifestForNugets",
-                            opt => frontEndConfiguration.ValidateCgManifestForNugets = CommandLineUtilities.ParsePathOption(opt, pathTable)),
                         OptionHandlerFactory.CreateBoolOption(
                             "hardExitOnErrorInDetours",
                             sign => sandboxConfiguration.HardExitOnErrorInDetours = sign),
@@ -649,8 +653,14 @@ namespace BuildXL
                             "logsToRetain",
                             opt => loggingConfiguration.LogsToRetain = CommandLineUtilities.ParseInt32Option(opt, 1, 1000)),
                         OptionHandlerFactory.CreateBoolOption(
+                            "logTracer",
+                            sign => loggingConfiguration.LogTracer = sign),
+                        OptionHandlerFactory.CreateBoolOption(
                             "lowPriority",
                             sign => schedulingConfiguration.LowPriority = sign),
+                        OptionHandlerFactory.CreateOption(
+                            "manageMemoryMode",
+                            opt => schedulingConfiguration.ManageMemoryMode = CommandLineUtilities.ParseEnumOption<ManageMemoryMode>(opt)),
                         OptionHandlerFactory.CreateBoolOption(
                             "maskUntrackedAccesses",
                             sign => sandboxConfiguration.MaskUntrackedAccesses = sign),
@@ -690,6 +700,9 @@ namespace BuildXL
                             "maxLightProc",
                             opt => schedulingConfiguration.MaxLightProcesses = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
+                            "maxNumPipTelemetryBatches",
+                            opt => loggingConfiguration.MaxNumPipTelemetryBatches = CommandLineUtilities.ParseInt32Option(opt, 0, 100)),
+                        OptionHandlerFactory.CreateOption(
                             "maxMaterialize",
                             opt => schedulingConfiguration.MaxMaterialize = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
@@ -710,6 +723,12 @@ namespace BuildXL
                             "maxRelativeOutputDirectoryLength",
                             opt => engineConfiguration.MaxRelativeOutputDirectoryLength = CommandLineUtilities.ParseInt32Option(opt, 49, 260)),
                         OptionHandlerFactory.CreateOption(
+                            "maxRetriesDueToLowMemory",
+                            opt => schedulingConfiguration.MaxRetriesDueToLowMemory = CommandLineUtilities.ParseInt32Option(opt, 0, Int32.MaxValue)),
+                        OptionHandlerFactory.CreateOption(
+                            "maxRetriesDueToRetryableFailures",
+                            opt => schedulingConfiguration.MaxRetriesDueToRetryableFailures = CommandLineUtilities.ParseInt32Option(opt, 0, Int32.MaxValue)),
+                        OptionHandlerFactory.CreateOption(
                             "maxSealDirs",
                             opt => schedulingConfiguration.MaxSealDirs = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
@@ -724,9 +743,6 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "minimumDiskSpaceForPipsGb",
                             opt => schedulingConfiguration.MinimumDiskSpaceForPipsGb = CommandLineUtilities.ParseInt32Option(opt, 0, Int32.MaxValue)),
-                        OptionHandlerFactory.CreateOption(
-                            "numRetryFailedPipsDueToLowMemory",
-                            opt => schedulingConfiguration.NumRetryFailedPipsDueToLowMemory = CommandLineUtilities.ParseInt32Option(opt, 0, Int32.MaxValue)),
                         OptionHandlerFactory.CreateOption(
                             "minWorkers",
                             opt => distributionConfiguration.MinimumWorkers = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
@@ -805,9 +821,6 @@ namespace BuildXL
                             opt =>
                             sandboxConfiguration.WarningTimeoutMultiplier = (int)CommandLineUtilities.ParseDoubleOption(opt, 0.000001, 1000000)),
                         OptionHandlerFactory.CreateOption(
-                            "populateSymlinkDirectory",
-                            opt => engineConfiguration.PopulateSymlinkDirectories.Add(CommandLineUtilities.ParsePathOption(opt, pathTable))),
-                        OptionHandlerFactory.CreateOption(
                             "posixDeleteMode",
                             opt => FileUtilities.PosixDeleteMode = CommandLineUtilities.ParseEnumOption<PosixDeleteMode>(opt)),
                         OptionHandlerFactory.CreateOption(
@@ -875,7 +888,8 @@ namespace BuildXL
                             {
                                 var parsedOption = CommandLineUtilities.ParseEnumOption<SandboxKind>(opt);
 #if PLATFORM_OSX
-                                if (parsedOption == SandboxKind.MacOsEndpointSecurity && !OperatingSystemHelper.IsMacOSCatalinaOrHigher)
+                                var isEndpointSecurityOrHybridSandboxKind = (parsedOption == SandboxKind.MacOsEndpointSecurity || parsedOption == SandboxKind.MacOsHybrid);
+                                if (isEndpointSecurityOrHybridSandboxKind && !OperatingSystemHelper.IsMacOSCatalinaOrHigher)
                                 {
                                     parsedOption = SandboxKind.MacOsKext;
                                 }
@@ -888,6 +902,9 @@ namespace BuildXL
                                     throw CommandLineUtilities.Error(Strings.Args_SandboxKind_WrongPlatform, parsedOption, osName);
                                 }
                             }),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "SaveFingerprintStoreToLogs",
+                            sign => loggingConfiguration.SaveFingerprintStoreToLogs = sign),
                         OptionHandlerFactory.CreateBoolOption(
                             "scanChangeJournal",
                             sign => engineConfiguration.ScanChangeJournal = sign),
@@ -969,9 +986,6 @@ namespace BuildXL
                             "substTarget",
                             opt => loggingConfiguration.SubstTarget = CommandLineUtilities.ParsePathOption(opt, pathTable)),
                         OptionHandlerFactory.CreateOption(
-                            "symlinkDefinitionFile",
-                            opt => layoutConfiguration.SymlinkDefinitionFile = CommandLineUtilities.ParsePathOption(opt, pathTable)),
-                        OptionHandlerFactory.CreateOption(
                             "telemetryTagPrefix",
                             opt => schedulingConfiguration.TelemetryTagPrefix = CommandLineUtilities.ParseStringOption(opt)),
                         OptionHandlerFactory.CreateOption(
@@ -988,6 +1002,9 @@ namespace BuildXL
                             "trackBuildsInUserFolder",
                             opt => engineConfiguration.TrackBuildsInUserFolder = opt),
                         OptionHandlerFactory.CreateBoolOption(
+                            "trackGvfsProjections",
+                            opt => engineConfiguration.TrackGvfsProjections = opt),
+                        OptionHandlerFactory.CreateBoolOption(
                             "trackMethodInvocations",
                             opt => frontEndConfiguration.TrackMethodInvocations = opt),
                         OptionHandlerFactory.CreateOption(
@@ -999,10 +1016,6 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "typeCheck",
                             sign => { /* Do nothing Office still passes this flag even though it is deprecated. */ }),
-
-                        OptionHandlerFactory.CreateOption(
-                            "unexpectedSymlinkAccessReportingMode",
-                            opt => schedulingConfiguration.UnexpectedSymlinkAccessReportingMode = CommandLineUtilities.ParseEnumOption<UnexpectedSymlinkAccessReportingMode>(opt)),
 
                         // <Begin unsafe arguments>
                         // Unsafe options should follow the pattern that enabling them (i.e. "/unsafe_option" or "/unsafe_option+") should lead to an unsafe configuration
@@ -1101,6 +1114,17 @@ namespace BuildXL
                             },
                             isUnsafe: true),
                         OptionHandlerFactory.CreateBoolOption(
+                            "unsafe_IgnoreFullSymlinkResolving",
+                            sign =>
+                            {
+                                if (sign && OperatingSystemHelper.IsUnixOS)
+                                {
+                                    throw CommandLineUtilities.Error("/unsafe_IgnoreFullSymlinkResolving not allowed on non-Windows OS");
+                                }
+                                sandboxConfiguration.UnsafeSandboxConfigurationMutable.IgnoreFullSymlinkResolving = sign;
+                            },
+                            isUnsafe: true),
+                        OptionHandlerFactory.CreateBoolOption(
                             "unsafe_IgnorePreloadedDlls",
                             sign =>
                             {
@@ -1141,10 +1165,6 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "unsafe_IgnoreZwRenameFileInformation",
                             sign => sandboxConfiguration.UnsafeSandboxConfigurationMutable.IgnoreZwRenameFileInformation = sign,
-                            isUnsafe: true),
-                        OptionHandlerFactory.CreateBoolOption(
-                            "unsafe_LazySymlinkCreation",
-                            sign => schedulingConfiguration.UnsafeLazySymlinkCreation = sign,
                             isUnsafe: true),
                         OptionHandlerFactory.CreateBoolOption(
                             "unsafe_MonitorFileAccesses",
@@ -1220,8 +1240,14 @@ namespace BuildXL
                             "useLargeNtClosePreallocatedList",
                             sign => sandboxConfiguration.UseLargeNtClosePreallocatedList = sign),
                         OptionHandlerFactory.CreateBoolOption(
+                            "usePackagesFromFileSystem",
+                            sign => frontEndConfiguration.UsePackagesFromFileSystem = sign),
+                        OptionHandlerFactory.CreateBoolOption(
                             "usePartialEvaluation",
                             sign => frontEndConfiguration.UsePartialEvaluation = sign),
+                        OptionHandlerFactory.CreateOption(
+                            "validateCgManifestForNugets",
+                            opt => frontEndConfiguration.ValidateCgManifestForNugets = CommandLineUtilities.ParsePathOption(opt, pathTable)),
                         OptionHandlerFactory.CreateBoolOption(
                             "validateDistribution",
                             sign => distributionConfiguration.ValidateDistribution = sign),
@@ -1233,11 +1259,17 @@ namespace BuildXL
                             sign => schedulingConfiguration.VerifyCacheLookupPin = sign),
                         OptionHandlerFactory.CreateOption(
                             "vfsCasRoot",
-                            opt => cacheConfiguration.VfsCasRoot = CommandLineUtilities.ParsePathOption(opt, pathTable)),
+                            opt =>
+                            {
+                                cacheConfiguration.VfsCasRoot = CommandLineUtilities.ParsePathOption(opt, pathTable);
+                            }),
                         /* The viewer is currently broken. Leaving the code around so we can dust it off at some point. AB#1609082
                         OptionHandlerFactory.CreateOption(
                             "viewer",
                             opt => configuration.Viewer = CommandLineUtilities.ParseEnumOption<ViewerMode>(opt)),*/
+                        OptionHandlerFactory.CreateOption(
+                            "vmConcurrencyLimit",
+                            opt => sandboxConfiguration.VmConcurrencyLimit = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateBoolOption(
                             "vs",
                             sign => ideConfiguration.IsEnabled = sign),
@@ -1961,6 +1993,9 @@ namespace BuildXL
                     break;
                 case "LAZYSODELETION":
                     scheduleConfiguration.UnsafeLazySODeletion = experimentalOptionAndValue.Item2;
+                    break;
+                case "PROCESSSYMLINKEDACCESSES":
+                    sandboxConfiguration.UnsafeSandboxConfigurationMutable.ProcessSymlinkedAccesses = experimentalOptionAndValue.Item2;
                     break;
                 default:
                     throw CommandLineUtilities.Error(Strings.Args_Experimental_UnsupportedValue, experimentalOptionAndValue.Item1);

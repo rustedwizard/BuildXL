@@ -22,6 +22,8 @@ using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Utilities.Tasks;
 
+#nullable disable
+
 namespace BuildXL.Cache.ContentStore.SQLite
 {
     /// <summary>
@@ -584,7 +586,7 @@ namespace BuildXL.Cache.ContentStore.SQLite
         /// </summary>
         protected async Task<T> RunExclusiveAsync<T>(Func<Task<T>> func)
         {
-             using (await _writerLock.WaitToken())
+             using (await _writerLock.WaitTokenAsync())
             {
                 return await RunInBlockAsync(func, true);
             }
@@ -595,7 +597,7 @@ namespace BuildXL.Cache.ContentStore.SQLite
         /// </summary>
         protected async Task RunExclusiveAsync(Func<Task> action)
         {
-             using (await _writerLock.WaitToken())
+             using (await _writerLock.WaitTokenAsync())
             {
                 Func<Task<bool>> func = async () =>
                 {
@@ -608,7 +610,7 @@ namespace BuildXL.Cache.ContentStore.SQLite
 
         private async Task<T> RunExclusiveAsyncNoTransactionAsync<T>(Func<Task<T>> func)
         {
-             using (await _writerLock.WaitToken())
+             using (await _writerLock.WaitTokenAsync())
             {
                 return await RunInBlockAsync(func, false);
             }

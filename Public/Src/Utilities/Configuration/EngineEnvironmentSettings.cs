@@ -15,6 +15,21 @@ namespace BuildXL.Utilities.Configuration
     /// </summary>
     public static class EngineEnvironmentSettings
     {
+        /// <nodoc />
+        public static readonly Setting<int?> DesiredCommitPercentToFreeSlack = CreateSetting("BuildXLDesiredCommitPercentToFreeSlack", value => ParseInt32(value));
+
+        /// <nodoc />
+        public static readonly Setting<int?> DesiredRamPercentToFreeSlack = CreateSetting("BuildXLDesiredRamPercentToFreeSlack", value => ParseInt32(value));
+
+        /// <nodoc />
+        public static readonly Setting<bool> DisableUseAverageCountersForResume = CreateSetting("BuildXLDisableUseAverageCountersForResume", value => value == "1");
+
+        /// <nodoc />
+        public static readonly Setting<bool> SetMaxWorkingSetToMin = CreateSetting("BuildXLSetMaxWorkingSetToMin", value => value == "1");
+
+        /// <nodoc />
+        public static readonly Setting<bool> SetMaxWorkingSetToPeakBeforeResume = CreateSetting("BuildXLSetMaxWorkingSetToPeakBeforeResume", value => value == "1");
+
         /// <summary>
         /// The maximum number pips to perform the on-the-fly cache miss analysis
         /// </summary>
@@ -23,7 +38,7 @@ namespace BuildXL.Utilities.Configuration
         /// <summary>
         /// The maximum number of RPC 
         /// </summary>
-        public static readonly Setting<int> MaxMessagesPerBatch = CreateSetting("MaxMessagesPerBatch", value => ParseInt32(value) ?? 100);
+        public static readonly Setting<int> MaxMessagesPerBatch = CreateSetting("MaxMessagesPerBatch", value => ParseInt32(value) ?? 1000);
 
         /// <summary>
         /// Defines whether BuildXL should launch the debugger after a particular engine phase.
@@ -60,11 +75,6 @@ namespace BuildXL.Utilities.Configuration
         /// Bypass NuGet up to date checks
         /// </summary>
         public static readonly Setting<bool> BypassNugetDownload = CreateSetting("BuildXLBypassNugetDownload", value => value == "1");
-
-        /// <summary>
-        /// Emit file with all symlink definitions
-        /// </summary>
-        public static readonly Setting<bool> DebugSymlinkDefinitions = CreateSetting("DebugSymlinkDefinitions", value => value == "1");
 
         /// <summary>
         /// Allows optionally specifying an alternative timeout fo connect between IDE service and BuildXL task
@@ -134,13 +144,18 @@ namespace BuildXL.Utilities.Configuration
         /// </summary>
         public static readonly Setting<bool> DoNotInlineWhenNewPipRunInSameQueue = CreateSetting("BuildXLDoNotInlineWhenNewPipRunInSameQueue", value => value == "1");
 
+        /// <summary>
+        /// Specifies to disable load balance among workers.
+        /// </summary>
+        public static readonly Setting<double?> DisableLoadBalanceMultiplier = CreateSetting("BuildXLDisableLoadBalanceMultiplier", value => ParseDouble(value));
+        
         #region Distribution-related timeouts
 
         /// <summary>
         /// Allows optionally specifying an alternative timeout for workers to wait for attach from master
         /// </summary>
         public static readonly Setting<TimeSpan> WorkerAttachTimeout = CreateSetting("BuildXLWorkerAttachTimeoutMin", value => ParseTimeSpan(value, ts => TimeSpan.FromMinutes(ts)) ??
-            TimeSpan.FromMinutes(45));
+            TimeSpan.FromMinutes(60));
 
         /// <summary>
         /// Maximum time to wait while establishing a connection to the remote machine (both master->worker and worker->master)
@@ -205,6 +220,11 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<bool> RuntimeCacheMissAllPips = CreateSetting("BuildXLRuntimeCacheMissAllPips", value => value == "1");
 
         /// <summary>
+        /// The minimum step duration for the tracer to log
+        /// </summary>
+        public static readonly Setting<int> MinStepDurationSecForTracer = CreateSetting("BuildXLMinStepDurationSecForTracer", value => ParseInt32(value, allowZero: true) ?? 30);
+
+        /// <summary>
         /// Sets the variable for consumption by settings
         /// </summary>
         public static void SetVariable(string name, string value)
@@ -220,10 +240,21 @@ namespace BuildXL.Utilities.Configuration
             SettingsEnvironment.Reset();
         }
 
-        private static int? ParseInt32(string valueString)
+        private static int? ParseInt32(string valueString, bool allowZero = false)
         {
             int result;
-            if (int.TryParse(valueString, out result) && result != 0)
+            if (int.TryParse(valueString, out result) && (result != 0 || allowZero))
+            {
+                return result;
+            }
+
+            return null;
+        }
+
+        private static double? ParseDouble(string valueString)
+        {
+            double result;
+            if (double.TryParse(valueString, out result))
             {
                 return result;
             }

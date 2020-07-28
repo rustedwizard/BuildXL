@@ -20,8 +20,8 @@ namespace BuildXL.Utilities.Configuration.Mutable
             EnableLazyOutputMaterialization = true;
             UseHistoricalPerformanceInfo = true;
             TreatDirectoryAsAbsentFileOnHashingInputContent = true;
-            MaximumRamUtilizationPercentage = 85;
-            MinimumTotalAvailableRamMb = 500;
+            MaximumRamUtilizationPercentage = 90;
+            MaximumCommitUtilizationPercentage = 95;
             MaximumAllowedMemoryPressureLevel = Memory.PressureLevel.Normal;
 
             AllowCopySymlink = true;
@@ -49,8 +49,6 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
             ProcessRetries = 0;
 
-            UnsafeLazySymlinkCreation = false;
-            UnexpectedSymlinkAccessReportingMode = UnexpectedSymlinkAccessReportingMode.All;
             StoreOutputsToCache = true;
 
             // TODO: Fix me.
@@ -78,7 +76,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
             InputChanges = AbsolutePath.Invalid;
 
             EnableSetupCostWhenChoosingWorker = true;
-            MaximumCommitUtilizationPercentage = 95;
+            EnableLessAggresiveMemoryProjection = false;
+            ManageMemoryMode = ManageMemoryMode.CancellationRam;
+            MaxRetriesDueToRetryableFailures = 5;
         }
 
         /// <nodoc />
@@ -120,8 +120,6 @@ namespace BuildXL.Utilities.Configuration.Mutable
             UnsafeDisableGraphPostValidation = template.UnsafeDisableGraphPostValidation;
 
             ProcessRetries = template.ProcessRetries;
-            UnsafeLazySymlinkCreation = template.UnsafeLazySymlinkCreation;
-            UnexpectedSymlinkAccessReportingMode = template.UnexpectedSymlinkAccessReportingMode;
             StoreOutputsToCache = template.StoreOutputsToCache;
 
             EnableLazyWriteFileMaterialization = template.EnableLazyWriteFileMaterialization;
@@ -153,7 +151,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MaximumCommitUtilizationPercentage = template.MaximumCommitUtilizationPercentage;
             DelayedCacheLookupMinMultiplier = template.DelayedCacheLookupMinMultiplier;
             DelayedCacheLookupMaxMultiplier = template.DelayedCacheLookupMaxMultiplier;
-            NumRetryFailedPipsDueToLowMemory = template.NumRetryFailedPipsDueToLowMemory;
+            MaxRetriesDueToLowMemory = template.MaxRetriesDueToLowMemory;
+            MaxRetriesDueToRetryableFailures = template.MaxRetriesDueToRetryableFailures;
+            EnableLessAggresiveMemoryProjection = template.EnableLessAggresiveMemoryProjection;
+            ManageMemoryMode = template.ManageMemoryMode;
         }
 
         /// <inheritdoc />
@@ -249,7 +250,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public int MaximumRamUtilizationPercentage { get; set; }
 
         /// <inheritdoc />
-        public int MinimumTotalAvailableRamMb { get; set; }
+        public int? MinimumTotalAvailableRamMb { get; set; }
 
         /// <inheritdoc />
         public Memory.PressureLevel MaximumAllowedMemoryPressureLevel { get; set; }
@@ -284,16 +285,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public int ProcessRetries { get; set; }
 
         /// <inheritdoc />
-        public bool UnsafeLazySymlinkCreation { get; set; }
-
-        /// <inheritdoc />
         public bool EnableLazyWriteFileMaterialization { get; set; }
 
         /// <inheritdoc />
         public bool WriteIpcOutput { get; set; }
-
-        /// <inheritdoc />
-        public UnexpectedSymlinkAccessReportingMode UnexpectedSymlinkAccessReportingMode { get; set; }
 
         /// <inheritdoc />
         public bool StoreOutputsToCache { get; set; }
@@ -336,7 +331,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public bool UnsafeDisableSharedOpaqueEmptyDirectoryScrubbing { get; set; }
 
         /// <inheritdoc />
-        public bool UseHistoricalCpuUsageInfo { get; set; }
+        public bool? UseHistoricalCpuUsageInfo { get; set; }
 
         /// <inheritdoc />
         public bool UseFixedApiServerMoniker { get; set; }
@@ -348,8 +343,11 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public int? MinimumDiskSpaceForPipsGb { get; set; }
 
         /// <inheritdoc />
-        public int? NumRetryFailedPipsDueToLowMemory { get; set; }
-        
+        public int? MaxRetriesDueToLowMemory { get; set; }
+
+        /// <inheritdoc />
+        public int MaxRetriesDueToRetryableFailures { get; set; }
+
         /// <inheritdoc />
         public bool CacheOnly { get; set; }
 
@@ -370,5 +368,17 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public double? DelayedCacheLookupMaxMultiplier { get; set; }
+
+        /// <inheritdoc />
+        public bool EnableLessAggresiveMemoryProjection { get; set; }
+
+        /// <inheritdoc />
+        public bool EnableEmptyingWorkingSet { get; set; }
+
+        /// <inheritdoc />
+        public ManageMemoryMode ManageMemoryMode { get; set; }
+
+        /// <inheritdoc />
+        public bool? DisableCompositeOpaqueFilters { get; set; }
     }
 }

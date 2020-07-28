@@ -40,6 +40,7 @@ namespace BuildXL.Processes.Tracing
         PipProcessChildrenSurvivedKilled = 42,
         PipProcessChildrenSurvivedTooMany = 43,
         PipProcessMissingExpectedOutputOnCleanExit = 44,
+        PipProcessWroteToStandardErrorOnCleanExit = 45,
         PipProcessOutputPreparationFailed = 46,
         PipProcessPreserveOutputDirectoryFailedToMakeFilePrivate = 53,
 
@@ -68,9 +69,10 @@ namespace BuildXL.Processes.Tracing
         PipProcessNeedsExecuteExternalButExecuteInternal = 92,
         LogPhaseDuration = 93,
 
-        PipProcessDisallowedFileAccessWhitelistedCacheable = 264,
-        PipProcessDisallowedFileAccessWhitelistedNonCacheable = 269,
-        FileAccessWhitelistFailedToParsePath = 274,
+        PipProcessDisallowedFileAccessAllowlistedCacheable = 264,
+        PipProcessDisallowedFileAccessAllowlistedNonCacheable = 269,
+        FileAccessAllowlistFailedToParsePath = 274,
+        CannotProbeOutputUnderSharedOpaque = 275,
 
         //// Reserved = 306,
         //// Reserved = 307,
@@ -100,10 +102,11 @@ namespace BuildXL.Processes.Tracing
         CannotReadSidebandFileError = 875,
         CannotReadSidebandFileWarning = 876,
         CannotDeleteSharedOpaqueOutputFile = 877,
+        ResumeOrSuspendProcessError = 878,
 
         // Temp files/directory cleanup
-        PipTempDirectoryCleanupError = 2201,
-        PipTempDirectorySetupError = 2203,
+        PipTempDirectoryCleanupWarning = 2201,
+        PipTempDirectorySetupWarning = 2203,
         PipTempSymlinkRedirectionError = 2205,
         PipTempSymlinkRedirection = 2206,
 
@@ -121,7 +124,7 @@ namespace BuildXL.Processes.Tracing
         MoreBytesWrittenThanBufferSize = 2930,
 
         //DominoProcessesStart = 4400,
-        PipProcessUncacheableWhitelistNotAllowedInDistributedBuilds = 4401,
+        PipProcessUncacheableAllowlistNotAllowedInDistributedBuilds = 4401,
         //DominoProcessesEnd = 4499,
 
         //// Detours

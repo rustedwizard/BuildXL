@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-extern alias Async;
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
@@ -184,8 +183,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 var statsResult = await GetStatsInternalAsync(context).ConfigureAwait(false);
                 if (statsResult.Succeeded)
                 {
-                    context.Debug("BuildCacheCache Stats:");
-                    statsResult.CounterSet.LogOrderedNameValuePairs(s => _tracer.Debug(context, s));
+                    _tracer.TraceStatisticsAtShutdown(context, statsResult.CounterSet, prefix: "BuildCacheCacheStats");
                 }
                 else
                 {
@@ -444,7 +442,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         public Guid Id { get; private set; }
 
         /// <inheritdoc />
-        public Async::System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
+        public System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
         {
             return AsyncEnumerable.Empty<StructResult<StrongFingerprint>>();
         }

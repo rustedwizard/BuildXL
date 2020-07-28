@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.Tracing;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
@@ -74,7 +75,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
         private readonly TimeSpan _longOperationDurationThreshold;
 
         public ContentStoreInternalTracer(ContentStoreSettings? settings)
-            : this(settings?.TraceFileSystemContentStoreDiagnosticMessages ?? false, settings.GetLongOperationDurationThreshold())
+            : this(settings?.TraceFileSystemContentStoreDiagnosticMessages ?? true, settings.GetLongOperationDurationThreshold())
         { }
 
         public ContentStoreInternalTracer(bool traceDiagnosticEvents, TimeSpan longOperationDurationThreshold)
@@ -405,6 +406,29 @@ namespace BuildXL.Cache.ContentStore.Tracing
 
             var ms = (long)duration.TotalMilliseconds;
             Debug(context, $"{Name}.ReconstructDirectory() {ms}ms ContentCount=[{contentCount}] ContentSize=[{contentSize}]");
+        }
+
+        public (ContentDirectorySnapshot<ContentFileInfo> contentInfo, long contentCount, long contentSize) Reconstruct(
+            Context context,
+            Func<Stopwatch, (ContentDirectorySnapshot<ContentFileInfo> contentInfo, long contentCount, long contentSize)> callback)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            (ContentDirectorySnapshot<ContentFileInfo> contentInfo, long contentCount, long contentSize) result = default;
+            try
+            {
+                result = callback(stopwatch);
+                return result;
+            }
+            catch (Exception exception)
+            {
+                ReconstructDirectoryException(context, exception);
+                throw;
+            }
+            finally
+            {
+                stopwatch.Stop();
+                ReconstructDirectory(context, stopwatch.Elapsed, result.contentCount, result.contentSize);
+            }
         }
 
         public void ReconstructDirectoryException(Context context, Exception exception)

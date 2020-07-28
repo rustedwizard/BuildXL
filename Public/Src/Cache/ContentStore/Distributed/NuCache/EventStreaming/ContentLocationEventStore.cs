@@ -356,7 +356,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
         /// <summary>
         /// Notifies about reconciliation of content
         /// </summary>
-        public Task<BoolResult> ReconcileAsync(OperationContext context, MachineId machine, IReadOnlyList<ShortHashWithSize> addedContent, IReadOnlyList<ShortHash> removedContent)
+        public Task<BoolResult> ReconcileAsync(OperationContext context, MachineId machine, IReadOnlyList<ShortHashWithSize> addedContent, IReadOnlyList<ShortHash> removedContent, string suffix)
         {
             return context.PerformOperationAsync(
                 Tracer,
@@ -371,7 +371,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                     await StoreAndPublishLargeEventStreamAsync(
                         context,
                         machine,
-                        name: $"reconcile.{Environment.MachineName}.{machine.Index}",
+                        name: $"reconcile.{Environment.MachineName}.{machine.Index}{suffix}",
                         eventDatas: new ContentLocationEventData[]
                         {
                             new AddContentLocationEventData(machine, addedContent),
@@ -405,7 +405,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                     try
                     {
                         long size = 0;
-                        using (var stream = await _fileSystem.OpenSafeAsync(blobFilePath, FileAccess.ReadWrite, FileMode.Create, FileShare.Read | FileShare.Delete, FileOptions.None, AbsFileSystemExtension.DefaultFileStreamBufferSize))
+                        using (Stream stream = await _fileSystem.OpenSafeAsync(blobFilePath, FileAccess.ReadWrite, FileMode.Create, FileShare.Read | FileShare.Delete, FileOptions.None, AbsFileSystemExtension.DefaultFileStreamBufferSize))
                         using (var writer = BuildXLWriter.Create(stream, leaveOpen: true))
                         {
                             EventDataSerializer.SerializeEvents(writer, eventDatas);

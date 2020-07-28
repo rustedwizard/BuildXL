@@ -5,6 +5,8 @@ Doing cache miss analysis at runtime is more convenient than doing it postmortem
 
 Enabling cache miss analysis on distributed builds requires or on build sessions where the machine performing the build may not have been the machine that previously added the pip into the cache requires additional configuration.
 
+Due to possibly event ingestion throttling and event message retention, the telemetry backend could drop events. For the cache miss analysis, this means that some of the cache miss results could be missing from the telemetry. Currently, the loss rate of per pip result is around 0.1%, but the number may vary. You may want to use the following Kusto query to check for the completeness of cache miss analysis results in the telemetry for a particular build that you are interested in. [CheckMissingEventInCachemissanalysis.csl](../Shared/Scripts/kusto/CheckMissingEventInCachemissanalysis.csl) for single pip reporting and [CheckMissingEventInCachemissanalysisbatchresults.csl](../Shared/Scripts/kusto/CheckMissingEventInCachemissanalysisbatchresults.csl) for batch reporting.
+
 ## Postmortem Cache Miss Analysis
 Currently there are two [analyzers](./Execution-Analyzer.md) that can generate a report describing the reasons for cache misses between two builds. The main difference between the analyzers is the fingerprints they compare --- the legacy analyzer compares cache lookup time fingerprints while the new analyzer compares execution time fingerprints. Because of this, in some scenarios, the analyzers might report different hashes for the same pair of builds; this does not affect the classification of cache misses.
 
@@ -16,7 +18,7 @@ To use this analyzer, set the mode to **/m:CacheMiss** and the **/xl:** paramete
 
 The `analysis.txt` file in the output directory shows the first pip in each dependency chain that was a cache miss as well as the reasons for the miss. Full fingerprint computation inputs for each analyzed pip are kept in the "old" and "new" subdirectories; there will be a file for each pip's `SemiStableHash`.
 
-**Note:** This analyzer will only work with logs from BuildXL builds with **/storeFingerprints** enabled. This is **enabled** by default on desktop builds, and can be disabled by passing /storeFingerprints-.
+**Note:** This analyzer will only work with logs from BuildXL builds with **/SaveFingerprintStoreToLogs+**. **fingerprintStoreAnalysisMode** is **on** by default in Cloudbuild, but "off" for other builds.
 
 ### Legacy Cache Miss Analyzer
 This method of analysis remains for builds without **/storeFingerprints** enabled. See Cache Miss Analyzer above for cache miss analysis with incremental scheduling and graph filtering. Use this analyzer to compare two distinct builds, to see which pips were cache misses in the second build, and why.

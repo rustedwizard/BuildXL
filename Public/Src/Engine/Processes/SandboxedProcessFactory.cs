@@ -115,7 +115,7 @@ namespace BuildXL.Processes
             SandboxedPipExecutorPhaseProcessingStandardOutputs,
 
             /// <summary>
-            /// Duration of <see cref="SandboxedProcessPipExecutor.GetObservedFileAccesses"/>
+            /// Duration of <see cref="SandboxedProcessPipExecutor.TryGetObservedFileAccesses"/>
             /// </summary>
             [CounterType(CounterType.Stopwatch)]
             SandboxedPipExecutorPhaseGettingObservedFileAccesses,
@@ -242,7 +242,7 @@ namespace BuildXL.Processes
             }
             else if (OperatingSystemHelper.IsUnixOS)
             {
-                return new SandboxedProcessMac(sandboxedProcessInfo, ignoreReportedAccesses: sandboxKind == SandboxKind.MacOsKextIgnoreFileAccesses);
+                return new SandboxedProcessUnix(sandboxedProcessInfo, ignoreReportedAccesses: sandboxKind == SandboxKind.MacOsKextIgnoreFileAccesses);
             }
             else
             {

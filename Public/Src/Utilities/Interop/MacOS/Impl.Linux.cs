@@ -29,6 +29,9 @@ namespace BuildXL.Interop.Unix
 
         private const string ProcStatPath = "/proc/stat";
 
+        private static readonly Lazy<DriveInfo[]> s_sortedDrives 
+            = new Lazy<DriveInfo[]>(() => DriveInfo.GetDrives().OrderBy(di => di.Name).Reverse().ToArray());
+
         /// <summary>Linux specific implementation of <see cref="IO.GetFileSystemType"/> </summary>
         internal static int GetFileSystemType(SafeFileHandle fd, StringBuilder fsTypeName, long bufferSize)
         {
@@ -197,6 +200,59 @@ namespace BuildXL.Interop.Unix
                 : ERROR;
         }
 
+        // CODESYNC: NormalizeAndHashPath in StringOperations.cpp
+        // TODO: there is no reason for this hash computation to be done in native StringOperations.cpp
+        private const uint Fnv1Prime32 = 16777619;
+        private const uint Fnv1Basis32 = 2166136261;
+        private static uint _Fold(uint hash, byte value) 
+        {
+            unchecked { return (hash * Fnv1Prime32) ^ (uint)value; }
+        }
+        private static uint Fold(uint hash, uint value)
+        {
+            unchecked { return _Fold(_Fold(hash, (byte)value), (byte)(((uint)value) >> 8)); }
+        }
+
+        internal static int NormalizePathAndReturnHash(byte[] pPath, byte[] normalizedPath)
+        {
+            Contract.Requires(pPath.Length == normalizedPath.Length);
+            unchecked
+            {
+                uint hash = Fnv1Basis32;
+                int i = 0;
+                for (; i < pPath.Length && pPath[i] != 0; i++)
+                {
+                    normalizedPath[i] = pPath[i];
+                    hash = Fold(hash, normalizedPath[i]);
+                }
+
+                Contract.Assert(i < normalizedPath.Length);
+                normalizedPath[i] = 0;
+                return (int)hash;
+            }
+        }
+
+        internal static string GetMountNameForPath(string path)
+        {
+            return s_sortedDrives.Value.FirstOrDefault(di => path.StartsWith(di.Name))?.Name;
+        }
+
+        [DllImport(Libraries.LibC, SetLastError = true)]
+        unsafe internal static extern int lsetxattr(
+            [MarshalAs(UnmanagedType.LPStr)] string path,
+            [MarshalAs(UnmanagedType.LPStr)] string name,
+            void *value,
+            ulong size,
+            int flags);
+
+        [DllImport(Libraries.LibC, SetLastError = true)]
+        internal static extern long lgetxattr(
+            [MarshalAs(UnmanagedType.LPStr)] string path,
+            [MarshalAs(UnmanagedType.LPStr)] string name,
+            ref long value,
+            ulong size,
+            int flags);
+
         private static bool IsSymlink(string path)
         {
             var buf = new stat_buf();
@@ -205,7 +261,6 @@ namespace BuildXL.Interop.Unix
                 (buf.st_mode & (ushort)FilePermissions.S_IFLNK) != 0;
         }
 
-        private static int ToInt(SafeFileHandle fd) => fd.DangerousGetHandle().ToInt32();
         private static string ToPath(SafeFileHandle fd)
         {
             var path = new StringBuilder(MaxPathLength);
@@ -321,8 +376,8 @@ namespace BuildXL.Interop.Unix
         [Flags]
         public enum O_Flags : int
         {
-            O_NONE      = 0,
             O_RDONLY    = 0,     // open for reading only
+            O_NONE      = 0,
             O_WRONLY    = 1,     // open for writing only
             O_RDWR      = 2,     // open for reading and writing
             O_CREAT     = 64,    // create file if it does not exist

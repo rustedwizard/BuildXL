@@ -45,6 +45,18 @@ namespace BuildXL.Interop.Unix
             public ulong DiskBytesWritten;
         }
 
+        /// <remarks>
+        /// Implemented by calling "kill -0".
+        /// This should be much cheaper than calling Process.GetProcessById().
+        /// </remarks>
+        public static bool IsAlive(int pid) => Impl_Common.kill(pid, 0) == 0;
+
+        /// <remarks>
+        /// Implemented by sending SIGKILL to a process with id <paramref name="pid"/>.
+        /// The return value indicates whether the KILL signal was sent successfully.
+        /// </remarks>
+        public static bool ForceQuit(int pid) => Impl_Common.kill(pid, 9) == 0;
+
         /// <summary>
         /// Returns process resource usage information to the caller
         /// </summary>
@@ -62,14 +74,20 @@ namespace BuildXL.Interop.Unix
         /// <param name="logsDirectory">The logs directory</param>
         /// <param name="buffer">A buffer to hold the core dump file directory</param>
         /// <param name="length">The buffer length</param>
-        [DllImport(Libraries.BuildXLInteropLibMacOS)]
-        public static extern bool SetupProcessDumps(string logsDirectory, StringBuilder buffer, long length);
+        public static bool SetupProcessDumps(string logsDirectory, StringBuilder buffer, long length) => IsMacOS
+            ? Impl_Mac.SetupProcessDumps(logsDirectory, buffer, length)
+            : false;
 
         /// <summary>
         /// Cleans up the core dump facilities created by calling <see cref="SetupProcessDumps(string, StringBuilder, long)"/>
         /// </summary>
-        [DllImport(Libraries.BuildXLInteropLibMacOS)]
-        public static extern void TeardownProcessDumps();
+        public static void TeardownProcessDumps()
+        {
+            if (IsMacOS)
+            {
+                Impl_Mac.TeardownProcessDumps();
+            }
+        }
 
         /// <inheritdoc />
         public static bool IsElevated()

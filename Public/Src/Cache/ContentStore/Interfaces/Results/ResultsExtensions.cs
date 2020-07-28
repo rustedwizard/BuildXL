@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
@@ -44,6 +46,17 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         public static async Task<TResult> TraceIfFailure<TResult>(this Task<TResult> task, Context context, [CallerMemberName]string? operationName = null) where TResult : ResultBase
         {
             var result = await task;
+            result.TraceIfFailure(context, operationName);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Traces the <paramref name="result"/> if the result is not successful.
+        /// </summary>
+        public static TResult TraceIfFailure<TResult>(this TResult result, Context context, [CallerMemberName] string? operationName = null)
+            where TResult : ResultBase
+        {
             if (!result.Succeeded)
             {
                 context.Warning($"Operation '{operationName}' failed with an error={result}");
@@ -77,7 +90,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         {
             if (result.Succeeded)
             {
-                return selector(result.Value);
+                return selector(result.Value!);
             }
 
             return new ErrorResult(result).AsResult<TResult>();
@@ -90,7 +103,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         {
             if (result.Succeeded)
             {
-                return Result.Success(selector(result.Value));
+                return Result.Success(selector(result.Value!));
             }
             else
             {
@@ -108,7 +121,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
                 throw new ResultPropagationException(result);
             }
 
-            return result.Value;
+            return result.Value!;
         }
 
         /// <summary>
@@ -145,6 +158,35 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         }
 
         /// <summary>
+        /// Throws <see cref="ResultPropagationException"/> if result is not successful.
+        /// </summary>
+        public static void ThrowIfFailure<TResult>(this IEnumerable<TResult> results) where TResult : ResultBase
+        {
+            foreach (var result in results)
+            {
+                result.ThrowIfFailure();
+            }
+        }
+
+        /// <summary>
+        /// Throws <see cref="ResultPropagationException"/> if result is not successful.
+        /// </summary>
+        public static async Task ThrowIfFailureAsync<TResult>(this Task<TResult> task) where TResult : ResultBase
+        {
+            var result = await task;
+            result.ThrowIfFailure();
+        }
+
+        /// <summary>
+        /// Throws <see cref="ResultPropagationException"/> if result is not successful.
+        /// </summary>
+        public static async Task ThrowIfFailureAsync<TResult>(this Task<TResult[]> task) where TResult : ResultBase
+        {
+            var result = await task;
+            result.ThrowIfFailure();
+        }
+
+        /// <summary>
         /// Awaits the task and throws <see cref="ResultPropagationException"/> if the result is not successful.
         /// </summary>
         public static async Task<TResult> ThrowIfFailureAsync<T, TResult>(this Task<T> task, Func<T, TResult> resultSelector)
@@ -173,6 +215,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         /// <summary>
         /// Gets the value from <paramref name="result"/> if operation succeeded or default value if it did not succeed.
         /// </summary>
+        [return: MaybeNull]
         public static T GetValueOrDefault<T>(this Result<T> result, T defaultValue = default)
         {
             return result.Succeeded ? result.Value : defaultValue;
@@ -191,7 +234,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
                 throw new ResultPropagationException(result);
             }
 
-            return result.Value;
+            return result.Value!;
         }
 
         /// <summary>
@@ -207,7 +250,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
                 throw new ResultPropagationException(result);
             }
 
-            return result.Data;
+            return result.Data!;
         }
 
         /// <summary>
@@ -223,17 +266,30 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
                 throw new ResultPropagationException(result);
             }
 
-            return result.Data;
+            return result.Data!;
         }
 
         /// <summary>
         /// Tries to get the value from the result.
         /// </summary>
         /// <returns>Whether the value was gotten successfully.</returns>
-        public static bool TryGetValue<T>(this Result<T> result, out T value)
+        public static bool TryGetValue<T>(this Result<T> result, [MaybeNull]out T value)
         {
             value = result.Succeeded ? result.Value : default;
             return result.Succeeded;
+        }
+
+        /// <summary>
+        /// Returns a string representation of the result if succeeded.
+        /// </summary>
+        public static string? ToStringWithValue<T>(this Result<T> result)
+        {
+            if (!result)
+            {
+                return result.ToString();
+            }
+
+            return result.Value!.ToString();
         }
     }
 }

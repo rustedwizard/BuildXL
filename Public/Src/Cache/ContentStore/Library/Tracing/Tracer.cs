@@ -12,6 +12,7 @@ using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Cache.ContentStore.UtilitiesCore;
 
 // ReSharper disable UnusedMemberInSuper.Global
 
@@ -21,8 +22,21 @@ using BuildXL.Cache.ContentStore.Tracing.Internal;
 
 namespace BuildXL.Cache.ContentStore.Tracing
 {
+    /// <summary>
+    /// Global configuration that controls some aspects of tracing, like whether to trace statistics.
+    /// </summary>
+    public static class GlobalTracerConfiguration
+    {
+        /// <summary>
+        /// If true the statistics is traced at components shutdown.
+        /// </summary>
+        public static bool EnableTraceStatisticsAtShutdown { get; set; } = true;
+    }
+
     public class Tracer
     {
+        // If this flag is set, then the trace name will be used in all the tracing operations.
+        private readonly bool _useTracerName;
         private const int DefaultArgsPerLog = 500;
 
         private int _numberOfRecoverableErrors;
@@ -45,9 +59,11 @@ namespace BuildXL.Cache.ContentStore.Tracing
         /// </summary>
         public int NumberOfCriticalErrors => _numberOfCriticalErrors;
 
-        public Tracer(string name)
+        public Tracer(string name, bool useTracerName = false)
         {
             Contract.Requires(name != null);
+
+            _useTracerName = useTracerName;
 
             Name = name;
         }
@@ -188,17 +204,24 @@ namespace BuildXL.Cache.ContentStore.Tracing
             }
         }
 
-        private static void Trace(Severity severity, Context context, string message)
+        private void Trace(Severity severity, Context context, string message, string? operationName = null)
         {
             if (!context.IsSeverityEnabled(severity))
             {
                 return;
             }
 
-            context.TraceMessage(severity, message);
+            if (_useTracerName && !message.StartsWith(Name))
+            {
+                // Augmenting the message with the tracer name if specified and if this operation
+                // is not called from OperationStarted method.
+                message = string.Concat(Name, ": ", message);
+            }
+
+            context.TraceMessage(severity, message, component: Name, operation: operationName);
         }
 
-        public void OperationStarted(Context context, string operationName, bool enabled = true, string additionalInfo = null)
+        public void OperationStarted(Context context, string operationName, bool enabled = true, string? additionalInfo = null)
         {
             if (LogOperationStarted && enabled)
             {
@@ -207,7 +230,9 @@ namespace BuildXL.Cache.ContentStore.Tracing
                 {
                     message = $"{message} {additionalInfo}";
                 }
-                Debug(context, message);
+
+                Severity severity = Severity.Debug;
+                context.OperationStarted(message, operationName, Name, severity, OperationKind.None);
             }
         }
 
@@ -217,9 +242,9 @@ namespace BuildXL.Cache.ContentStore.Tracing
         /// <remarks>
         /// Used only from legacy tracers.
         /// </remarks>
-        public void TraceOperationStarted(Context context, string additionalInfo, [CallerMemberName]string callerName = null)
+        public void TraceOperationStarted(Context context, string additionalInfo, [CallerMemberName]string? callerName = null)
         {
-            OperationStarted(context, operationName: callerName, enabled: true, additionalInfo);
+            OperationStarted(context, operationName: callerName!, enabled: true, additionalInfo);
         }
 
         /// <summary>
@@ -228,9 +253,9 @@ namespace BuildXL.Cache.ContentStore.Tracing
         /// <remarks>
         /// Used only from legacy tracers.
         /// </remarks>
-        public void TracerOperationFinished(Context context, ResultBase result, string message, Severity successSeverity = Severity.Debug, [CallerMemberName]string callerName = null)
+        public void TracerOperationFinished(Context context, ResultBase result, string message, Severity successSeverity = Severity.Debug, [CallerMemberName]string? callerName = null)
         {
-            OperationFinishedCore(context, result, result.Duration, message, OperationKind.None, successSeverity, callerName);
+            OperationFinishedCore(context, result, result.Duration, message, OperationKind.None, successSeverity, callerName!);
         }
 
         /// <summary>
@@ -262,7 +287,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
                 message = $"Critical error occurred: {message}.";
                 RaiseCriticalError(result);
             }
-            else if (result.HasException)
+            else if (result.Exception != null)
             {
                 RaiseRecoverableError(result);
             }
@@ -279,26 +304,48 @@ namespace BuildXL.Cache.ContentStore.Tracing
         }
 
         /// <nodoc />
-        public void OperationDebug(Context context, string message, [CallerMemberName]string operationName = null)
+        public void OperationDebug(Context context, string message, [CallerMemberName]string? operationName = null)
         {
             Debug(context, $"{Name}.{operationName}: {message}");
         }
 
         /// <nodoc />
-        public void OperationFinished(OperationContext context, ResultBase result, TimeSpan duration, [CallerMemberName]string operationName = null, bool traceErrorsOnly = false)
+        public void OperationFinished(OperationContext context, ResultBase result, TimeSpan duration, [CallerMemberName]string? operationName = null, bool traceErrorsOnly = false)
         {
             OperationFinished(context.TracingContext, result, duration, message: string.Empty, operationName, traceErrorsOnly: traceErrorsOnly);
         }
 
         /// <nodoc />
-        public void OperationFinished(Context context, ResultBase result, TimeSpan duration, string message, [CallerMemberName]string operationName = null, bool traceErrorsOnly = false)
+        public void OperationFinished(Context context, ResultBase result, TimeSpan duration, string message, [CallerMemberName]string? operationName = null, bool traceErrorsOnly = false)
         {
             // Intentionally using a separate argument but not result.DurationMs, because result.DurationMs is mutable and not necessarily set.
             if (context.IsEnabled)
             {
-                var messageText = CreateMessageText(result, duration, message, operationName);
+                var messageText = CreateMessageText(result, duration, message, operationName!);
 
-                OperationFinishedCore(context, result, duration, messageText, OperationKind.None, traceErrorsOnly ? Severity.Diagnostic : Severity.Debug, operationName);
+                OperationFinishedCore(context, result, duration, messageText, OperationKind.None, traceErrorsOnly ? Severity.Diagnostic : Severity.Debug, operationName!);
+            }
+        }
+
+        /// <inheritdoc cref="GlobalTracerConfiguration.EnableTraceStatisticsAtShutdown"/>
+        public bool EnableTraceStatisticsAtShutdown => GlobalTracerConfiguration.EnableTraceStatisticsAtShutdown;
+
+        /// <summary>
+        /// Trace stats during component's shutdown.
+        /// </summary>
+        public void TraceStatisticsAtShutdown(Context context, CounterSet counterSet, string? prefix = null)
+        {
+            if (EnableTraceStatisticsAtShutdown)
+            {
+                if (string.IsNullOrEmpty(prefix))
+                {
+                    // Trace(Severity.Debug, context, message);
+                    counterSet.LogOrderedNameValuePairs(s => Trace(Severity.Debug, context, s, operationName: nameof(TraceStatisticsAtShutdown)));
+                }
+                else
+                {
+                    counterSet.LogOrderedNameValuePairs(s => Trace(Severity.Debug, context, $"{prefix}.{s}", operationName: nameof(TraceStatisticsAtShutdown)));
+                }
             }
         }
     }

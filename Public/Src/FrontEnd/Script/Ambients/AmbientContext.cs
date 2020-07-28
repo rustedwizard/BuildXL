@@ -45,15 +45,13 @@ namespace BuildXL.FrontEnd.Script.Ambients
         private readonly SymbolAtom MountNameObject;
         private readonly SymbolAtom MountPathObject;
 
-        internal static string[] ConfigBlacklist =
+        internal static string[] ConfigBlocklist =
         {
             GetNewOutputDirectoryFunctionName,
             GetTempDirectoryFunctionName,
             GetMountFunctionName,
             HasMountFunctionName,
             GetTemplateFunctionName,
-            GetBuildEngineDirectoryFunctionName,
-            GetDominoBinDirectoryFunctionName,
             GetLastActiveUseModuleNameFunctionName,
         };
 

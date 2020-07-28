@@ -199,6 +199,14 @@ namespace BuildXL.Cache.Host.Service.Internal
             return PreferredContentSession.PinAsync(context, contentHashes, cts, urgencyHint);
         }
 
+        public Task<IEnumerable<Task<Indexed<PinResult>>>> PinAsync(
+            Context context, 
+            IReadOnlyList<ContentHash> contentHashes, 
+            PinOperationConfiguration config)
+        {
+            return PreferredContentSession.PinAsync(context, contentHashes, config);
+        }
+
         protected IReadOnlyContentSession GetCache(AbsolutePath path)
         {
             var drive = Path.GetPathRoot(path.Path);
@@ -236,6 +244,14 @@ namespace BuildXL.Cache.Host.Service.Internal
         {
             return PreferredContentSession is IHibernateContentSession session
                 ? session.PinBulkAsync(context, contentHashes)
+                : BoolResult.SuccessTask;
+        }
+
+        /// <inheritdoc />
+        public Task<BoolResult> ShutdownEvictionAsync(Context context)
+        {
+            return PreferredContentSession is IHibernateContentSession session
+                ? session.ShutdownEvictionAsync(context)
                 : BoolResult.SuccessTask;
         }
     }

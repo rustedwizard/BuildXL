@@ -84,6 +84,11 @@ namespace Test.DScript.Ast.Scheduling
                 requestedQualifiers = new QualifierId[] { FrontEndContext.QualifierTable .EmptyQualifierId };
             }
 
+            if (resolverSettings.Name == null)
+            {
+                resolverSettings.SetName(resolverSettings.Kind ?? "test resolver");
+            }
+
             return new ProjectBuilder<TProject, TResolverSettings>(this, resolverSettings, currentQualifier, requestedQualifiers);
         }
 
@@ -115,7 +120,7 @@ namespace Test.DScript.Ast.Scheduling
                     schedulingResults[rushProject] = (result.Succeeded, result.Succeeded? null : result.Failure.Describe(), result.Succeeded? result.Result : null);
                 }
 
-                return new SchedulingResult<TProject>(controller.PipGraph, schedulingResults);
+                return new SchedulingResult<TProject>(controller.PipGraph, schedulingResults, controller.Configuration);
             }
         }
 
@@ -180,7 +185,8 @@ namespace Test.DScript.Ast.Scheduling
                     },
                 Logging =
                     {
-                        LogsDirectory = m_configFilePath.GetParent(PathTable).GetParent(PathTable).Combine(PathTable, "Out").Combine(PathTable, "Logs")
+                        LogsDirectory = m_configFilePath.GetParent(PathTable).GetParent(PathTable).Combine(PathTable, "Out").Combine(PathTable, "Logs"),
+                        RedirectedLogsDirectory = m_configFilePath.GetParent(PathTable).GetParent(PathTable).Combine(PathTable, "Out").Combine(PathTable, "Logs")
                     }
             };
         }

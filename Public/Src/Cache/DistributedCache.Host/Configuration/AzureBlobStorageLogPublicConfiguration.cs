@@ -1,8 +1,7 @@
-﻿// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+﻿// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 using System.Runtime.Serialization;
-using Newtonsoft.Json;
 
 #nullable enable
 
@@ -46,7 +45,6 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public int? UploadMaxIntervalSeconds { get; set; }
 
-        [JsonConstructor]
         public AzureBlobStorageLogPublicConfiguration()
         {
         }

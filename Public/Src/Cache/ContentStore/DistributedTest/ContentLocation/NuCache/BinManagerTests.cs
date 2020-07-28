@@ -3,10 +3,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
+using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
+using BuildXL.Cache.ContentStore.InterfacesTest.Results;
 using BuildXL.Cache.ContentStore.InterfacesTest.Time;
 using FluentAssertions;
 using Xunit;
@@ -16,6 +19,18 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
     public class BinManagerTests
     {
         private readonly IClock _clock = new TestSystemClock();
+
+        [Fact]
+        public void UpdateAllShouldNotBreakWithCollectionWasModified()
+        {
+            var startLocations = Enumerable.Range(1, 10).Select(i => new MachineId(i)).ToArray();
+            var manager = new BinManager(locationsPerBin: 3, startLocations, _clock, expiryTime: TimeSpan.FromSeconds(1));
+            
+            var activeMachines = new MachineId[] {new MachineId(3), new MachineId(12),};
+            var inactiveMachines = new MachineId[]{new MachineId(1), new MachineId(11), };
+            // The original implementation was causing a runtime failure.
+            manager.UpdateAll(activeMachines, inactiveMachines).ThrowIfFailure();
+        }
 
         [Theory]
         [InlineData(3, 0, 1)] // Started with 0 machines
@@ -48,8 +63,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
         public void BinManagerFromOther(int prevLocationsPerBin, int amountOfLocations, int currLocationsPerBin)
         {
             var (manager, locations) = CreateAndValidate(prevLocationsPerBin, amountOfLocations);
-            var bytes = manager.Serialize();
-            var deserializedManager = BinManager.CreateFromSerialized(bytes, currLocationsPerBin, _clock, TimeSpan.FromHours(1));
+            var bytes = manager.Serialize().ThrowIfFailure();
+            var deserializedManager = BinManager.CreateFromSerialized(bytes, currLocationsPerBin, _clock, TimeSpan.FromHours(1)).ThrowIfFailure();
             ValidateBalanced(deserializedManager, locations);
         }
 
@@ -73,8 +88,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
             var (manager, locations) = CreateAndValidate(locationsPerBin, initialAmountOfLocations);
             AddLocationsAndValidate(manager, locations, locationsToAdd);
 
-            var bytes = manager.Serialize();
-            var deserializedManager = BinManager.CreateFromSerialized(bytes, locationsPerBin, _clock, TimeSpan.FromHours(1));
+            var bytes = manager.Serialize().ThrowIfFailure();
+            var deserializedManager = BinManager.CreateFromSerialized(bytes, locationsPerBin, _clock, TimeSpan.FromHours(1)).ThrowIfFailure();
 
             VerifyMappingsAreEqual(manager, deserializedManager);
         }
@@ -89,9 +104,51 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
                 var manager = new BinManager(locationsPerBin: 3, startLocations, _clock, expiryTime: TimeSpan.FromSeconds(1));
 
                 var tasks = locationsToRemove.Select(i => Task.Run(() => manager.RemoveLocation(i))).ToArray();
-                var serialized = manager.Serialize();
-                BinManager.CreateFromSerialized(serialized, locationsPerBin: 3, _clock, TimeSpan.FromSeconds(1)); // We want to make sure that deserialization does not fail.
+                var serialized = manager.Serialize().ThrowIfFailure();
+                BinManager.CreateFromSerialized(serialized, locationsPerBin: 3, _clock, TimeSpan.FromSeconds(1)).ThrowIfFailure(); // We want to make sure that deserialization does not fail.
                 await Task.WhenAll(tasks);
+            }
+        }
+
+        [Fact]
+        public void BinManagerExcludesMaster()
+        {
+            var amountMachines = 4;
+            var machineMappings = Enumerable.Range(0, amountMachines).Select(i => new MachineMapping(new MachineLocation(i.ToString()), new MachineId(i))).ToArray();
+            var masterMapping = machineMappings[0];
+
+            var clusterState = new ClusterState(machineMappings[0].Id, machineMappings)
+            {
+                EnableBinManagerUpdates = true
+            };
+
+            foreach (var mapping in machineMappings)
+            {
+                clusterState.AddMachine(mapping.Id, mapping.Location);
+            }
+
+            clusterState.SetMasterMachine(masterMapping.Location);
+            clusterState.InitializeBinManagerIfNeeded(locationsPerBin: amountMachines, _clock, expiryTime: TimeSpan.Zero);
+
+            var binMappings = clusterState.GetBinMappings().ThrowIfFailure();
+            foreach (var binMapping in binMappings)
+            {
+                // Master should not be there
+                binMapping.Length.Should().Be(amountMachines - 1);
+                binMapping.Should().NotContain(masterMapping.Id);
+            }
+
+            // Make sure this stays true after updates
+            var inactiveMachines = new BitMachineIdSet(new byte[amountMachines], 0);
+            inactiveMachines = inactiveMachines.SetExistenceBits(MachineIdCollection.Create(machineMappings[1].Id), true);
+            clusterState.SetMachineStates(inactiveMachines).ShouldBeSuccess();
+
+            binMappings = clusterState.GetBinMappings().ThrowIfFailure();
+            foreach (var binMapping in binMappings)
+            {
+                // Master and inactive should not be there
+                binMapping.Length.Should().Be(amountMachines - 2);
+                binMapping.Should().NotContain(masterMapping.Id);
             }
         }
 
@@ -124,7 +181,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
             {
                 var locationToRemove = locations[0];
 
-                var binsWithMachineAssigned = manager.GetBins(force: true)
+                var binsWithMachineAssigned = manager.GetBins(force: true).ThrowIfFailure()
                     .Select((machines, bin) => (machines, bin))
                     .Where(t => t.machines.Contains(locationToRemove))
                     .Select(t => (uint)t.bin)
@@ -139,8 +196,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
 
                 foreach (var binWithMachineAssigned in binsWithMachineAssigned)
                 {
-                    var assignedMachines = manager.GetDesignatedLocations(binWithMachineAssigned, includeExpired: false);
-                    var assignedMachinesWithExpired = manager.GetDesignatedLocations(binWithMachineAssigned, includeExpired: true);
+                    var assignedMachines = manager.GetDesignatedLocations(binWithMachineAssigned, includeExpired: false).ThrowIfFailure();
+                    var assignedMachinesWithExpired = manager.GetDesignatedLocations(binWithMachineAssigned, includeExpired: true).ThrowIfFailure();
 
                     assignedMachines.Should().NotContain(locationToRemove);
                     assignedMachinesWithExpired.Should().Contain(locationToRemove);
@@ -158,7 +215,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
                 ? BinManager.NumberOfBins / locations.Count * manager.LocationsPerBin
                 : BinManager.NumberOfBins;
 
-            var binMappings = manager.GetBins();
+            var binMappings = manager.GetBins().ThrowIfFailure();
             var counts = new Dictionary<int, int>();
             foreach (var location in locations)
             {
@@ -183,8 +240,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Test.ContentLocation.NuCache
 
         private void VerifyMappingsAreEqual(BinManager x, BinManager y)
         {
-            var xBins = x.GetBins();
-            var yBins = y.GetBins();
+            var xBins = x.GetBins().ThrowIfFailure();
+            var yBins = y.GetBins().ThrowIfFailure();
 
             var xExpired = x.GetExpiredAssignments();
             var yExpired = y.GetExpiredAssignments();

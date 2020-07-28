@@ -32,7 +32,10 @@ namespace BuildXL.Processes
         Succeeded,
 
         /// <summary>
-        /// The execution was canceled by the user.
+        /// The execution was canceled by
+        ///   (1) The user due to ctrl-c
+        ///   (2) BuildXL due to resource exhaustion
+        ///   (3) BuildXL due to user-specified pip timeout.
         /// </summary>
         Canceled,
 
@@ -42,24 +45,9 @@ namespace BuildXL.Processes
         FileAccessMonitoringFailed,
 
         /// <summary>
-        /// There is an output produced with file access observed.
+        /// The sandboxed process was able to run, but BuildXL failed during post-processing the result of shared opaque directories
         /// </summary>
-        OutputWithNoFileAccessFailed,
-
-        /// <summary>
-        /// There is a mismatch between messages sent by pip children processes and messages received.
-        /// </summary>
-        MismatchedMessageCount,
-
-        /// <summary>
-        /// The sandboxed process should be retried due to exit code.
-        /// </summary>
-        ShouldBeRetriedDueToUserSpecifiedExitCode,
-
-        /// <summary>
-        /// The sandboxed process should be retried due to Azure Watson's 0xDEAD exit code.
-        /// </summary>
-        ShouldBeRetriedDueToAzureWatsonExitCode,
+        SharedOpaquePostProcessingFailed,
     }
 
     /// <summary>
@@ -72,14 +60,12 @@ namespace BuildXL.Processes
         /// (execution-time fields are defaulted, possibly to null; for other statuses they are guaranteed present).
         /// Contains the error code of the failure, if the process was started.
         /// </summary>
-        /// <param name="numberOfProcessLaunchRetries">Number of process launch retries</param>
         /// <param name="exitCode">The error code form execution of the process if it ran</param>
         /// <param name="detouringStatuses">The detours statuses recorded for this pip</param>
         /// <param name="maxDetoursHeapSize">The max detours heap size for the processes of this pip</param>
         /// <param name="pipProperties">Additional pip properties that need to be bubbled up to session telemetry</param>
         /// <returns>A new instance of SandboxedProcessPipExecutionResult.</returns>
         internal static SandboxedProcessPipExecutionResult PreparationFailure(
-            int numberOfProcessLaunchRetries = 0,
             int exitCode = 0,
             IReadOnlyList<ProcessDetouringStatusData> detouringStatuses = null,
             long maxDetoursHeapSize = 0,
@@ -95,7 +81,6 @@ namespace BuildXL.Processes
                 unexpectedFileAccesses: null,
                 primaryProcessTimes: null,
                 jobAccountingInformation: null,
-                numberOfProcessLaunchRetries: numberOfProcessLaunchRetries,
                 exitCode: exitCode,
                 sandboxPrepMs: 0,
                 processSandboxedProcessResultMs: 0,
@@ -104,7 +89,36 @@ namespace BuildXL.Processes
                 detouringStatuses: detouringStatuses,
                 maxDetoursHeapSize: maxDetoursHeapSize,
                 containerConfiguration: ContainerConfiguration.DisabledIsolation,
-                pipProperties: pipProperties);
+                pipProperties: pipProperties,
+                timedOut: false);
+        }
+
+        internal static SandboxedProcessPipExecutionResult FailureButRetryAble(
+            SandboxedProcessPipExecutionStatus status,
+            RetryInfo retryInfo,
+            long maxDetoursHeapSize = 0)
+        {
+            return new SandboxedProcessPipExecutionResult(
+                status,
+                observedFileAccesses: default(SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>),
+                sharedDynamicDirectoryWriteAccesses: null,
+                encodedStandardError: null,
+                encodedStandardOutput: null,
+                numberOfWarnings: 0,
+                unexpectedFileAccesses: null,
+                primaryProcessTimes: null,
+                jobAccountingInformation: null,
+                exitCode: 0,
+                sandboxPrepMs: 0,
+                processSandboxedProcessResultMs: 0,
+                processStartTime: 0L,
+                allReportedFileAccesses: null,
+                detouringStatuses: null,
+                maxDetoursHeapSize: maxDetoursHeapSize,
+                containerConfiguration: ContainerConfiguration.DisabledIsolation,
+                pipProperties: null,
+                timedOut: false,
+                retryInfo: retryInfo);
         }
 
         internal static SandboxedProcessPipExecutionResult DetouringFailure(SandboxedProcessPipExecutionResult result)
@@ -119,7 +133,6 @@ namespace BuildXL.Processes
                 unexpectedFileAccesses: result.UnexpectedFileAccesses,
                 primaryProcessTimes: result.PrimaryProcessTimes,
                 jobAccountingInformation: result.JobAccountingInformation,
-                numberOfProcessLaunchRetries: result.NumberOfProcessLaunchRetries,
                 exitCode: result.ExitCode,
                 sandboxPrepMs: result.SandboxPrepMs,
                 processSandboxedProcessResultMs: result.ProcessSandboxedProcessResultMs,
@@ -128,11 +141,11 @@ namespace BuildXL.Processes
                 detouringStatuses: result.DetouringStatuses,
                 maxDetoursHeapSize: result.MaxDetoursHeapSizeInBytes,
                 containerConfiguration: result.ContainerConfiguration,
-                pipProperties: result.PipProperties);
+                pipProperties: result.PipProperties,
+                timedOut: result.TimedOut);
         }
 
         internal static SandboxedProcessPipExecutionResult RetryProcessDueToUserSpecifiedExitCode(
-            int numberOfProcessLaunchRetries,
             int exitCode,
             ProcessTimes primaryProcessTimes,
             JobObject.AccountingInformation? jobAccountingInformation,
@@ -144,19 +157,19 @@ namespace BuildXL.Processes
             ContainerConfiguration containerConfiguration,
             Tuple<AbsolutePath, Encoding> encodedStandardError,
             Tuple<AbsolutePath, Encoding> encodedStandardOutput,
-            Dictionary<string, int> pipProperties)
+            Dictionary<string, int> pipProperties,
+            IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> sharedDynamicDirectoryWriteAccesses)
         {
             return new SandboxedProcessPipExecutionResult(
-                SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToUserSpecifiedExitCode,
+                SandboxedProcessPipExecutionStatus.ExecutionFailed,
                 observedFileAccesses: default(SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>),
-                sharedDynamicDirectoryWriteAccesses: default(Dictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>>),
+                sharedDynamicDirectoryWriteAccesses: sharedDynamicDirectoryWriteAccesses,
                 encodedStandardError: encodedStandardError,
                 encodedStandardOutput: encodedStandardOutput,
                 numberOfWarnings: 0,
                 unexpectedFileAccesses: null,
                 primaryProcessTimes: primaryProcessTimes,
                 jobAccountingInformation: jobAccountingInformation,
-                numberOfProcessLaunchRetries: numberOfProcessLaunchRetries,
                 exitCode: exitCode,
                 sandboxPrepMs: sandboxPrepMs,
                 processSandboxedProcessResultMs: processSandboxedProcessResultMs,
@@ -165,11 +178,12 @@ namespace BuildXL.Processes
                 detouringStatuses: detouringStatuses,
                 maxDetoursHeapSize: maxDetoursHeapSize,
                 containerConfiguration: containerConfiguration,
-                pipProperties: pipProperties);
+                pipProperties: pipProperties,
+                timedOut: false,
+                retryInfo: RetryInfo.RetryOnSameWorker(RetryReason.UserSpecifiedExitCode));
         }
 
         internal static SandboxedProcessPipExecutionResult RetryProcessDueToAzureWatsonExitCode(
-            int numberOfProcessLaunchRetries,
             int exitCode,
             ProcessTimes primaryProcessTimes,
             JobObject.AccountingInformation? jobAccountingInformation,
@@ -182,16 +196,15 @@ namespace BuildXL.Processes
             Dictionary<string, int> pipProperties)
         {
             return new SandboxedProcessPipExecutionResult(
-                SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToAzureWatsonExitCode,
+                SandboxedProcessPipExecutionStatus.ExecutionFailed,
                 observedFileAccesses: default(SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>),
-                sharedDynamicDirectoryWriteAccesses: default(Dictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>>),
+                sharedDynamicDirectoryWriteAccesses: default(Dictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>>),
                 encodedStandardError: null,
                 encodedStandardOutput: null,
                 numberOfWarnings: 0,
                 unexpectedFileAccesses: null,
                 primaryProcessTimes: primaryProcessTimes,
                 jobAccountingInformation: jobAccountingInformation,
-                numberOfProcessLaunchRetries: numberOfProcessLaunchRetries,
                 exitCode: exitCode,
                 sandboxPrepMs: sandboxPrepMs,
                 processSandboxedProcessResultMs: processSandboxedProcessResultMs,
@@ -200,12 +213,14 @@ namespace BuildXL.Processes
                 detouringStatuses: detouringStatuses,
                 maxDetoursHeapSize: maxDetoursHeapSize,
                 containerConfiguration: containerConfiguration,
-                pipProperties: pipProperties);
+                pipProperties: pipProperties,
+                timedOut: false,
+                retryInfo: RetryInfo.RetryOnSameWorker(RetryReason.AzureWatsonExitCode));
         }
 
         internal static SandboxedProcessPipExecutionResult MismatchedMessageCountFailure(SandboxedProcessPipExecutionResult result)
             => new SandboxedProcessPipExecutionResult(
-                   SandboxedProcessPipExecutionStatus.MismatchedMessageCount,
+                   SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed,
                    result.ObservedFileAccesses,
                    result.SharedDynamicDirectoryWriteAccesses,
                    result.EncodedStandardOutput,
@@ -214,7 +229,6 @@ namespace BuildXL.Processes
                    result.UnexpectedFileAccesses,
                    result.PrimaryProcessTimes,
                    result.JobAccountingInformation,
-                   result.NumberOfProcessLaunchRetries,
                    result.ExitCode,
                    result.SandboxPrepMs,
                    result.ProcessSandboxedProcessResultMs,
@@ -223,7 +237,9 @@ namespace BuildXL.Processes
                    result.DetouringStatuses,
                    result.MaxDetoursHeapSizeInBytes,
                    result.ContainerConfiguration,
-                   result.PipProperties);
+                   result.PipProperties,
+                   result.TimedOut,
+                   retryInfo: RetryInfo.RetryOnSameWorker(RetryReason.MismatchedMessageCount));
 
         /// <summary>
         /// Indicates if the pip succeeded.
@@ -237,7 +253,7 @@ namespace BuildXL.Processes
         /// Keys are the paths to each shared dynamic directory. Values are paths where
         /// write attempts occurred.
         /// </remarks>
-        public readonly IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>> SharedDynamicDirectoryWriteAccesses;
+        public readonly IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> SharedDynamicDirectoryWriteAccesses;
 
         /// <summary>
         /// Observed accesses that were reported explicitly (e.g. as part of a directory dependency).
@@ -250,8 +266,8 @@ namespace BuildXL.Processes
         public readonly long MaxDetoursHeapSizeInBytes;
 
         /// <summary>
-        /// Context containing counters for unexpected file accesses reported so far (whitelisted, cacheable-whitelisted, etc),
-        /// and a list of those unexpected file accesses which were not whitelisted (violations).
+        /// Context containing counters for unexpected file accesses reported so far (allowlisted, cacheable-allowlisted, etc),
+        /// and a list of those unexpected file accesses which were not allowlisted (violations).
         /// Note that these counts includes both error and warning level violations, depending on enforcement configuration.
         /// Additional unexpected accesses may be reported using this context (e.g. based on deferred validation of <see cref="ObservedFileAccesses"/>).
         /// Note that this field is present (non-null) even if there were no unexpected accesses.
@@ -312,23 +328,31 @@ namespace BuildXL.Processes
         public bool HadUserRetries { get; set; }
 
         /// <summary>
-        /// Whether it is cancelled due to resource exhaustion
+        /// Indicates the reason for pip failure. Can be retried on the same or a different worker.
         /// </summary>
-        public bool IsCancelledDueToResourceExhaustion { get; set; }
+        public RetryInfo RetryInfo { get; set; }
 
+        /// <summary>
+        /// How long the process has been suspended
+        /// </summary>
+        public long SuspendedDurationMs { get; set; }
+
+        private bool ProcessCompletedExecution(SandboxedProcessPipExecutionStatus status) =>
+            status != SandboxedProcessPipExecutionStatus.PreparationFailed && 
+            status != SandboxedProcessPipExecutionStatus.Canceled &&
+            status != SandboxedProcessPipExecutionStatus.ExecutionFailed;
 
         /// <nodoc />
         public SandboxedProcessPipExecutionResult(
             SandboxedProcessPipExecutionStatus status,
             SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> observedFileAccesses,
-            IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>> sharedDynamicDirectoryWriteAccesses,
+            IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> sharedDynamicDirectoryWriteAccesses,
             Tuple<AbsolutePath, Encoding> encodedStandardOutput,
             Tuple<AbsolutePath, Encoding> encodedStandardError,
             int numberOfWarnings,
             FileAccessReportingContext unexpectedFileAccesses,
             ProcessTimes primaryProcessTimes,
             JobObject.AccountingInformation? jobAccountingInformation,
-            int numberOfProcessLaunchRetries,
             int exitCode,
             long sandboxPrepMs,
             long processSandboxedProcessResultMs,
@@ -337,19 +361,24 @@ namespace BuildXL.Processes
             IReadOnlyList<ProcessDetouringStatusData> detouringStatuses,
             long maxDetoursHeapSize,
             ContainerConfiguration containerConfiguration,
-            Dictionary<string, int> pipProperties)
+            Dictionary<string, int> pipProperties,
+            bool timedOut,
+            RetryInfo retryInfo = null)
         {
-            Contract.Requires(
-                (status == SandboxedProcessPipExecutionStatus.PreparationFailed || status == SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToUserSpecifiedExitCode) ||
-                observedFileAccesses.IsValid);
-            Contract.Requires(
-                (status == SandboxedProcessPipExecutionStatus.PreparationFailed || status == SandboxedProcessPipExecutionStatus.ShouldBeRetriedDueToUserSpecifiedExitCode) ||
-                unexpectedFileAccesses != null);
-            Contract.Requires((status == SandboxedProcessPipExecutionStatus.PreparationFailed) || primaryProcessTimes != null);
+            Contract.Requires(!ProcessCompletedExecution(status) || observedFileAccesses.IsValid);
+            Contract.Requires(!ProcessCompletedExecution(status) || unexpectedFileAccesses != null);
+            Contract.Requires(!ProcessCompletedExecution(status) || primaryProcessTimes != null);
             Contract.Requires(encodedStandardOutput == null || (encodedStandardOutput.Item1.IsValid && encodedStandardOutput.Item2 != null));
             Contract.Requires(encodedStandardError == null || (encodedStandardError.Item1.IsValid && encodedStandardError.Item2 != null));
             Contract.Requires(numberOfWarnings >= 0);
             Contract.Requires(containerConfiguration != null);
+            Contract.Requires(retryInfo == null || status != SandboxedProcessPipExecutionStatus.Succeeded);
+            
+            // Protect against invalid combinations of RetryLocation and RetryReason
+            Contract.Requires(!RetryInfo.RetryAbleOnSameWorker(retryInfo) || retryInfo.RetryReason != RetryReason.ResourceExhaustion);
+            Contract.Requires(!RetryInfo.RetryAbleOnSameWorker(retryInfo) || retryInfo.RetryReason != RetryReason.ProcessStartFailure);
+            Contract.Requires(!RetryInfo.RetryAbleOnSameWorker(retryInfo) || retryInfo.RetryReason != RetryReason.TempDirectoryCleanupFailure);
+            Contract.Requires(!RetryInfo.RetryAbleOnSameWorker(retryInfo) || retryInfo.RetryReason != RetryReason.StoppedWorker);
 
             Status = status;
             ObservedFileAccesses = observedFileAccesses;
@@ -359,7 +388,6 @@ namespace BuildXL.Processes
             NumberOfWarnings = numberOfWarnings;
             PrimaryProcessTimes = primaryProcessTimes;
             JobAccountingInformation = jobAccountingInformation;
-            NumberOfProcessLaunchRetries = numberOfProcessLaunchRetries;
             ExitCode = exitCode;
             SandboxPrepMs = sandboxPrepMs;
             ProcessSandboxedProcessResultMs = processSandboxedProcessResultMs;
@@ -370,12 +398,9 @@ namespace BuildXL.Processes
             SharedDynamicDirectoryWriteAccesses = sharedDynamicDirectoryWriteAccesses;
             ContainerConfiguration = containerConfiguration;
             PipProperties = pipProperties;
+            TimedOut = timedOut;
+            RetryInfo = retryInfo;
         }
-
-        /// <summary>
-        /// Number of retries to execute this pip.
-        /// </summary>
-        public int NumberOfProcessLaunchRetries { get; internal set; }
 
         /// <summary>
         /// The exit code from the execution of this pip.
@@ -396,5 +421,10 @@ namespace BuildXL.Processes
         /// Duration of process start time in milliseconds
         /// </summary>
         public long ProcessStartTimeMs { get; set; }
+
+        /// <summary>
+        /// Whether it is timedout
+        /// </summary>
+        public bool TimedOut { get; set; }
     }
 }

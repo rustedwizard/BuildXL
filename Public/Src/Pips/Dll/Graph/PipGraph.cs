@@ -101,6 +101,7 @@ namespace BuildXL.Pips.Graph
                 modules: serializedState.Modules,
                 pipProducers: serializedState.PipProducers,
                 outputDirectoryProducers: serializedState.OpaqueDirectoryProducers,
+                outputDirectoryExclusions: serializedState.OutputDirectoryExclusions,
                 outputDirectoryRoots: serializedState.OutputDirectoryRoots,
                 compositeOutputDirectoryProducers: serializedState.CompositeOutputDirectoryProducers,
                 sourceSealedDirectoryRoots: serializedState.SourceSealedDirectoryRoots,
@@ -838,6 +839,12 @@ namespace BuildXL.Pips.Graph
             => OutputDirectoryProducers.Select(kvp => new KeyValuePair<DirectoryArtifact, PipId>(kvp.Key, kvp.Value.ToPipId()));
 
         /// <summary>
+        /// Gets all composite shared output directories and their corresponding producers.
+        /// </summary>
+        public IEnumerable<KeyValuePair<DirectoryArtifact, PipId>> AllCompositeSharedOpaqueDirectoriesAndProducers
+            => CompositeOutputDirectoryProducers.Select(kvp => new KeyValuePair<DirectoryArtifact, PipId>(kvp.Key, kvp.Value.ToPipId()));
+
+        /// <summary>
         /// Gets the number of known files for the build
         /// </summary>
         public int FileCount => PipProducers.Count;
@@ -999,10 +1006,10 @@ namespace BuildXL.Pips.Graph
                 return false;
             }
 
-            if (!mutablePipState.HasPreserveOutputWhitelist())
+            if (!mutablePipState.HasPreserveOutputAllowlist())
             {
-                // If whitelist is not given, we preserve all outputs of the given pip.
-                // This is shortcut to avoid hydrating pip in order to get the whitelist.
+                // If allowlist is not given, we preserve all outputs of the given pip.
+                // This is shortcut to avoid hydrating pip in order to get the allowlist.
                 return true;
             }
 

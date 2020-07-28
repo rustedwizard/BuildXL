@@ -233,7 +233,7 @@ namespace BuildXL.Engine.Distribution
         [System.Diagnostics.CodeAnalysis.SuppressMessage("AsyncUsage", "AsyncFixer02:awaitinsteadofwait")]
         public async Task LogExecutionBlobAsync(WorkerNotificationArgs notification)
         {
-            Contract.Requires(notification.ExecutionLogData != null || notification.ExecutionLogData.Count != 0);
+            Contract.Requires(notification.ExecutionLogData.Count != 0);
 
             if (m_executionBlobQueue.IsCompleted)
             {
@@ -669,8 +669,10 @@ namespace BuildXL.Engine.Distribution
             m_pipCompletionTasks.Add(pipId, pipCompletionTask);
 
             var pip = runnable.Pip;
-            if (pip.Tags.Any(a => a.ToString(runnable.Environment.Context.StringTable) == TagFilter.TriggerWorkerConnectionTimeout) &&
-                runnable.RetryCountDueToStoppedWorker == 0)
+            if (pip.PipType == PipType.Process && 
+                ((Process)pip).Priority == Process.IntegrationTestPriority &&
+                pip.Tags.Any(a => a.ToString(runnable.Environment.Context.StringTable) == TagFilter.TriggerWorkerConnectionTimeout) &&
+                runnable.Performance.RetryCountDueToStoppedWorker == 0)
             {
                 // We execute a pip which has 'buildxl.internal:triggerWorkerConnectionTimeout' in the integration tests for distributed build. 
                 // It is expected to lose the connection with the worker, so that we force the pips 
@@ -678,9 +680,9 @@ namespace BuildXL.Engine.Distribution
                 OnConnectionTimeOutAsync(null, null);
             }
 
-            if (firstCompletedTask == m_attachCompletion.Task)
+            if (m_attachCompletion.Task.Status == TaskStatus.RanToCompletion)
             {
-                if (!await m_attachCompletion.Task)
+                if (!m_attachCompletion.Task.GetAwaiter().GetResult())
                 {
                     FailRemotePip(pipCompletionTask, "Worker did not attach.");
                     return;
@@ -688,9 +690,10 @@ namespace BuildXL.Engine.Distribution
             }
             else
             {
-                Contract.Assert(firstCompletedTask == m_schedulerCompletion.Task);
+                Contract.Assert(m_schedulerCompletion.Task.Status == TaskStatus.RanToCompletion);
                 // the scheduler is done with all pips except materializeoutput steps, then we fail to send the build request to the worker. 
-                FailRemotePip(pipCompletionTask, "Scheduler is done.");
+                FailRemotePip(pipCompletionTask, "Worker did not attach until scheduler has been completed.");
+                return;
             }
 
             var pipBuildRequest = new SinglePipBuildRequest
@@ -700,8 +703,10 @@ namespace BuildXL.Engine.Distribution
                 Fingerprint = fingerprint.Hash.ToBondFingerprint(),
                 Priority = runnable.Priority,
                 Step = (int)runnable.Step,
-                ExpectedRamUsageMb = processRunnable?.ExpectedMemoryCounters?.PeakWorkingSetMb,
-                ExpectedCommitUsageMb = processRunnable?.ExpectedMemoryCounters?.PeakCommitUsageMb,
+                ExpectedPeakWorkingSetMb = processRunnable?.ExpectedMemoryCounters?.PeakWorkingSetMb ?? 0,
+                ExpectedAverageWorkingSetMb = processRunnable?.ExpectedMemoryCounters?.AverageWorkingSetMb ?? 0,
+                ExpectedPeakCommitSizeMb = processRunnable?.ExpectedMemoryCounters?.PeakCommitSizeMb ?? 0,
+                ExpectedAverageCommitSizeMb = processRunnable?.ExpectedMemoryCounters?.AverageCommitSizeMb ?? 0,
                 SequenceNumber = Interlocked.Increment(ref m_nextSequenceNumber),
             };
 
@@ -861,11 +866,11 @@ namespace BuildXL.Engine.Distribution
                     operationContext,
                     runnablePip.Description,
                     Name,
-                    errorMessage: errorMessage + " Retry Number: " + runnablePip.RetryCountDueToStoppedWorker + " out of " + runnablePip.MaxRetryLimitForStoppedWorker,
+                    errorMessage: errorMessage + " Retry Number: " + runnablePip.Performance.RetryCountDueToStoppedWorker + " out of " + runnablePip.MaxRetryLimitForStoppedWorker,
                     step: runnablePip.Step.AsString(),
                     callerName: callerName);
 
-                result = ExecutionResult.GetCanceledNotRunResult(operationContext);
+                result = ExecutionResult.GetRetryableNotRunResult(operationContext, Processes.RetryInfo.RetryOnDifferentWorker(Processes.RetryReason.StoppedWorker));
 
                 pipCompletionTask.TrySet(result);
                 return;
@@ -875,7 +880,7 @@ namespace BuildXL.Engine.Distribution
                     operationContext,
                     runnablePip.Description,
                     Name,
-                    errorMessage: errorMessage + " Retry Number: " + runnablePip.RetryCountDueToStoppedWorker + " out of " + runnablePip.MaxRetryLimitForStoppedWorker,
+                    errorMessage: errorMessage + " Retry Number: " + runnablePip.Performance.RetryCountDueToStoppedWorker + " out of " + runnablePip.MaxRetryLimitForStoppedWorker,
                     step: runnablePip.Step.AsString(),
                     callerName: callerName);
 
@@ -1028,7 +1033,8 @@ namespace BuildXL.Engine.Distribution
             }
 
             m_cacheValidationContentHash = attachCompletionInfo.WorkerCacheValidationContentHash;
-            TotalProcessSlots = attachCompletionInfo.MaxConcurrency;
+            TotalProcessSlots = attachCompletionInfo.MaxProcesses;
+            TotalMaterializeInputSlots = attachCompletionInfo.MaxMaterialize;
             TotalRamMb = attachCompletionInfo.AvailableRamMb;
             TotalCommitMb = attachCompletionInfo.AvailableCommitMb;
 
@@ -1091,13 +1097,16 @@ namespace BuildXL.Engine.Distribution
                 pipCompletionTask.SetDuration(pipCompletionData.ExecuteStepTicks, pipCompletionData.QueueTicks);
 
                 var description = pipCompletionTask.RunnablePip.Description;
-                int dataSize = pipCompletionData.ResultBlob != null ? (int)pipCompletionData.ResultBlob.Count : 0;
+                int dataSize = pipCompletionData.ResultBlob.Count;
                 m_masterService.Environment.Counters.AddToCounter(pip.PipType == PipType.Process ? PipExecutorCounter.ProcessExecutionResultSize : PipExecutorCounter.IpcExecutionResultSize, dataSize);
 
                 ExecutionResult result = m_masterService.ResultSerializer.DeserializeFromBlob(
                     pipCompletionData.ResultBlob,
                     WorkerId);
 
+                pipCompletionTask.RunnablePip.ThreadId = pipCompletionData.ThreadId;
+                pipCompletionTask.RunnablePip.StepStartTime = new DateTime(pipCompletionData.StartTimeTicks);
+                pipCompletionTask.RunnablePip.StepDuration = new TimeSpan(pipCompletionData.ExecuteStepTicks);
                 pipCompletionTask.TrySet(result);
             }
         }

@@ -46,7 +46,6 @@ namespace Test.BuildXL.Scheduler
 {
     [Trait("Category", "SchedulerTest")]
     [SuppressMessage("Microsoft.Design", "CA1001:TypesThatOwnDisposableFieldsShouldBeDisposable")]
-    [TestClassIfSupported(requiresWindowsBasedOperatingSystem: true)] /* Bug 1378018 */
     public sealed partial class SchedulerTest : PipTestBase
     {
         /// <summary>
@@ -342,15 +341,9 @@ namespace Test.BuildXL.Scheduler
                 RunSchedule(env);
             }
 
-            if (OperatingSystemHelper.IsUnixOS)
-            {
-                // ignoring /bin/sh is being used as a source file
-                AssertWarningEventLogged(LogEventId.IgnoringUntrackedSourceFileNotUnderMount);
-            }
-
             // Only 1 source file should have been hashed (file1.txt). Also the second pip that consumes file1.txt should not cause the file to be rehashed
-            // in a sealed directory used as input twice
-            AssertVerboseEventLogged(LogEventId.HashedSourceFile);
+            // in a sealed directory used as input twice; on Unix, add hashing of '/bin/sh' to that list
+            AssertVerboseEventLogged(LogEventId.HashedSourceFile, count: OperatingSystemHelper.IsUnixOS ? 2 : 1);
         }
 
         /// <summary>
@@ -596,7 +589,7 @@ namespace Test.BuildXL.Scheduler
             XAssert.IsTrue(PipGraphBuilder.AddProcess(failsFilter));
 
             bool scheduleSucceeded = await RunScheduler(
-                CreateFilterForTags(tagsWhitelist: new[] { "Yep" }.Select(tag => StringId.Create(Context.PathTable.StringTable, tag)), tagsBlacklist: new StringId[] { }),
+                CreateFilterForTags(tagsAllowlist: new[] { "Yep" }.Select(tag => StringId.Create(Context.PathTable.StringTable, tag)), tagsBlocklist: new StringId[] { }),
                 overriddenSuccessfulPips: new Pip[0],
                 overriddenFailedPips: new Pip[] { passesFilter },
                 expectedFailedPips: new Pip[] { passesFilter },
@@ -641,7 +634,7 @@ namespace Test.BuildXL.Scheduler
             XAssert.IsTrue(PipGraphBuilder.AddProcess(passesFilter2));
 
             bool scheduleSucceeded = await RunScheduler(
-                CreateFilterForTags(tagsWhitelist: new[] { "Yep" }.Select(tag => StringId.Create(Context.PathTable.StringTable, tag)), tagsBlacklist: new StringId[] { }),
+                CreateFilterForTags(tagsAllowlist: new[] { "Yep" }.Select(tag => StringId.Create(Context.PathTable.StringTable, tag)), tagsBlocklist: new StringId[] { }),
                 expectedSuccessfulPips: new Pip[] { seal2, seal1, passesFilter, passesFilter2 });
 
             XAssert.IsTrue(scheduleSucceeded);
@@ -743,11 +736,11 @@ namespace Test.BuildXL.Scheduler
         ///
         /// Each returned object array corresponds to the following formal parameters:
         /// <code>
-        ///     (string whitelistTags, string blacklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
+        ///     (string allowlistTags, string blocklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
         /// </code>
         ///
         /// Each returned object array indicates which pips should be executed (i.e., "done") given a
-        /// <see cref="TestGraphForTagFilter"/> pip graph, whitelist tags, and blacklist tags.
+        /// <see cref="TestGraphForTagFilter"/> pip graph, allowlist tags, and blocklist tags.
         /// </summary>
         public static IEnumerable<object[]> TagFilteringTestData()
         {
@@ -762,12 +755,12 @@ namespace Test.BuildXL.Scheduler
         [Feature(Features.Filtering)]
         [Theory]
         [MemberData(nameof(TagFilteringTestData))]
-        public async Task TestScheduleByTag(string whitelistTags, string blacklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
+        public async Task TestScheduleByTag(string allowlistTags, string blocklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
         {
             Setup(disableLazyOutputMaterialization: true);
 
             TestGraphForTagFilter g = CreateGraphForTagFilterTestingWithCopyPips();
-            await RunScheduler(CreateFilterForTags(ToStringIds(whitelistTags), ToStringIds(blacklistTags)));
+            await RunScheduler(CreateFilterForTags(ToStringIds(allowlistTags), ToStringIds(blocklistTags)));
 
             AssertPipStatesForTestGraphForTagFilter(g, a1Done, a2Done, b1Done, b2Done, pDone);
         }
@@ -1310,7 +1303,7 @@ namespace Test.BuildXL.Scheduler
                 loggingContext: LoggingContext,
                 cache: cache ?? InMemoryCacheFactory.Create(),
                 configuration: m_configuration,
-                fileAccessWhitelist: new FileAccessWhitelist(Context),
+                fileAccessAllowlist: new FileAccessAllowlist(Context),
                 successfulPips: overriddenSuccessfulPips,
                 failedPips: overriddenFailedPips,
                 ipcProvider: ipcProvider,
@@ -1410,6 +1403,15 @@ namespace Test.BuildXL.Scheduler
                     }
                     else
                     {
+                        pipDataBuilder.Add("echo");
+                    }
+
+                    if (OperatingSystemHelper.IsUnixOS && dependencies.Any(d => d.Path.Equals(output.Path)))
+                    {
+                        // apparently, 'dependencies' and 'outputs' need not be disjoint, 
+                        // and so if we generate something like "/bin/cat file1 > file1"
+                        // that can lead to an infinite loop 
+                        pipDataBuilder.Add("&&");
                         pipDataBuilder.Add("echo");
                     }
 
@@ -2346,21 +2348,21 @@ namespace Test.BuildXL.Scheduler
         [MemberData(nameof(TagFilteringTestData))]
         [Feature(Features.IpcPip)]
         [Feature(Features.Filtering)]
-        public Task TestIpcPipTagFiltering(string whitelistTags, string blacklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
+        public Task TestIpcPipTagFiltering(string allowlistTags, string blocklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
         {
-            return DoIpcTagFilteringTest(CreateGraphForTagFilterTestingWithIpcPips, whitelistTags, blacklistTags, a1Done, a2Done, b1Done, b2Done, pDone);
+            return DoIpcTagFilteringTest(CreateGraphForTagFilterTestingWithIpcPips, allowlistTags, blocklistTags, a1Done, a2Done, b1Done, b2Done, pDone);
         }
 
         [Theory]
         [MemberData(nameof(TagFilteringTestData))]
         [Feature(Features.Filtering)]
         [Feature(Features.IpcPip)]
-        public Task TestIpcAndCopyPipTagFiltering(string whitelistTags, string blacklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
+        public Task TestIpcAndCopyPipTagFiltering(string allowlistTags, string blocklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
         {
-            return DoIpcTagFilteringTest(CreateGraphForTagFilterTestingWithIpcAndCopyPips, whitelistTags, blacklistTags, a1Done, a2Done, b1Done, b2Done, pDone);
+            return DoIpcTagFilteringTest(CreateGraphForTagFilterTestingWithIpcAndCopyPips, allowlistTags, blocklistTags, a1Done, a2Done, b1Done, b2Done, pDone);
         }
 
-        private async Task DoIpcTagFilteringTest(Func<IpcClientInfo, TestGraphForTagFilter> graphFactory, string whitelistTags, string blacklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
+        private async Task DoIpcTagFilteringTest(Func<IpcClientInfo, TestGraphForTagFilter> graphFactory, string allowlistTags, string blocklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
         {
             Setup(disableLazyOutputMaterialization: true);
 
@@ -2373,7 +2375,7 @@ namespace Test.BuildXL.Scheduler
                 {
                     var ipcInfo = new IpcClientInfo(moniker.ToStringId(Context.StringTable), new ClientConfig());
                     TestGraphForTagFilter g = graphFactory(ipcInfo);
-                    await RunScheduler(CreateFilterForTags(ToStringIds(whitelistTags), ToStringIds(blacklistTags)), ipcProvider: ipcProvider);
+                    await RunScheduler(CreateFilterForTags(ToStringIds(allowlistTags), ToStringIds(blocklistTags)), ipcProvider: ipcProvider);
                     AssertPipStatesForTestGraphForTagFilter(g, a1Done, a2Done, b1Done, b2Done, pDone);
                 });
         }
@@ -2576,7 +2578,7 @@ namespace Test.BuildXL.Scheduler
             var output = CreateOutputFileArtifact();
             var processPipBuilder = NewProcessBuilderWithPreDeterminedArgumentsFactory()
                 .WithOutputs(output)
-                .WithPreserveOutputWhitelist(output.Path);
+                .WithPreserveOutputAllowlist(output.Path);
 
             XAssert.IsFalse(PipGraphBuilder.AddProcess(processPipBuilder.Build()));
             AssertSchedulerErrorEventLogged(PipLogEventId.ScheduleFailAddPipDueToInvalidAllowPreserveOutputsFlag);
@@ -2584,10 +2586,10 @@ namespace Test.BuildXL.Scheduler
             var processPipBuilder2 = NewProcessBuilderWithPreDeterminedArgumentsFactory()
                 .WithOutputs(CreateOutputFileArtifact())
                 .WithOptions(Process.Options.AllowPreserveOutputs)
-                .WithPreserveOutputWhitelist(CreateOutputFileArtifact().Path);
+                .WithPreserveOutputAllowlist(CreateOutputFileArtifact().Path);
 
             XAssert.IsFalse(PipGraphBuilder.AddProcess(processPipBuilder2.Build()));
-            AssertSchedulerErrorEventLogged(PipLogEventId.ScheduleFailAddPipDueToInvalidPreserveOutputWhitelist);
+            AssertSchedulerErrorEventLogged(PipLogEventId.ScheduleFailAddPipDueToInvalidPreserveOutputAllowlist);
 
         }
 
@@ -2780,7 +2782,7 @@ namespace Test.BuildXL.Scheduler
                 context: context.Result,
                 loggingContext: LoggingContext,
                 fileContentTable: m_fileContentTable,
-                fileAccessWhitelist: new FileAccessWhitelist(Context),
+                fileAccessAllowlist: new FileAccessAllowlist(Context),
                 configuration: configuration,
                 cache: cache,
                 directoryTranslator: directoryTranslator,
@@ -2811,28 +2813,28 @@ namespace Test.BuildXL.Scheduler
         }
 
         /// <summary>
-        /// Creates a filter for the legacy tag whitelist and blacklist
+        /// Creates a filter for the legacy tag allowlist and blocklist
         /// </summary>
-        private static RootFilter CreateFilterForTags(IEnumerable<StringId> tagsWhitelist, IEnumerable<StringId> tagsBlacklist)
+        private static RootFilter CreateFilterForTags(IEnumerable<StringId> tagsAllowlist, IEnumerable<StringId> tagsBlocklist)
         {
-            Contract.Requires(tagsWhitelist != null);
-            Contract.Requires(tagsBlacklist != null);
-            Contract.Requires(tagsWhitelist.Any() ^ tagsBlacklist.Any());
+            Contract.Requires(tagsAllowlist != null);
+            Contract.Requires(tagsBlocklist != null);
+            Contract.Requires(tagsAllowlist.Any() ^ tagsBlocklist.Any());
 
             FilterOperator filterOperator = FilterOperator.Or;
             bool isNegated = false;
             IEnumerable<StringId> tagsToFilter = null;
 
-            if (tagsWhitelist.Any())
+            if (tagsAllowlist.Any())
             {
                 filterOperator = FilterOperator.Or;
-                tagsToFilter = tagsWhitelist;
+                tagsToFilter = tagsAllowlist;
             }
-            else if (tagsBlacklist.Any())
+            else if (tagsBlocklist.Any())
             {
                 filterOperator = FilterOperator.And;
                 isNegated = true;
-                tagsToFilter = tagsBlacklist;
+                tagsToFilter = tagsBlocklist;
             }
 
             Contract.Assume(tagsToFilter != null);
@@ -2850,6 +2852,45 @@ namespace Test.BuildXL.Scheduler
             }
 
             return new RootFilter(filter);
+        }
+
+        /// <summary>
+        /// Create a dummy process
+        /// </summary>
+        public static Process CreateDummyProcess(PipExecutionContext context, PipId pipId)
+        {
+            var exe = FileArtifact.CreateSourceFile(AbsolutePath.Create(context.PathTable, X("/X/exe")));
+            List<FileArtifact> dependencies = new List<FileArtifact> { exe };
+
+            var p = new Process(
+                directoryDependencies: ReadOnlyArray<DirectoryArtifact>.Empty,
+                executable: exe,
+                workingDirectory: AbsolutePath.Create(context.PathTable, X("/X")),
+                arguments: new PipDataBuilder(context.StringTable).ToPipData(" ", PipDataFragmentEscaping.NoEscaping),
+                responseFile: FileArtifact.Invalid,
+                responseFileData: PipData.Invalid,
+                environmentVariables: ReadOnlyArray<EnvironmentVariable>.Empty,
+                standardInput: FileArtifact.Invalid,
+                standardOutput: FileArtifact.Invalid,
+                standardError: FileArtifact.Invalid,
+                standardDirectory: AbsolutePath.Create(context.PathTable, X("/X/std")),
+                warningTimeout: null,
+                timeout: null,
+                dependencies: ReadOnlyArray<FileArtifact>.From(dependencies),
+                outputs: ReadOnlyArray<FileArtifactWithAttributes>.Empty,
+                directoryOutputs: ReadOnlyArray<DirectoryArtifact>.Empty,
+                orderDependencies: ReadOnlyArray<PipId>.Empty,
+                untrackedPaths: ReadOnlyArray<AbsolutePath>.Empty,
+                untrackedScopes: ReadOnlyArray<AbsolutePath>.Empty,
+                tags: ReadOnlyArray<StringId>.Empty,
+                successExitCodes: ReadOnlyArray<int>.Empty,
+                semaphores: ReadOnlyArray<ProcessSemaphoreInfo>.Empty,
+                provenance: PipProvenance.CreateDummy(context),
+                toolDescription: StringId.Invalid,
+                additionalTempDirectories: ReadOnlyArray<AbsolutePath>.Empty)
+            { PipId = pipId };
+
+            return p;
         }
     }
 }

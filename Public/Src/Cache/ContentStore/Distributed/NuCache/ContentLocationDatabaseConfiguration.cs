@@ -25,11 +25,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         public TimeSpan GarbageCollectionInterval { get; set; } = TimeSpan.FromHours(1);
 
         /// <summary>
-        /// Indicates whether reading/writing cluster state from local db is supported.
-        /// </summary>
-        public bool StoreClusterState { get; set; } = true;
-
-        /// <summary>
         /// Whether to enable garbage collection of metadata
         /// </summary>
         public bool MetadataGarbageCollectionEnabled { get; set; } = false;
@@ -56,6 +51,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// Specifies whether the context operation guid is used when logging entry operations
         /// </summary>
         public bool UseContextualEntryOperationLogging { get; set; } = false;
+
+        /// <summary>
+        /// Specifies whether to trace touches or not.
+        /// Tracing touches is expensive in terms of the amount of traffic to Kusto and in terms of memory traffic.
+        /// </summary>
+        public bool TraceTouches { get; set; } = true;
     }
 
     /// <summary>
@@ -79,6 +80,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// Splits the key range on byte increments, performs compaction on each range at a specified time period
         /// </summary>
         ByteIncrements = 1,
+        /// <summary>
+        /// Splits the key range on word increments, performs compaction on each range at a specified time period
+        /// </summary>
+        /// <remarks>
+        /// The vast majority of content entries start with the hash type, which is a single byte, matching
+        /// the hash type. Hence doing byte increments means we compact the entire content database at once, which
+        /// beats the purpose of this feature.
+        /// </remarks>
+        WordIncrements = 2,
     }
 
     /// <summary>
@@ -107,6 +117,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// Gets whether the database is cleared on initialization. (Defaults to true because the standard use case involves restoring from checkpoint after initialization)
         /// </summary>
         public bool CleanOnInitialize { get; set; } = true;
+
+        /// <summary>
+        /// Whether the database should be open in read only mode. This will cause all write operations on the DB to
+        /// fail.
+        /// </summary>
+        public bool OpenReadOnly { get; set; } = false;
 
         /// <summary>
         /// Specifies a opaque value which can be used to determine if database can be reused when <see cref="CleanOnInitialize"/> is false.

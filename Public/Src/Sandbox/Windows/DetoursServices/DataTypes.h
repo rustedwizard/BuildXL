@@ -6,10 +6,10 @@
 #include "stdafx.h"
 #include "StringOperations.h"
 
-#if !(MAC_OS_SANDBOX)
+#if _WIN32 || MAC_OS_LIBRARY
 #include <string>
 #include "DebuggingHelpers.h"
-#endif // !(MAC_OS_SANDBOX)
+#endif // _WIN32 || MAC_OS_LIBRARY
 
 #define NoUsn -1
 
@@ -56,7 +56,8 @@
     m(QBuildIntegrated,                   0x4000000)      \
     m(IgnorePreloadedDlls,                0x8000000)      \
     m(DirectoryCreationAccessEnforcement, 0x10000000)     \
-    m(ProbeDirectorySymlinkAsDirectory, 0x20000000)
+    m(ProbeDirectorySymlinkAsDirectory,   0x20000000)     \
+    m(IgnoreFullSymlinkResolving,         0x40000000)
 
 //
 // FileAccessManifestFlag enum definition
@@ -391,7 +392,7 @@ typedef struct ManifestInternalDetoursErrorNotificationFileString_t
 
     inline size_t GetSize() const
     {
-#if (MAC_OS_SANDBOX || MAC_OS_LIBRARY) && !_DEBUG
+#if !_WIN32 && !_DEBUG
         return 0;
 #else
         return sizeof(ManifestInternalDetoursErrorNotificationFileString_t);

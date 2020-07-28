@@ -167,6 +167,67 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         }
 
         /// <summary>
+        ///     Trace a message if current severity is set to at least the given severity.
+        /// </summary>
+        public void TraceMessage(Severity severity, string message, string? component = null, [CallerMemberName] string? operation = null)
+        {
+            if (Logger == null)
+            {
+                return;
+            }
+
+            component ??= string.Empty;
+            operation ??= string.Empty;
+
+            if (Logger is IStructuredLogger structuredLogger)
+            {
+                structuredLogger.Log(new LogMessage(message, operation, component, OperationKind.None, _idAsString, severity));
+            }
+            else
+            {
+                string? provenance;
+                if (string.IsNullOrEmpty(component) || string.IsNullOrEmpty(operation))
+                {
+                    provenance = $"{component}{operation}: ";
+
+                    if (provenance.Equals(": "))
+                    {
+                        provenance = string.Empty;
+                    }
+                }
+                else
+                {
+                    provenance = $"{component}.{operation}: ";
+                }
+
+                Logger.Log(severity, $"{_idAsString} {provenance}{message}");
+            }
+        }
+
+        /// <summary>
+        /// Trace operation start.
+        /// </summary>
+        public void OperationStarted(
+            string message,
+            string operationName,
+            string componentName,
+            Severity severity,
+            OperationKind kind)
+        {
+            if (Logger is IStructuredLogger structuredLogger)
+            {
+                // Note, that 'message' here is a plain message from the client
+                // without correlation id.
+                var operation = new OperationStarted(message, operationName, componentName, kind, _idAsString, severity);
+                structuredLogger.LogOperationStarted(operation);
+            }
+            else
+            {
+                TraceMessage(severity, message);
+            }
+        }
+
+        /// <summary>
         /// Trace operation completion.
         /// </summary>
         public void OperationFinished(string message, string operationName, string componentName, ResultBase result, TimeSpan duration, Severity successSeverity, OperationKind kind)
@@ -260,23 +321,43 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// <nodoc />
         public void RegisterBuildId(string buildId)
         {
-            if (Logger is IOperationLogger operationLogger)
-            {
-                operationLogger.RegisterBuildId(buildId);
-            }
-
-            GlobalInfoStorage.SetGlobalInfo(GlobalInfoKey.BuildId, buildId);
+            Logger.RegisterBuildId(buildId);
         }
 
         /// <nodoc />
         public void UnregisterBuildId()
         {
-            if (Logger is IOperationLogger operationLogger)
+            Logger.UnregisterBuildId();
+        }
+    }
+
+    /// <nodoc />
+    public static class LoggerExtensions
+    {
+        /// <summary>
+        /// Sets build id as an ambient information used by tracing infrastructure.
+        /// </summary>
+        public static void RegisterBuildId(this ILogger logger, string buildId)
+        {
+            GlobalInfoStorage.SetGlobalInfo(GlobalInfoKey.BuildId, buildId);
+
+            if (logger is IOperationLogger operationLogger)
+            {
+                operationLogger.RegisterBuildId(buildId);
+            }
+        }
+
+        /// <summary>
+        /// Clears an existing build id set by <see cref="RegisterBuildId"/>.
+        /// </summary>
+        public static void UnregisterBuildId(this ILogger logger)
+        {
+            GlobalInfoStorage.SetGlobalInfo(GlobalInfoKey.BuildId, value: null);
+
+            if (logger is IOperationLogger operationLogger)
             {
                 operationLogger.UnregisterBuildId();
             }
-
-            GlobalInfoStorage.SetGlobalInfo(GlobalInfoKey.BuildId, value: null);
         }
     }
 }

@@ -11,6 +11,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Logging;
 using BuildXL.Utilities.Collections;
 using Microsoft.Windows.ProjFS;
@@ -23,10 +24,10 @@ namespace BuildXL.Cache.ContentStore.Vfs.Provider
     /// </summary>
     internal class VfsProvider
     {
-        private readonly Logger Log;
+        private readonly ILogger Log;
         private readonly VfsCasConfiguration Configuration;
         private readonly VfsContentManager ContentManager;
-        private readonly VfsTree Tree;
+        private VfsTree Tree => ContentManager.Tree;
 
         private static readonly byte[] s_contentId = new byte[] { 0 };
         private static readonly byte[] s_providerId = new byte[] { 1 };
@@ -36,16 +37,17 @@ namespace BuildXL.Cache.ContentStore.Vfs.Provider
 
         private readonly VirtualizationInstance virtualizationInstance;
 
+        private ConcurrentDictionary<string, bool> _outstandingCurrentProcessHydrations = new ConcurrentDictionary<string, bool>();
+
         // TODO: Cache enumeration listings
         private readonly ObjectCache<(VfsDirectoryNode node, int version), List<VfsNode>> enumerationCache = new ObjectCache<(VfsDirectoryNode node, int version), List<VfsNode>>(1103);
         private readonly ConcurrentDictionary<Guid, ActiveEnumeration> activeEnumerations = new ConcurrentDictionary<Guid, ActiveEnumeration>();
         private readonly ConcurrentDictionary<int, CancellationTokenSource> activeCommands = new ConcurrentDictionary<int, CancellationTokenSource>();
 
-        public VfsProvider(Logger log, VfsCasConfiguration configuration, VfsContentManager contentManager, VfsTree tree)
+        public VfsProvider(ILogger log, VfsCasConfiguration configuration, VfsContentManager contentManager)
         {
             Log = log;
             Configuration = configuration;
-            Tree = tree;
             ContentManager = contentManager;
 
             // Enable notifications if the user requested them.
@@ -63,7 +65,7 @@ namespace BuildXL.Cache.ContentStore.Vfs.Provider
             }
             catch (Exception ex)
             {
-                Log.Fatal(ex, "Failed to create VirtualizationInstance.");
+                Log.Error(ex, "Failed to create VirtualizationInstance.");
                 throw;
             }
         }
@@ -103,6 +105,11 @@ namespace BuildXL.Cache.ContentStore.Vfs.Provider
 
                 return true;
             });
+        }
+
+        public void StopVirtualization()
+        {
+            virtualizationInstance.StopVirtualizing();
         }
 
         private void OnNotifyNewFileCreated(
@@ -309,7 +316,31 @@ namespace BuildXL.Cache.ContentStore.Vfs.Provider
             uint triggeringProcessId,
             string triggeringProcessImageFileName)
         {
-            if (triggeringProcessId == currentProcessId)
+            bool isCurrentProcess = triggeringProcessId == currentProcessId;
+
+            bool allowCallback()
+            {
+                if (isCurrentProcess)
+                {
+                    if (!VfsUtilities.AllowCurrentProcessCallbacks || _outstandingCurrentProcessHydrations.ContainsKey(relativePath))
+                    {
+                        // Current process cannot execute callback or there is already a pending hydration from the current process
+                        return false;
+                    }
+
+                    return true;
+                }
+
+                if (triggeringProcessImageFileName.EndsWith("mssense.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Don't allow virus scan to materialize files
+                    return false;
+                }
+
+                return true;
+            }
+
+            if (!allowCallback())
             {
                 // The current process cannot trigger placeholder creation to prevent deadlock do to re-entrancy
                 // Just pretend the file doesn't exist.
@@ -347,8 +378,23 @@ namespace BuildXL.Cache.ContentStore.Vfs.Provider
                 {
                     return HandleCommandAsynchronously(commandId, async token =>
                     {
-                        var fileNode = (VfsFileNode)node;
-                        await ContentManager.PlaceHydratedFileAsync(relativePath, new VfsFilePlacementData(fileNode.Hash, fileNode.RealizationMode, fileNode.AccessMode), token);
+                        try
+                        {
+                            if (isCurrentProcess)
+                            {
+                                _outstandingCurrentProcessHydrations[relativePath] = true;
+                            }
+
+                            var fileNode = (VfsFileNode)node;
+                            await ContentManager.PlaceHydratedFileAsync(relativePath, fileNode, token);
+                        }
+                        finally
+                        {
+                            if (isCurrentProcess)
+                            {
+                                _outstandingCurrentProcessHydrations.TryRemove(relativePath, out _);
+                            }
+                        }
 
                         // TODO: Create hardlink / move to original location to replace symlink?
                         return HResult.Ok;

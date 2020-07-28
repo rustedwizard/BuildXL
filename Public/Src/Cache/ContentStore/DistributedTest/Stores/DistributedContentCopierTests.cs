@@ -2,27 +2,20 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed;
-using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.Stores;
 using BuildXL.Cache.ContentStore.Hashing;
-using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
-using BuildXL.Cache.ContentStore.Interfaces.Sessions;
-using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest.FileSystem;
 using BuildXL.Cache.ContentStore.InterfacesTest.Results;
 using BuildXL.Cache.ContentStore.InterfacesTest.Time;
-using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
-using BuildXL.Cache.ContentStore.UtilitiesCore;
 using ContentStoreTest.Distributed.ContentLocation;
 using ContentStoreTest.Test;
 using FluentAssertions;
@@ -43,7 +36,7 @@ namespace ContentStoreTest.Distributed.Stores
             var context = new Context(Logger);
             using (var directory = new DisposableDirectory(FileSystem))
             {
-                var(distributedCopier, mockFileCopier) = await CreateAsync(context, directory.Path, TimeSpan.Zero);
+                var(distributedCopier, mockFileCopier) = CreateMocks(FileSystem, directory.Path, TimeSpan.Zero);
 
                 var hash = VsoHashInfo.Instance.EmptyHash;
                 var hashWithLocations = new ContentHashWithSizeAndLocations(
@@ -70,7 +63,7 @@ namespace ContentStoreTest.Distributed.Stores
             var context = new Context(Logger);
             using (var directory = new DisposableDirectory(FileSystem))
             {
-                var(distributedCopier, mockFileCopier) = await CreateAsync(context, directory.Path, TimeSpan.Zero);
+                var(distributedCopier, mockFileCopier) = CreateMocks(FileSystem, directory.Path, TimeSpan.Zero);
 
                 var hash = ContentHash.Random();
                 var wrongHash = VsoHashInfo.Instance.EmptyHash;
@@ -100,7 +93,7 @@ namespace ContentStoreTest.Distributed.Stores
             var context = new Context(Logger);
             using (var directory = new DisposableDirectory(FileSystem))
             {
-                var (distributedCopier, mockFileCopier) = await CreateAsync(context, directory.Path,TimeSpan.Zero, retries);
+                var (distributedCopier, mockFileCopier) = CreateMocks(FileSystem, directory.Path,TimeSpan.Zero, retries);
                 var machineLocations = new MachineLocation[] {new MachineLocation("")};
 
                 var hash = ContentHash.Random();
@@ -109,7 +102,7 @@ namespace ContentStoreTest.Distributed.Stores
                     size: 99,
                     machineLocations);
 
-                mockFileCopier.CopyToAsyncResult = new CopyFileResult(CopyFileResult.ResultCode.SourcePathError);
+                mockFileCopier.CopyToAsyncResult = new CopyFileResult(CopyResultCode.UnknownServerError);
                 var result = await distributedCopier.TryCopyAndPutAsync(
                     new OperationContext(context),
                     hashWithLocations,
@@ -120,20 +113,20 @@ namespace ContentStoreTest.Distributed.Stores
             }
         }
 
-        [Theory]
-        [InlineData(3)]
         ///<summary>
-        /// Test case for bug <"https://dev.azure.com/mseng/1ES/_boards/board/t/DavidW%20-%20Team/Stories/?workitem=1654106"/>
+        /// Test case for bug https://dev.azure.com/mseng/1ES/_boards/board/t/DavidW%20-%20Team/Stories/?workitem=1654106
         /// During the first attempt of copying from a list of locations, one of the locations returns a DestinationPathError.
         /// Then in subsequent attempts to copy from the list of locations, the previous location that returned DestinationPathError now returns a different error.
         /// We should still be able to attempt to copy and return without and out of range exception thrown.
         ///</summary>
+        [Theory]
+        [InlineData(3)]
         public async Task CopyWithDestinationPathError(int retries)
         {
             var context = new Context(Logger);
             using (var directory = new DisposableDirectory(FileSystem))
             {
-                var (distributedCopier, mockFileCopier) = await CreateAsync(context, directory.Path, TimeSpan.FromMilliseconds((10)), retries);
+                var (distributedCopier, mockFileCopier) = CreateMocks(FileSystem, directory.Path, TimeSpan.FromMilliseconds((10)), retries);
                 var machineLocations = new MachineLocation[] { new MachineLocation(""), new MachineLocation("") };
 
                 var hash = ContentHash.Random();
@@ -144,10 +137,10 @@ namespace ContentStoreTest.Distributed.Stores
                 mockFileCopier.CopyAttempts = 0;
                 var totalCopyAttempts = (retries - 1) * machineLocations.Length + 1;
                 mockFileCopier.CustomResults = new CopyFileResult[totalCopyAttempts];
-                mockFileCopier.CustomResults[0] = new CopyFileResult(CopyFileResult.ResultCode.DestinationPathError);
+                mockFileCopier.CustomResults[0] = new CopyFileResult(CopyResultCode.DestinationPathError);
                 for(int counter = 1; counter < totalCopyAttempts; counter ++)
                 {
-                    mockFileCopier.CustomResults[counter] = new CopyFileResult(CopyFileResult.ResultCode.SourcePathError);
+                    mockFileCopier.CustomResults[counter] = new CopyFileResult(CopyResultCode.UnknownServerError);
                 };
                 var destinationResult = await distributedCopier.TryCopyAndPutAsync(
                     new OperationContext(context),
@@ -160,33 +153,11 @@ namespace ContentStoreTest.Distributed.Stores
             }
         }
 
-        [Fact]
-        public async Task CopyWithDesignatedLocations()
-        {
-            var context = new Context(Logger);
-            using (var directory = new DisposableDirectory(FileSystem))
-            {
-                var machineLocations = new MachineLocation[] { new MachineLocation("Non-designated"), new MachineLocation("Designated") };
-                var (distributedCopier, mockFileCopier) = await CreateAsync(context, directory.Path, TimeSpan.FromMilliseconds((10)), designatedLocations: new MachineLocation[] { machineLocations[1] });
-                mockFileCopier.CopyToAsyncResult = CopyFileResult.SuccessWithSize(99);
-
-                var hash = ContentHash.Random();
-                var hashWithLocations = new ContentHashWithSizeAndLocations(
-                    hash,
-                    size: 99,
-                    machineLocations);
-                var destinationResult = await distributedCopier.TryCopyAndPutAsync(
-                    new OperationContext(context),
-                    hashWithLocations,
-                    handleCopyAsync: tpl => Task.FromResult(new PutResult(hash, 99)));
-
-                destinationResult.ShouldBeSuccess();
-                mockFileCopier.CopyAttempts.Should().Be(1);
-                ((TestDistributedContentCopier)distributedCopier).PathTransformer.LastContentLocation.Should().BeEquivalentTo(machineLocations[1].Data);
-            }
-        }
-
-        private Task<(TestDistributedContentCopier, MockFileCopier)> CreateAsync(Context context, AbsolutePath rootDirectory, TimeSpan retryInterval, int retries = 1, MachineLocation[] designatedLocations = null)
+        public static (TestDistributedContentCopier, MockFileCopier) CreateMocks(
+            IAbsFileSystem fileSystem,
+            AbsolutePath rootDirectory,
+            TimeSpan retryInterval,
+            int retries = 1)
         {
             var mockFileCopier = new MockFileCopier();
             var existenceChecker = new TestFileCopier();
@@ -196,79 +167,17 @@ namespace ContentStoreTest.Distributed.Stores
                 new DistributedContentStoreSettings()
                 {
                     RetryIntervalForCopies = Enumerable.Range(0, retries).Select(r => retryInterval).ToArray(),
-                    PrioritizeDesignatedLocationsOnCopies = designatedLocations != null,
                     TrustedHashFileSizeBoundary = long.MaxValue // Disable trusted hash because we never actually move bytes and thus the hasher thinks there is a mismatch.
                 },
-                FileSystem,
+                fileSystem,
                 mockFileCopier,
                 existenceChecker,
                 copyRequester: null,
-                new NoOpPathTransformer(rootDirectory),
-                designatedLocations);
-            return Task.FromResult((contentCopier, mockFileCopier));
+                new TestDistributedContentCopier.NoOpPathTransformer(rootDirectory));
+            return (contentCopier, mockFileCopier);
         }
 
-        private class TestDistributedContentCopier : DistributedContentCopier<AbsolutePath>, IDistributedContentCopierHost
-        {
-            public readonly NoOpPathTransformer PathTransformer;
-            private readonly MachineLocation[] _designatedLocations;
-
-            public TestDistributedContentCopier(
-                AbsolutePath workingDirectory,
-                DistributedContentStoreSettings settings,
-                IAbsFileSystem fileSystem,
-                IFileCopier<AbsolutePath> fileCopier,
-                IFileExistenceChecker<AbsolutePath> fileExistenceChecker,
-                IContentCommunicationManager copyRequester,
-                IPathTransformer<AbsolutePath> pathTransformer,
-                MachineLocation[] designatedLocations)
-                : base(settings, fileSystem, fileCopier, fileExistenceChecker, copyRequester, pathTransformer, TestSystemClock.Instance)
-            {
-                WorkingFolder = workingDirectory;
-                PathTransformer = pathTransformer as NoOpPathTransformer;
-                _designatedLocations = designatedLocations;
-            }
-
-            public AbsolutePath WorkingFolder { get; }
-
-            public Result<MachineLocation[]> GetDesignatedLocations(ContentHash hash)
-            {
-                return _designatedLocations;
-            }
-
-            public void ReportReputation(MachineLocation location, MachineReputation reputation)
-            {
-            }
-
-            protected override Task<CopyFileResult> CopyFileAsync(IFileCopier<AbsolutePath> copier, AbsolutePath sourcePath, AbsolutePath destinationPath, long expectedContentSize, bool overwrite, CancellationToken cancellationToken)
-            {
-                return copier.CopyToAsync(sourcePath, null, expectedContentSize, cancellationToken);
-            }
-
-            internal Task<PutResult> TryCopyAndPutAsync(OperationContext operationContext, ContentHashWithSizeAndLocations hashWithLocations, Func<(CopyFileResult copyResult, AbsolutePath tempLocation, int attemptCount), Task<PutResult>> handleCopyAsync)
-            {
-                return base.TryCopyAndPutAsync(operationContext, this, hashWithLocations, handleCopyAsync);
-            }
-        }
-
-        private class NoOpPathTransformer : TestPathTransformer
-        {
-            private readonly AbsolutePath _root;
-
-            public byte[] LastContentLocation { get; set; }
-
-            public NoOpPathTransformer(AbsolutePath root)
-            {
-                _root = root;
-            }
-            public override AbsolutePath GeneratePath(ContentHash contentHash, byte[] contentLocationIdContent)
-            {
-                LastContentLocation = contentLocationIdContent;
-                return _root;
-            }
-        }
-
-        private class MockPathTransformer : IPathTransformer
+        public class MockPathTransformer : IPathTransformer
         {
             /// <inheritdoc />
             public MachineLocation GetLocalMachineLocation(AbsolutePath cacheRoot) => new MachineLocation("");
@@ -280,11 +189,11 @@ namespace ContentStoreTest.Distributed.Stores
             public byte[] GetPathLocation(PathBase path) => new byte[] { };
         }
 
-        private class MockFileCopier : IFileCopier
+        public class MockFileCopier : IFileCopier
         {
             public int CopyAttempts = 0;
 #pragma warning disable 649
-            public CopyFileResult CopyToAsyncResult;
+            public CopyFileResult CopyToAsyncResult = CopyFileResult.Success;
 #pragma warning restore 649
             public CopyFileResult[] CustomResults;
 
@@ -306,6 +215,58 @@ namespace ContentStoreTest.Distributed.Stores
             /// <inheritdoc />
             public Task<FileExistenceResult> CheckFileExistsAsync(PathBase path, TimeSpan timeout, CancellationToken cancellationToken)
                 => Task.FromResult(CheckFileExistsAsyncResult);
+        }
+    }
+
+    public class TestDistributedContentCopier : DistributedContentCopier<AbsolutePath>, IDistributedContentCopierHost
+    {
+        public readonly NoOpPathTransformer PathTransformer;
+
+        public TestDistributedContentCopier(
+            AbsolutePath workingDirectory,
+            DistributedContentStoreSettings settings,
+            IAbsFileSystem fileSystem,
+            IFileCopier<AbsolutePath> fileCopier,
+            IFileExistenceChecker<AbsolutePath> fileExistenceChecker,
+            IContentCommunicationManager copyRequester,
+            IPathTransformer<AbsolutePath> pathTransformer)
+            : base(settings, fileSystem, fileCopier, fileExistenceChecker, copyRequester, pathTransformer, TestSystemClock.Instance)
+        {
+            WorkingFolder = workingDirectory;
+            PathTransformer = pathTransformer as NoOpPathTransformer;
+        }
+
+        public AbsolutePath WorkingFolder { get; }
+
+        public void ReportReputation(MachineLocation location, MachineReputation reputation)
+        {
+        }
+
+        protected override Task<CopyFileResult> CopyFileAsync(IFileCopier<AbsolutePath> copier, AbsolutePath sourcePath, AbsolutePath destinationPath, long expectedContentSize, bool overwrite, CancellationToken cancellationToken)
+        {
+            return copier.CopyToAsync(sourcePath, null, expectedContentSize, cancellationToken);
+        }
+
+        internal Task<PutResult> TryCopyAndPutAsync(OperationContext operationContext, ContentHashWithSizeAndLocations hashWithLocations, Func<(CopyFileResult copyResult, AbsolutePath tempLocation, int attemptCount), Task<PutResult>> handleCopyAsync)
+        {
+            return base.TryCopyAndPutAsync(operationContext, this, hashWithLocations, CopyReason.None, handleCopyAsync);
+        }
+
+        public class NoOpPathTransformer : TestPathTransformer
+        {
+            private readonly AbsolutePath _root;
+
+            public byte[] LastContentLocation { get; set; }
+
+            public NoOpPathTransformer(AbsolutePath root)
+            {
+                _root = root;
+            }
+            public override AbsolutePath GeneratePath(ContentHash contentHash, byte[] contentLocationIdContent)
+            {
+                LastContentLocation = contentLocationIdContent;
+                return _root;
+            }
         }
     }
 }

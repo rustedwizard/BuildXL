@@ -1,17 +1,154 @@
-> Each release should have an entry in this document.
+This page is a curated list of the release notes for releases after 0.20170619.4.0 and a manual copy of notable changes from each build before that. See the repo's commit history full details for what is included in each build.
 
-BuildXL has an official build weekly and a canary build nightly. 
+=======
+# 0.1.0-20200717.1 (Release [71912](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=71912)).  Released 7/22/2020
+-	Perf improvements on junction resolution in detours
+-	Clean dynamic outputs on pip retry
+-	Update .NET Core runtime to 3.1.6
+-	Various bug fixes
 
-The BuildXL team sends out a release email to:
-* 1ES - BuildXL Release Notifications <bxl-relnot@microsoft.com>
+# 0.1.0-20200711.0 (Release [71168](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=71168)).  Released 7/15/2020
+- Enable non-nullable reference types for Cache Library 
+- Exclude ClientTelemetry.pdb from getting copied several times as a part of packages/final deployment.
+- Add Chromium tracer for BuildXL
+- Fix DistributedContentCopier logging
+- Disable writing ClusterState to ContentLocationDatabase and make read-only on workers
+- Add Redis autoscaling to the cache monitor
+- Retry Proactive Copies (and clean-up)
+- Add Yarn integration tests
+- Embed debug information (pdb) into assemblies
+- Checkpoint manager hardlink immutable files instead of copying
+- Add a configuration option to make a pip fail when writing to standard error
+- Fix under build related to directory enumerations and undeclared sources
+- Some other bug fixes, documentation updates and test additions
 
-each time an official release is triggered since: 0.20170619.4.0.
+# 0.1.0-20200703.4.1 (Release [70555](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=70555)).  Released 7/8/2020
+- A new Yarn frontend
+- New counters for the size of materialized files
+- Minimum value of MaxNumPipTelemetryBatches is now 0
+- Saving fingerprintstore into the logs directory is now optional
+- Process cancellation messages are now verbose
+- Misc bug fixes
 
-This page is a curated list of the release notes for releases after 0.20170619.4.0 and a manual copy of notable changes from each build before that. 
-See the [the BuildXL Release Management page for the Production environment](https://dev.azure.com/mseng/domino/_release?definitionId=21&definitionEnvironmentId=112&_a=environment-summary) for full commit-level details for what is included in each build.
-When a BuildXL developer implements a feature, fixes an important bug, solves an issue brought up by a customer, or makes any other notable change, they are encouraged to add an entry here.
+# 0.1.0-20200628.1 (Release [69479](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=69479)).  Released 7/1/2020
+- Improvements for FileConsumption analyzer to help optimize materialization
+- DumpPip analyzer – filter by produced shared opaque directory
+- Upgrade RocksDb to 6.10.2
+- Rename file access whitelist to allowlist
+- Take maximum of historical CPU usage and user-provided weight
+- Reduce number of per-pip runtime telemetry events sent by default
+- Update QTest to 20.6.233.220544
+- Retry PipProcessStartFailed and PipTempDirectoryCleanup errors no another machine
+- Misc bug fixes 
 
-# Upcoming release
+# 0.1.0-20200619.6.2 (Release [68625](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=68625)).  Released 6/24/2020
+- [Rush] Various fixes on Rush frontend.
+- Retry Detours semaphore creation in VM
+- Fix on Aria reporting limit.
+- [Linux] Cache reads/writes in sandbox.
+- [QTest] Upgrade QTest version to 20.6.12.220844 that includes fix for DFA in code coverage.
+
+# 0.1.0-20200612.5.1 (Release [68123](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=68123)).  Released 6/18/2020
+- Refine the default value of disableDefaultSourceResolver to false.
+- Clarify the cache saving message.
+- Add the resolver kinds used by the build as part of the statistics we send to Kusto 
+- Automatically add tags qualifierKey=qualifierValue for each process pip 
+- Clean SOD outputs before retrying due to a retriable exit code 
+- [Rush] Use redirected log directory for tool logs 
+- Added telemetry tags to toppipsperformanceinfo
+- Fixed Fields in graph fingerprints being ignored during fingerprint matching causing false matched
+
+# 0.1.0-20200608.2 (Release [67013](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=67013)).  Released 6/10/2020
+- Add more data to the detouring status: Is64BitProcess
+- Don't report surviving child processes when execution is canceled
+- Upgrading CB.QTest that includes old version of vstest to avoid new DFAs
+- Handle the case when a surviving child process crashes for linux-sandboxing
+
+# 0.1.0-20200602.10.2 (Release [66472](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=66472)).  Released 6/4/2020
+- New JavaScript dependency fixer analyzer
+- Composite shared opaque directories perf improvements
+- More configuration options for Drop
+- Report dynamic content of seal directory pips
+- New feature: output directory exclusions
+- Various Rush front end improvements 
+
+# 0.1.0-20200517.1 (Release [64507](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=64507)).  Released 5/20/2020
+- Allow client to recreate directories
+- Process Execution: implement chroot jail for *nix
+- Updated QTest nuget package to 20.5.15.183816
+- Introduce emptyWorkingSet feature as an alternative to cancellation
+- Disable DScript default source resolver by default
+- [Bug] Avoid ObjectDisposedException when the empty hash is pushed to the machine twice
+- [Bug] Untrack CodeCoverage.pdb that cause DFA
+- Track GVFS_projection file if configured
+- [Rush] Allow configuring to preserve the pathset casing at the pip process level.
+- Make composite Shared Opaque Directory content filters more flexible
+
+# 0.1.0-20200506.4 (Release [63394](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=63394)).  Released 5/13/2020
+- Fix for DisallowedFileAccess under user profile when running pips under admin VM in CloudBuild
+- [Windows] Not scrubbing directory symlinks anymore
+- [macOS] Catalina adjustments
+- Improvements to ADO listener
+- Various bug fixes
+
+# 0.1.0-20200501.3 (Release [62855](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=62855)).  Released 5/6/2020
+- Improved logging for memory AccessViolations
+- Update linux runtime to Ubuntu 18.04
+- Drop upload support for Rush resolver
+- Incremental work towards supporting chunk level dedup in drop
+- Allow pips to specify they are uncancelable
+- Misc bug fixes
+
+# 0.1.0-20200424.6 (Release [62176](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=62176)).  Released 4/29/2020
+- Nicer rendering for batched cache miss analysis result.
+- Shared opaque filtering.
+- Selfhost build in Linux.
+- Use different server process for different hash type.
+- [Mac] XPC communication for MacOS Detours and ES extension.
+
+# 0.1.0-20200418.4 (Release [61546](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=61546)).  Released 4/22/2020
+- Deploy Rush builder tool in a way drop understands
+- Add telemetry event with per-pip runtimes for top N pips
+- Making external sandboxed process executor work on non-Windows 
+- Do not retry some exceptions while uploading symbols 
+- Fix shared opaque subdirectory DFA 
+- Fix a bug to prevent new entries from getting added to HistoricPerfData 
+- Include version in spec for unmanaged packages
+- Update historic perf data format version
+
+
+# 0.1.0-20200412.2.1 (Release [60874](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=60874)).  Released 4/15/2020
+- An option for less aggressive memory projection: /enableLessAggresiveMemoryProjection
+- Various Rush frontend improvements and new features
+- Do not publish empty fingerprint store 
+- Allow double write policies to kick in when double write involves a dynamic dependency 
+- Adding semaphore for pip execution in VM
+- [QTest] Update Nuget Package to 20.04.06
+
+
+# 0.1.0-20200403.2.1 (Release [60559](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=60559)).  Released 4/8/2020
+- Add BuildXL workingset usage to TotalAvailableRam at Execution phase 
+- Hook up logging to execution analyzer for graph loading failure details
+- Various Rush frontend improvements and new features
+- Use dynamic commit memory size for pip cancellation
+- [macOS] Interposing / Hybrid sandbox implementation 
+- [symbols] Log collision messages as verbose rather than warning 
+- Fix RuntimeCacheMissAnalyzer NagleQueue process hang problem
+- Setup infrastructure to run CloudTests tests in our PR validation
+- Enable support for fully seal directories to contain output directories
+- Fix directory symlink scrubbing 
+- Improve XUnit integration on generated solution for Resharper
+- Add a logic to remove redirectedProfile directory when junction creation fails
+
+
+# 0.1.0-20200315.0 (Release [58569](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=58569)).  Released 3/18/2020
+-	Add support for nested shared opaque directories.
+-	Add Rush frontend.
+-	Optimizations for trusted file accesses.
+-	Improvements for memory estimation for cancelled process pips.
+-	Relax probing explicitly declared outputs that are also under an output directory.
+-	Various bug fixes and improvements.
+
 
 # 0.1.0-20200315.0 (Release [58569](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=58569)).  Released 3/18/2020
 -	Add support for nested shared opaque directories.
@@ -539,7 +676,7 @@ When a BuildXL developer implements a feature, fixes an important bug, solves an
 
 # 0.20181021.2.0 (Release [17290](https://dev.azure.com/mseng/domino/_release_a=release-pipeline-progress&releaseId=17290)). Released 10/24/2018.
 - Fix false absent file probes under opaque directories with lazy materialization
-- Fix directory enumeration filters to handle whitespace file names
+- Fix directory enumeration filters to handle allowspace file names
 - Detour move/rename directory correctly
 - Multiple fixes around FingerprintStore
 - Fix cache miss diff when UnsafeOptions are cut off
@@ -835,7 +972,7 @@ When a BuildXL developer implements a feature, fixes an important bug, solves an
 * Improve obsolete feature in DominoScript
 * Decrease amount of materialization for office builds
 * Improve local engine cache performance
-* Make whitelist regex matching case insensitive
+* Make allowlist regex matching case insensitive
 * More foundational work for BuildXL on Mac
 * Assorted bug fixes
 

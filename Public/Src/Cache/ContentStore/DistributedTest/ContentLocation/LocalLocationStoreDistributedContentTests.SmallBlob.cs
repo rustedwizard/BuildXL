@@ -8,12 +8,11 @@ using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.Redis;
 using BuildXL.Cache.ContentStore.Hashing;
-using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Sessions;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest.Results;
-using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.UtilitiesCore;
+using FluentAssertions;
 using Xunit;
 
 namespace ContentStoreTest.Distributed.Sessions
@@ -158,9 +157,9 @@ namespace ContentStoreTest.Distributed.Sessions
                     await session0.PutContentAsync(context, fileString).ShouldBeSuccess();
                     Assert.Equal(1, redisStore0.Counters[GlobalStoreCounters.PutBlob].Value);
 
-                    await session1.PutContentAsync(context, fileString).ShouldBeSuccess();
+                    var result = await session1.PutContentAsync(context, fileString).ShouldBeSuccess();
                     Assert.Equal(1, redisStore1.Counters[GlobalStoreCounters.PutBlob].Value);
-                    Assert.Equal(1, redisStore1.BlobAdapter.Counters[RedisBlobAdapter.RedisBlobAdapterCounters.SkippedBlobs].Value);
+                    Assert.Equal(1, redisStore1.GetBlobAdapter(result.ContentHash).Counters[RedisBlobAdapter.RedisBlobAdapterCounters.SkippedBlobs].Value);
                 });
         }
 
@@ -191,7 +190,7 @@ namespace ContentStoreTest.Distributed.Sessions
                     Assert.True(deleted, $"Could not delete {blobKey} because it does not exist.");
 
                     var openStreamResult = await session1.OpenStreamAsync(context, putResult.ContentHash, CancellationToken.None).ShouldBeSuccess();
-                    Assert.Equal(0, redisStore1.BlobAdapter.Counters[RedisBlobAdapter.RedisBlobAdapterCounters.DownloadedBlobs].Value);
+                    Assert.Equal(0, redisStore1.GetBlobAdapter(putResult.ContentHash).Counters[RedisBlobAdapter.RedisBlobAdapterCounters.DownloadedBlobs].Value);
                     Assert.Equal(1, redisStore1.Counters[GlobalStoreCounters.PutBlob].Value);
                 });
         }
@@ -219,8 +218,19 @@ namespace ContentStoreTest.Distributed.Sessions
                     var putResult = await session0.PutRandomFileAsync(context, FileSystem, HashType.Vso0, false, 10, CancellationToken.None).ShouldBeSuccess();
                     Assert.Equal(1, redisStore0.Counters[GlobalStoreCounters.PutBlob].Value);
 
-                    await redisStore1.GetBlobAsync(context, putResult.ContentHash).ShouldBeError("TimeoutException");
-                    Assert.Equal(1, redisStore1.Counters[GlobalStoreCounters.GetBlob].Value);
+                    // This test is a bit flaky and in some cases the operation is successful even with 0 timeout.
+                    GetBlobResult failure = null;
+                    for (int i = 0; i < 10; i++)
+                    {
+                        failure = await redisStore1.GetBlobAsync(context, putResult.ContentHash);
+                        if (!failure.Succeeded)
+                        {
+                            break;
+                        }
+                    }
+
+                    failure.ShouldBeError("TimeoutException");
+                    redisStore1.Counters[GlobalStoreCounters.GetBlob].Value.Should().BeGreaterOrEqualTo(1);
                 });
         }
     }

@@ -57,7 +57,8 @@ export function compile(inputArgs: Arguments) : Result {
 
     const outputDirectory = Context.getNewOutputDirectory(args.out + "-csc");
     const outputBinPath = outputDirectory.combine(args.out);
-    const outputPdbPath = (args.debugType || args.emitDebugInformation)
+    // If debugType is "embedded" then the pdb data is embedded into the dll and there is no separate .pdb file
+    const outputPdbPath = ((args.debugType || args.emitDebugInformation) && args.debugType !== "embedded")
         ? (args.pdb ? p`${outputDirectory}/${args.pdb}` : outputBinPath.changeExtension(".pdb"))
         : undefined;
     const outputDocPath = args.doc && p`${outputDirectory}/${args.doc}`;
@@ -160,7 +161,7 @@ export function compile(inputArgs: Arguments) : Result {
         arguments: cscArguments,
         workingDirectory: outputDirectory,
         dependencies: additionalDependencies.filter(f => f !== undefined), //TODO: or additionalInputs???
-        tags: ["compile", "telemetry:csc"],
+        tags: ["compile", "telemetry:csc", ...args.tags],
         errorRegex: "error.*",
         // If shared compilation is enabled, then we need to allow the compiler service to breakaway. 
         // Additionally, and since this is a trusted process, we use the statically declared accesses to
@@ -193,6 +194,8 @@ export function compile(inputArgs: Arguments) : Result {
                     d`/private`,
                     d`/System`,
                     d`/Library`,
+                    d`/proc`,
+                    d`/sys`,
                     ...addIf(Environment.hasVariable("HOME"), d`${Environment.getDirectoryValue("HOME")}/.CFUserTextEncoding`))
             }
         });
@@ -402,7 +405,7 @@ export type ChecksumAlgorithm = "sha1" | "sha256";
 export type Platform = "x86" | "x64" | "itanium" | "arm" | "anycpu32bitpreferred" | "anycpu";
 
 @@public
-export type DebugType = "full" | "pdbOnly" | "portable";
+export type DebugType = "full" | "pdbOnly" | "portable" | "embedded";
 
 @@public
 export type WarningLevel = "level 0" | "level 1" | "level 2" | "level 3" | "level 4";

@@ -4,7 +4,7 @@
 const coreVersion = "3.1.0";
 const coreVersionPreviousVersion = "2.2.0";
 const pkgVersion = "4.3.0";
-const pkgVersionNext = "4.6.0";
+const pkgVersionNext = "4.7.0";
 
 export const pkgs = [
 
@@ -13,8 +13,7 @@ export const pkgs = [
 
     { id: "NETStandard.Library", version: "2.0.3", tfm: ".NETStandard2.0" },
     { id: "Microsoft.NETCore.Platforms", version: coreVersion },
-    { id: "System.Security.Claims", version: pkgVersion },
-
+    
     // .NET Core Self-Contained Deployment
     { id: "Microsoft.NETCore.DotNetHostResolver", version: coreVersion },
     { id: "Microsoft.NETCore.DotNetHostResolver", version: coreVersionPreviousVersion, alias: "Microsoft.NETCore.DotNetHostResolver.220" },
@@ -25,14 +24,14 @@ export const pkgs = [
     { id: "Microsoft.NETCore.DotNetAppHost", version: coreVersionPreviousVersion, alias: "Microsoft.NETCore.DotNetAppHost.220" },
 
     // .NET Core win-x64 runtime deps
-    { id: "Microsoft.NETCore.App.Host.win-x64", version: coreVersion, osSkip: [ "macOS" ]  },
-    { id: "Microsoft.NETCore.App.Runtime.win-x64", version: coreVersion, osSkip: [ "macOS" ]  },
-    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostResolver", version: coreVersion, osSkip: [ "macOS" ]  },
-    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy", version: coreVersion, osSkip: [ "macOS" ]  },
+    { id: "Microsoft.NETCore.App.Host.win-x64", version: coreVersion, osSkip: [ "macOS", "unix" ] },
+    { id: "Microsoft.NETCore.App.Runtime.win-x64", version: coreVersion, osSkip: [ "macOS", "unix" ] },
+    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostResolver", version: coreVersion, osSkip: [ "macOS", "unix" ] },
+    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy", version: coreVersion, osSkip: [ "macOS", "unix" ] },
 
-    { id: "runtime.win-x64.Microsoft.NETCore.DotNetAppHost", version: coreVersionPreviousVersion, alias: "runtime.win-x64.Microsoft.NETCore.DotNetAppHost.220", osSkip: [ "macOS" ]  },
-    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostResolver", version: coreVersionPreviousVersion, alias: "runtime.win-x64.Microsoft.NETCore.DotNetHostResolver.220", osSkip: [ "macOS" ]  },
-    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy", version: coreVersionPreviousVersion, alias: "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy.220", osSkip: [ "macOS" ]  },
+    { id: "runtime.win-x64.Microsoft.NETCore.DotNetAppHost", version: coreVersionPreviousVersion, alias: "runtime.win-x64.Microsoft.NETCore.DotNetAppHost.220", osSkip: [ "macOS", "unix" ] },
+    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostResolver", version: coreVersionPreviousVersion, alias: "runtime.win-x64.Microsoft.NETCore.DotNetHostResolver.220", osSkip: [ "macOS", "unix" ] },
+    { id: "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy", version: coreVersionPreviousVersion, alias: "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy.220", osSkip: [ "macOS", "unix" ] },
 
     // .NET Core osx-x64 runtime deps
     { id: "Microsoft.NETCore.App.Host.osx-x64", version: coreVersion },
@@ -46,15 +45,13 @@ export const pkgs = [
 
     // .NET Core linux-x64 runtime deps
     { id: "Microsoft.NETCore.App.Runtime.linux-x64", version: coreVersion },
-    // // === the following Linux packages are not needed for now, but might be in the future
-    // { id: "Microsoft.NETCore.App.Host.linux-x64", version: coreVersion },
-    // { id: "runtime.linux-x64.Microsoft.NETCore.DotNetHostResolver", version: coreVersion },
-    // { id: "runtime.linux-x64.Microsoft.NETCore.DotNetHostPolicy", version: coreVersion },
-    // // ===
+    { id: "Microsoft.NETCore.App.Host.linux-x64", version: coreVersion },
+    { id: "runtime.linux-x64.Microsoft.NETCore.DotNetHostResolver", version: coreVersion },
+    { id: "runtime.linux-x64.Microsoft.NETCore.DotNetHostPolicy", version: coreVersion },
 
     { id: "runtime.native.System", version: pkgVersion },
-    { id: "runtime.win7-x64.runtime.native.System.Data.SqlClient.sni", version: pkgVersion, osSkip: [ "macOS" ]  },
-    { id: "runtime.win7-x86.runtime.native.System.Data.SqlClient.sni", version: pkgVersion, osSkip: [ "macOS" ]  },
+    { id: "runtime.win7-x64.runtime.native.System.Data.SqlClient.sni", version: pkgVersion, osSkip: [ "macOS", "unix" ] },
+    { id: "runtime.win7-x86.runtime.native.System.Data.SqlClient.sni", version: pkgVersion, osSkip: [ "macOS", "unix" ] },
     { id: "runtime.native.System.Data.SqlClient.sni", version: pkgVersion },
     { id: "runtime.native.System.Net.Http", version: pkgVersion },
     { id: "runtime.native.System.IO.Compression", version: pkgVersion },
@@ -78,7 +75,6 @@ export const pkgs = [
     { id: "Microsoft.Win32.Primitives", version: pkgVersion },
     { id: "Microsoft.Win32.Registry", version: pkgVersion },
     { id: "System.AppContext", version: pkgVersion },
-    { id: "System.Buffers", version: pkgVersion },
     { id: "System.Collections", version: pkgVersion },
     { id: "System.Collections.Concurrent", version: pkgVersion },
     { id: "System.Collections.NonGeneric", version: pkgVersion },
@@ -133,7 +129,6 @@ export const pkgs = [
     { id: "System.Net.WebHeaderCollection", version: pkgVersion },
     { id: "System.Net.WebSockets", version: pkgVersion },
     { id: "System.Net.WebSockets.Client", version: "4.3.1" },
-    { id: "System.Numerics.Vectors", version: pkgVersion },
     { id: "System.ObjectModel", version: pkgVersion },
     { id: "System.Private.DataContractSerialization", version: pkgVersion },
     { id: "System.Reflection", version: pkgVersion },
@@ -169,6 +164,7 @@ export const pkgs = [
     { id: "System.Security.Cryptography.X509Certificates", version: pkgVersion },
     { id: "System.Security.Principal", version: pkgVersion },
     { id: "System.Security.SecureString", version: pkgVersion },
+    { id: "System.Security.Claims", version: pkgVersion },
     { id: "System.Text.Encoding", version: pkgVersion },
     { id: "System.Text.Encoding.Extensions", version: pkgVersion },
     { id: "System.Text.RegularExpressions", version: pkgVersion },
@@ -196,9 +192,9 @@ export const pkgs = [
         dependentPackageIdsToSkip: ["System.Security.Principal.Windows"] },
     { id: "System.Security.Principal.Windows", version: pkgVersionNext },
     { id: "System.Text.Json", version: pkgVersionNext,
-        dependentPackageIdsToSkip: ["System.Memory", "System.Runtime.CompilerServices.Unsafe"] },
+        dependentPackageIdsToSkip: ["System.Memory", "System.ValueTuple", "System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors", "System.Threading.Tasks.Extensions", "Microsoft.Bcl.AsyncInterfaces"],
+    },
     { id: "System.Threading.AccessControl", version: pkgVersionNext },
-
 
     // Non-standard version ones
     { id: "Microsoft.NETCore.Targets", version: "2.0.0" },

@@ -15,6 +15,11 @@ namespace NugetPackages {
         targetRuntime: "win-x64"
     };
 
+    const net462PackageQualifer = {
+        targetFramework: "net462",
+        targetRuntime: "win-x64"
+    };
+
     const netcoreApp31PackageQualifer = {
         targetFramework: "netcoreapp3.1",
         targetRuntime: "win-x64"
@@ -24,6 +29,9 @@ namespace NugetPackages {
         targetFramework: "netstandard2.0",
         targetRuntime: "win-x64"
     };
+
+    const osxPackageQualifier = { targetFramework: "netstandard2.0", targetRuntime: "osx-x64" };
+    const linuxPackageQualifier = { targetFramework: "netstandard2.0", targetRuntime: "linux-x64" };
 
     const canBuildAllPackagesOnThisHost = Context.getCurrentHost().os === "win";
 
@@ -35,6 +43,7 @@ namespace NugetPackages {
     const buildXLPipsIdentity = { id: `${packageNamePrefix}.Pips`, version: Branding.Nuget.packageVersion};
     const buildXLCacheHashingIdentity = { id: `${packageNamePrefix}.Cache.Hashing`, version: Branding.Nuget.packageVersion};
     const buildXLCacheInterfacesIdentity = { id: `${packageNamePrefix}.Cache.Interfaces`, version: Branding.Nuget.packageVersion};
+    const buildXLCacheLibrariesIdentity = { id: `${packageNamePrefix}.Cache.Libraries`, version: Branding.Nuget.packageVersion};
 
     const packageTargetFolder = BuildXLSdk.Flags.isMicrosoftInternal
         ? r`${qualifier.configuration}/pkgs`
@@ -81,46 +90,55 @@ namespace NugetPackages {
         id: buildXLUtilitiesIdentity.id,
         assemblies: [
             // BuildXL.Utilities
+            importFrom("BuildXL.Utilities").withQualifier(net462PackageQualifer).dll,
             importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).dll,
             importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).dll,
             importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).dll,
 
             // BuildXL.Utilities.Branding
+            importFrom("BuildXL.Utilities").withQualifier(net462PackageQualifer).Branding.dll,
             importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).Branding.dll,
             importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).Branding.dll,
             importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).Branding.dll,
 
             // BuildXL.Collections
+            importFrom("BuildXL.Utilities").withQualifier(net462PackageQualifer).Collections.dll,
             importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).Collections.dll,
             importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).Collections.dll,
             importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).Collections.dll,
 
             // BuildXL.Interop
+            importFrom("BuildXL.Utilities").withQualifier(net462PackageQualifer).Interop.dll,
             importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).Interop.dll,
             importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).Interop.dll,
             importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).Interop.dll,
 
             // BuildXL.KeyValueStore
+            importFrom("BuildXL.Utilities").withQualifier(net462PackageQualifer).KeyValueStore.dll,
             importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).KeyValueStore.dll,
             importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).KeyValueStore.dll,
             importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).KeyValueStore.dll,
 
             // BuildXL.Native
+            importFrom("BuildXL.Utilities").withQualifier(net462PackageQualifer).Native.dll,
             importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).Native.dll,
             importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).Native.dll,
             importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).Native.dll,
 
             // BuildXL.Configuration
+            importFrom("BuildXL.Utilities").withQualifier(net462PackageQualifer).Configuration.dll,
             importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).Configuration.dll,
             importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).Configuration.dll,
             importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).Configuration.dll,
 
             // BuildXL.Instrumentation.Common
+            importFrom("BuildXL.Utilities.Instrumentation").Common.withQualifier(net462PackageQualifer).dll,
             importFrom("BuildXL.Utilities.Instrumentation").Common.withQualifier(net472PackageQualifer).dll,
             importFrom("BuildXL.Utilities.Instrumentation").Common.withQualifier(netcoreApp31PackageQualifer).dll,
             importFrom("BuildXL.Utilities.Instrumentation").Common.withQualifier(netstandard20PackageQualifer).dll,
 
             // BuildXL.Instrumentation.Tracing
+            importFrom("BuildXL.Utilities.Instrumentation").Tracing.withQualifier(net462PackageQualifer).dll,
             importFrom("BuildXL.Utilities.Instrumentation").Tracing.withQualifier(net472PackageQualifer).dll,
             importFrom("BuildXL.Utilities.Instrumentation").Tracing.withQualifier(netcoreApp31PackageQualifer).dll,
             importFrom("BuildXL.Utilities.Instrumentation").Tracing.withQualifier(netstandard20PackageQualifer).dll,
@@ -131,6 +149,26 @@ namespace NugetPackages {
             buildXLCacheHashingIdentity,
         ],
         deploymentOptions: reducedDeploymentOptions,
+        additionalContent: [
+            {
+                subfolder: r`runtimes/win-x64/native/`,
+                contents: [
+                    ...importFrom("BuildXL.Utilities").withQualifier(netstandard20PackageQualifer).Native.nativeWin,
+                ],
+            },
+            {
+                subfolder: r`runtimes/osx-x64/native/`,
+                contents: [
+                    ...importFrom("BuildXL.Utilities").withQualifier(osxPackageQualifier).Native.nativeMac,
+                ],
+            },
+            {
+                subfolder: r`runtimes/linux-x64/native/`,
+                contents: [
+                    ...importFrom("BuildXL.Utilities").withQualifier(linuxPackageQualifier).Native.nativeLinux,
+                ],
+            },
+        ]
     });
 
     const pips = packAssemblies({
@@ -174,24 +212,66 @@ namespace NugetPackages {
         deploymentOptions: reducedDeploymentOptions,
     });
 
+    const engineCache = packAssemblies({
+        id: `${packageNamePrefix}.Engine.Cache`,
+        assemblies: [
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(net472PackageQualifer).InMemory.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(net472PackageQualifer).Interfaces.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(net472PackageQualifer).BasicFilesystem.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(net472PackageQualifer).BuildCacheAdapter.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(net472PackageQualifer).MemoizationStoreAdapter.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(net472PackageQualifer).VerticalAggregator.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(net472PackageQualifer).ImplementationSupport.dll,
+            importFrom("BuildXL.Utilities").withQualifier(net472PackageQualifer).Storage.dll,
+            
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(netcoreApp31PackageQualifer).InMemory.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(netcoreApp31PackageQualifer).Interfaces.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(netcoreApp31PackageQualifer).BasicFilesystem.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(netcoreApp31PackageQualifer).BuildCacheAdapter.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(netcoreApp31PackageQualifer).MemoizationStoreAdapter.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(netcoreApp31PackageQualifer).VerticalAggregator.dll,
+            importFrom("BuildXL.Cache.VerticalStore").withQualifier(netcoreApp31PackageQualifer).ImplementationSupport.dll,
+            importFrom("BuildXL.Utilities").withQualifier(netcoreApp31PackageQualifer).Storage.dll,
+        ],
+        dependencies: [
+            // The package gen does not automatically handle locally build dependencies since we don't know in which package they go yet
+            // Therefore for now we manually declare these.
+            buildXLUtilitiesIdentity,
+            buildXLCacheHashingIdentity,
+            buildXLCacheInterfacesIdentity,
+            buildXLCacheLibrariesIdentity,
+        ]
+    });
+
     const cacheTools = !canBuildAllPackagesOnThisHost ? undefined : pack({
         id: `${packageNamePrefix}.Cache.Tools`,
         deployment: Cache.NugetPackages.tools,
     });
 
     const cacheLibraries = !canBuildAllPackagesOnThisHost ? undefined : pack({
-        id: `${packageNamePrefix}.Cache.Libraries`,
+        id: buildXLCacheLibrariesIdentity.id,
         deployment: Cache.NugetPackages.libraries,
         dependencies: [
             buildXLCacheInterfacesIdentity,
+            buildXLUtilitiesIdentity,
 
-            importFrom("Microsoft.Tpl.Dataflow").withQualifier(net472PackageQualifer).pkg,
-            importFrom("System.Interactive.Async").withQualifier(net472PackageQualifer).pkg,
+            importFrom("Microsoft.Azure.EventHubs").withQualifier(net472PackageQualifer).pkg,
+            importFrom("Microsoft.Azure.Amqp").withQualifier(net472PackageQualifer).pkg,
+            importFrom("System.Data.SQLite.Core").withQualifier(net472PackageQualifer).pkg,
+            importFrom("System.Threading.Tasks.Dataflow").withQualifier(net472PackageQualifer).pkg,
+            ...BuildXLSdk.withQualifier(net472PackageQualifer).bclAsyncPackages,
             importFrom("Grpc.Core").withQualifier(net472PackageQualifer).pkg,
             importFrom("Google.Protobuf").withQualifier(net472PackageQualifer).pkg,
             ...importFrom("BuildXL.Cache.ContentStore").withQualifier(net472PackageQualifer).redisPackages,
+            ...importFrom("BuildXL.Cache.ContentStore").withQualifier(net472PackageQualifer).getSerializationPackages(false),
             importFrom("Microsoft.VisualStudio.Services.ArtifactServices.Shared").withQualifier(net472PackageQualifer).pkg,
             importFrom("Microsoft.VisualStudio.Services.BlobStore.Client").withQualifier(net472PackageQualifer).pkg,
+            importFrom("RocksDbNative").withQualifier(net472PackageQualifer).pkg,
+            importFrom("RocksDbSharpSigned").withQualifier(net472PackageQualifer).pkg,
+            importFrom("NLog").withQualifier(net472PackageQualifer).pkg,
+
+            // Unmanaged package, manually construct dependency object.
+            { id: "TransientFaultHandling.Core", version: importFrom("TransientFaultHandling.Core").withQualifier(net472PackageQualifer).pkg.version },
         ]
     });
 
@@ -200,15 +280,22 @@ namespace NugetPackages {
         deployment: Cache.NugetPackages.interfaces,
         dependencies: [
             buildXLCacheHashingIdentity,
+            buildXLUtilitiesIdentity,
 
-            importFrom("Microsoft.Tpl.Dataflow").withQualifier(net472PackageQualifer).pkg,
-            importFrom("System.Interactive.Async").withQualifier(net472PackageQualifer).pkg,
+            importFrom("System.Threading.Tasks.Dataflow").withQualifier(net472PackageQualifer).pkg,
+            ...BuildXLSdk.withQualifier(net472PackageQualifer).bclAsyncPackages,
+            importFrom("WindowsAzure.Storage").withQualifier(net472PackageQualifer).pkg,
         ]
     });
 
     const cacheHashing = !canBuildAllPackagesOnThisHost ? undefined : pack({
         id: buildXLCacheHashingIdentity.id,
-        deployment: Cache.NugetPackages.hashing
+        deployment: Cache.NugetPackages.hashing,
+        dependencies: [
+            ...BuildXLSdk.withQualifier(net472PackageQualifer).bclAsyncPackages,
+            importFrom("System.Threading.Tasks.Dataflow").withQualifier(net472PackageQualifer).pkg,
+            importFrom("RuntimeContracts").withQualifier(net472PackageQualifer).pkg,
+        ]
     });
 
 
@@ -291,7 +378,8 @@ namespace NugetPackages {
                 xldblibrary,
                 utilities,
                 pips,
-                processes
+                processes,
+                engineCache
             ]),
             sdks,
             ...addIf(!BuildXLSdk.Flags.genVSSolution, osxX64, linuxX64, toolsOrchestrator),
@@ -315,12 +403,14 @@ namespace NugetPackages {
         assemblies: Managed.Assembly[],
         dependencies?: Nuget.Dependency[],
         deploymentOptions?: Managed.Deployment.FlattenOptions,
+        additionalContent?: Deployment.DeployableItem[],
     }) : File
     {
         let dependencies : Nuget.Dependency[] = args
             .assemblies
+            .filter(asm => asm !== undefined)
             .mapMany(asm => asm
-                .references
+            .references
                 .filter(ref => Managed.isManagedPackage(ref))
                 .map(ref => <Managed.ManagedNugetPackage>ref)
                 .map(ref => { return {id: ref.name, version: ref.version, targetFramework: asm.targetFramework}; })
@@ -339,7 +429,7 @@ namespace NugetPackages {
         // Therefore we will stick to only supporting windows platform and using contentFiles pattern
         let contentFiles : Deployment.DeployableItem[] = args
             .assemblies
-            .filter(asm => asm.runtimeContent !== undefined)
+            .filter(asm => asm !== undefined && asm.runtimeContent !== undefined)
             .map(asm => <Deployment.NestedDefinition>{
                 // Note since all windows tfms have the same content, we are manually
                 // if we ever create differences between tmfs, we will have to change the second 
@@ -360,6 +450,7 @@ namespace NugetPackages {
                 contents: [
                     ...args.assemblies.map(asm => Nuget.createAssemblyLayout(asm)),
                     ...contentFiles,
+                    ...args.additionalContent || [],
                 ]
             },
             deploymentOptions: args.deploymentOptions,

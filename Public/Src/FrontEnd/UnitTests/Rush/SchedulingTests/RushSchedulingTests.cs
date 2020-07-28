@@ -2,12 +2,16 @@
 // Licensed under the MIT License.
 
 using System.Linq;
+using BuildXL.FrontEnd.Rush;
+using BuildXL.FrontEnd.Workspaces.Core;
+using BuildXL.Utilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace Test.BuildXL.FrontEnd.Rush
 {
+    [Trait("Category", "RushSchedulingTests")]
     public sealed class RushSchedulingTests : RushPipSchedulingTestBase
     {
         public RushSchedulingTests(ITestOutputHelper output)
@@ -60,10 +64,9 @@ namespace Test.BuildXL.FrontEnd.Rush
             AssertDependencyAndDependent(projectC, projectA, result);
         }
 
-        [Fact(Skip = "This should eventually hold, but for now we are not declaring an opaque at the root to avoid node_modules scrubbing delays")]
+        [Fact]
         public void OutputDirectoryIsCreatedAtTheProjectRoot()
         {
-            System.Diagnostics.Debugger.Launch();
             var project = CreateRushProject();
 
             var processOutputDirectories = Start()
@@ -77,10 +80,45 @@ namespace Test.BuildXL.FrontEnd.Rush
         }
 
         [Fact]
-        public void AdditionalOutputDirectoriesAreHonored()
+        public void ScriptNameIsSetAsTag()
         {
-            var outOfRootOutput = TestPath.GetParent(PathTable).Combine(PathTable, "additionalDir");
-            var project = CreateRushProject(additionalOutputDirectories: new[] { outOfRootOutput });
+            var project = CreateRushProject(scriptCommandName: "some-script");
+
+            var processTags = Start()
+                .Add(project)
+                .ScheduleAll()
+                .RetrieveSuccessfulProcess(project)
+                .Tags;
+
+            // The script name should be part of the process tags
+            XAssert.Contains(processTags, StringId.Create(StringTable, "some-script"));
+        }
+
+        [Fact]
+        public void LogFilesAreNotADependency()
+        {
+            var project1 = CreateRushProject();
+            var project2 = CreateRushProject(dependencies: new[] { project1 });
+
+            var result = Start()
+                .Add(project1)
+                .Add(project2)
+                .ScheduleAll();
+                
+            var dependencies = result.RetrieveSuccessfulProcess(project2).Dependencies;
+                
+            // None of the dependencies should be under the log directory
+            XAssert.IsTrue(dependencies.All(dep => 
+                !dep.Path.IsWithin(PathTable, RushPipConstructor.LogDirectoryBase(
+                    result.Configuration, 
+                    PathTable, 
+                    KnownResolverKind.RushResolverKind))));
+        }
+
+        [Fact]
+        public void RedirectedUserProfileIsAnOutputDirectory()
+        {
+            var project = CreateRushProject();
 
             var processOutputDirectories = Start()
                 .Add(project)
@@ -88,8 +126,7 @@ namespace Test.BuildXL.FrontEnd.Rush
                 .RetrieveSuccessfulProcess(project)
                 .DirectoryOutputs;
 
-            // There needs to be an opaque covering the additional output dir
-            XAssert.IsTrue(processOutputDirectories.Any(outputDirectory => outOfRootOutput.IsWithin(PathTable, outputDirectory.Path)));
+            XAssert.IsTrue(processOutputDirectories.Any(outputDirectory => RushPipConstructor.UserProfile(project, PathTable) ==  outputDirectory.Path));
         }
     }
 }

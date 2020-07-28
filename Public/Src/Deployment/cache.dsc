@@ -26,7 +26,9 @@ namespace Cache {
             {
                 subfolder: r`Monitor`,
                 contents: [
-                    importFrom("BuildXL.Cache.Monitor").Default.deployment,
+                    ...addIfLazy(BuildXLSdk.isDotNetCoreBuild,
+                        () => [importFrom("BuildXL.Cache.Monitor").Default.deployment]
+                    ),
                 ]
             },
         ],
@@ -36,10 +38,5 @@ namespace Cache {
     export const deployed = BuildXLSdk.DeploymentHelpers.deploy({
         definition: deployment,
         targetLocation: r`${qualifier.configuration}/cache/${qualifier.targetFramework}/${qualifier.targetRuntime}`,
-        deploymentOptions: {
-            excludedDeployableItems: [
-                importFrom("Newtonsoft.Json.v10").pkg,
-            ]
-        }
     });
 }

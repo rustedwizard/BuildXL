@@ -6,7 +6,7 @@ using System.Collections.Generic;
 namespace BuildXL.Utilities.Configuration
 {
     /// <summary>
-    /// White List entry
+    /// Sandbox Configuration
     /// </summary>
     public interface ISandboxConfiguration
     {
@@ -261,5 +261,10 @@ namespace BuildXL.Utilities.Configuration
         /// which means pips and graph will be cached ignoring environment variables specified in this configuration.
         /// </remarks>
         IReadOnlyList<string> GlobalUnsafePassthroughEnvironmentVariables { get; }
+
+        /// <summary>
+        /// Concurrency limit for executing pips inside VM. 
+        /// </summary>
+        int VmConcurrencyLimit { get; }
     }
 }

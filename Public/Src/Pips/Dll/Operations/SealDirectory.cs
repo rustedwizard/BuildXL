@@ -58,6 +58,13 @@ namespace BuildXL.Pips.Operations
         public override PipProvenance Provenance { get; }
 
         /// <summary>
+        /// An optional filter that restricts the content of a dynamic directory.        
+        /// Always null for a regular seal directory, <see cref="CompositeSharedOpaqueSealDirectory"/>
+        /// </summary>
+        [PipCaching(FingerprintingRole = FingerprintingRole.Semantic)]
+        public virtual SealDirectoryContentFilter? ContentFilter => null;
+
+        /// <summary>
         /// A seal directory can be composed of other seal directories. This is not the case for a regular seal directory,
         /// and therefore this collection is always empty. <see cref="CompositeSharedOpaqueSealDirectory"/>
         /// </summary>
@@ -163,7 +170,7 @@ namespace BuildXL.Pips.Operations
         #region Serialization
         internal static SealDirectory InternalDeserialize(PipReader reader)
         {
-            var sealDirectoryType = (SealDirectoryType) reader.ReadByte();
+            var sealDirectoryType = (SealDirectoryType)reader.ReadByte();
 
             switch (sealDirectoryType)
             {

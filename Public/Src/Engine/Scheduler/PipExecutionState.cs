@@ -13,6 +13,7 @@ using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
+using BuildXL.Utilities.Configuration.Mutable;
 using BuildXL.Utilities.Instrumentation.Common;
 
 #pragma warning disable 1591 // disabling warning about missing API documentation; TODO: Remove this line and write documentation!
@@ -36,9 +37,9 @@ namespace BuildXL.Scheduler
         private readonly DirectoryMembershipFingerprinterRuleSet m_directoryMembershipFingerprinterRuleSet;
 
         /// <summary>
-        /// Whitelist for allowed-without-warning-but-unpredicted file operations.
+        /// Allowlist for allowed-without-warning-but-unpredicted file operations.
         /// </summary>
-        private readonly FileAccessWhitelist m_fileAccessWhitelist;
+        private readonly FileAccessAllowlist m_fileAccessAllowlist;
 
         /// <summary>
         /// Used to retrieve semantic path information
@@ -114,10 +115,10 @@ namespace BuildXL.Scheduler
         /// Class constructor
         /// </summary>
         public PipExecutionState(
-            IRootModuleConfiguration rootModuleConfiguration,
+            IConfiguration configuration,
             LoggingContext loggingContext,
             PipTwoPhaseCache cache,
-            FileAccessWhitelist fileAccessWhitelist,
+            FileAccessAllowlist fileAccessAllowlist,
             IDirectoryMembershipFingerprinter directoryMembershipFingerprinter,
             SemanticPathExpander pathExpander,
             IExecutionLogTarget executionLog,
@@ -134,12 +135,12 @@ namespace BuildXL.Scheduler
             Contract.Requires(pathExpander != null);
 
             Cache = cache;
-            m_fileAccessWhitelist = fileAccessWhitelist;
+            m_fileAccessAllowlist = fileAccessAllowlist;
             DirectoryMembershipFingerprinter = directoryMembershipFingerprinter;
-            ResourceManager = new ProcessResourceManager();
+            ResourceManager = new ProcessResourceManager(loggingContext);
             m_pathExpander = new FileContentManagerSemanticPathExpander(fileContentManager, pathExpander);
             ExecutionLog = executionLog;
-            m_rootModuleConfiguration = rootModuleConfiguration;
+            m_rootModuleConfiguration = configuration;
             m_directoryMembershipFingerprinterRuleSet = directoryMembershipFinterprinterRuleSet;
             PathExistenceCache = new ConcurrentBigMap<AbsolutePath, PathExistence>();
             FileContentManager = fileContentManager;

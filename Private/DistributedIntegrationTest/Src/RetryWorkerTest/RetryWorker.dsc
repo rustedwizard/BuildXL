@@ -19,6 +19,7 @@ function main() {
             Cmd.argument(">"),
             Cmd.argument(Artifact.output(outputFile1)),
         ],
+		priority: 99,
         workingDirectory: d`.`
     });
 

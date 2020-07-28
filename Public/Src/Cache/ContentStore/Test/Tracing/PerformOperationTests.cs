@@ -1,14 +1,17 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+﻿// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest;
+using BuildXL.Cache.ContentStore.InterfacesTest.Results;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Utilities.Tasks;
 using ContentStoreTest.Test;
 using FluentAssertions;
 using Xunit;
@@ -21,6 +24,94 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
         public PerformOperationTests(ITestOutputHelper output)
         : base(output)
         {
+        }
+
+        [Fact]
+        public async Task TestPerformOperationAsyncTimeout()
+        {
+            var tracer = new Tracer("MyTracer");
+            var context = new OperationContext(new Context(TestGlobal.Logger));
+
+            var r = await context.PerformOperationAsync(
+                tracer,
+                async () =>
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1));
+                    return BoolResult.Success;
+                },
+                timeout: TimeSpan.FromMilliseconds(100));
+
+            r.ShouldBeError();
+            r.IsCancelled.Should().BeFalse("The operation fails with TimeoutException and is not cancelled");
+        }
+
+        [Fact]
+        public async Task OperationSucceedsWithASmallTimeout()
+        {
+            var tracer = new Tracer("MyTracer");
+            var context = new OperationContext(new Context(TestGlobal.Logger));
+
+            var r = await context.PerformOperationAsync(
+                tracer,
+                async () =>
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(1));
+                    return BoolResult.Success;
+                },
+                timeout: TimeSpan.FromMinutes(10));
+
+            r.ShouldBeSuccess();
+        }
+
+        [Fact]
+        public async Task TestPerformNonResultOperationAsyncTimeout()
+        {
+            var tracer = new Tracer("MyTracer");
+            var context = new OperationContext(new Context(TestGlobal.Logger));
+
+            try
+            {
+                await context.PerformNonResultOperationAsync(
+                    tracer,
+                    async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(1));
+                        return 42;
+                    },
+                    timeout: TimeSpan.FromMilliseconds(100));
+                Assert.False(true, "The operation should fail");
+            }
+            catch (TimeoutException)
+            {}
+        }
+
+        [Fact]
+        public async Task TraceWhenWithTimeoutIsCalled()
+        {
+            var tracer = new Tracer("MyTracer");
+            var context = new OperationContext(new Context(TestGlobal.Logger));
+
+            int shortOperationDurationMs = 10;
+            TimeSpan timeout = TimeSpan.FromMilliseconds(shortOperationDurationMs * 100);
+            var result1 = await context.PerformOperationAsync(
+                    tracer,
+                    () => operation(shortOperationDurationMs).WithTimeoutAsync(timeout));
+            result1.ShouldBeSuccess();
+
+            int longOperationDurationMs = 10_000;
+            timeout = TimeSpan.FromMilliseconds(longOperationDurationMs / 100);
+            var result2 = await context.PerformOperationAsync(
+                tracer,
+                () => operation(longOperationDurationMs).WithTimeoutAsync(timeout));
+            result2.ShouldBeError();
+
+            var fullOutput = GetFullOutput();
+            fullOutput.Should().Contain("TimeoutException");
+            async Task<BoolResult> operation(int duration)
+            {
+                await Task.Delay(duration);
+                return BoolResult.Success;
+            }
         }
 
         [Fact]
@@ -161,6 +252,106 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
             fullOutput.Should().Contain("failure2");
             fullOutput.Should().Contain(error);
         }
+
+        [Fact]
+        public void TraceOperationStartedEmitsComponentAndOperation()
+        {
+            var tracer = new Tracer("MyTracer");
+            var mock = new StructuredLoggerMock();
+            var context = new OperationContext(new Context(mock));
+
+            // Running a successful operation first
+            var result = context.CreateOperation(
+                    tracer,
+                    () => new CustomResult())
+                .Run(caller: "success");
+
+            mock.LogOperationStartedArgument.OperationName.Should().Be("success");
+            mock.LogOperationStartedArgument.TracerName.Should().Be("MyTracer");
+        }
+
+        private class StructuredLoggerMock : IStructuredLogger
+        {
+            public void Dispose()
+            {
+            }
+
+            public Severity CurrentSeverity { get; }
+
+            public int ErrorCount { get; }
+
+            public void Flush()
+            {
+            }
+
+            public void Always(string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Fatal(string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Error(string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Error(Exception exception, string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void ErrorThrow(Exception exception, string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Warning(string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Info(string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Debug(string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Debug(Exception exception)
+            {
+            }
+
+            public void Diagnostic(string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Log(Severity severity, string message)
+            {
+            }
+
+            public void LogFormat(Severity severity, string messageFormat, params object[] messageArgs)
+            {
+            }
+
+            public void Log(Severity severity, string correlationId, string message)
+            {
+            }
+
+            public void Log(in LogMessage logMessage)
+            {
+            }
+
+            public OperationStarted LogOperationStartedArgument;
+
+            public void LogOperationStarted(in OperationStarted operation)
+            {
+                LogOperationStartedArgument = operation;
+            }
+
+            public void LogOperationFinished(in OperationResult result)
+            {
+            }
+        }
+
 
         private class CustomResult : BoolResult
         {

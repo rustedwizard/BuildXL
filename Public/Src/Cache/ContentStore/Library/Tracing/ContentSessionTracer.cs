@@ -45,8 +45,8 @@ namespace BuildXL.Cache.ContentStore.Tracing
         protected readonly Collection<Counter> Counters = new Collection<Counter>();
         private readonly Counter _pinBulkFileCountCounter;
 
-        public ContentSessionTracer(string name)
-            : base(name)
+        public ContentSessionTracer(string name, bool useTracerName = false)
+            : base(name, useTracerName)
         {
             CallCounters.Add(_getStatsCallCounter = new CallCounter(GetStatsCallName));
             CallCounters.Add(_pinCallCounter = new CallCounter(PinCallName));
@@ -133,7 +133,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
             TimeSpan duration,
             IReadOnlyList<ContentHash> contentHashes,
             IEnumerable<Indexed<PinResult>> results,
-            Exception error,
+            Exception? error,
             PinBulkOptions pinBulkOptions)
         {
             if (context.IsEnabled)

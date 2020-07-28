@@ -1,4 +1,4 @@
-﻿// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
 using System;
@@ -6,9 +6,8 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Runtime.Serialization;
-using System.Text.RegularExpressions;
 using BuildXL.Cache.ContentStore.Interfaces.Distributed;
-using Newtonsoft.Json;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 
 namespace BuildXL.Cache.Host.Configuration
 {
@@ -38,43 +37,20 @@ namespace BuildXL.Cache.Host.Configuration
                 120000,
             };
 
-        [JsonConstructor]
-        public DistributedContentSettings()
-        {
-        }
-
         public static DistributedContentSettings CreateDisabled()
         {
             return new DistributedContentSettings
             {
                 IsDistributedContentEnabled = false,
-                ConnectionSecretNameMap = new Dictionary<string, string>()
             };
         }
 
-        public static DistributedContentSettings CreateEnabled(IDictionary<string, string> connectionSecretNameMap, bool isGrpcCopierEnabled = false)
+        public static DistributedContentSettings CreateEnabled()
         {
-            return new DistributedContentSettings(connectionSecretNameMap)
+            return new DistributedContentSettings()
             {
                 IsDistributedContentEnabled = true,
-                IsGrpcCopierEnabled = isGrpcCopierEnabled
             };
-        }
-
-        public static DistributedContentSettings CreateForCloudBuildCacheCacheFactory(DistributedContentSettings distributedSettings)
-        {
-            return new DistributedContentSettings
-            {
-                IsBandwidthCheckEnabled = distributedSettings.IsBandwidthCheckEnabled,
-                IsDistributedEvictionEnabled = distributedSettings.IsDistributedEvictionEnabled,
-                AlternateDriveMap =
-                    distributedSettings.GetAutopilotAlternateDriveMap().ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
-            };
-        }
-
-        private DistributedContentSettings(IDictionary<string, string> connectionSecretNameMap)
-        {
-            ConnectionSecretNameMap = connectionSecretNameMap;
         }
 
         /// <summary>
@@ -84,10 +60,40 @@ namespace BuildXL.Cache.Host.Configuration
         public bool IsDistributedContentEnabled { get; set; }
 
         /// <summary>
+        /// The amount of time for nagling GetBulk (locations) for proactive copy operations
+        /// </summary>
+        [DataMember]
+        [Validation.Range(0, double.MaxValue)]
+        public double ProactiveCopyGetBulkIntervalSeconds { get; set; } = 10;
+
+        /// <summary>
+        /// The size of nagle batch for proactive copy get bulk
+        /// </summary>
+        [DataMember]
+        [Validation.Range(1, int.MaxValue)]
+        public int ProactiveCopyGetBulkBatchSize { get; set; } = 20;
+
+        [DataMember]
+        [Validation.Range(0, int.MaxValue)]
+        public int ProactiveCopyMaxRetries { get; set; } = 0;
+
+        /// <summary>
         /// Configurable Keyspace Prefixes
         /// </summary>
         [DataMember]
         public string KeySpacePrefix { get; set; } = "CBPrefix";
+
+        /// <summary>
+        /// Name of the EventHub instance to connect to.
+        /// </summary>
+        [DataMember]
+        public string EventHubName { get; set; } = "eventhub";
+
+        /// <summary>
+        /// Name of the EventHub instance's consumer group name.
+        /// </summary>
+        [DataMember]
+        public string EventHubConsumerGroupName { get; set; } = "$Default";
 
         /// <summary>
         /// Adds suffix to resource names to allow instances in different ring to
@@ -99,41 +105,11 @@ namespace BuildXL.Cache.Host.Configuration
         public bool UseRingIsolation { get; set; } = false;
 
         /// <summary>
-        /// Bump content expiry times when adding replicas
-        /// </summary>
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int ContentHashBumpTimeMinutes { get; set; } = 2880;
-
-        private int _redisMemoizationExpiryTimeMinutes;
-
-        /// <summary>
         /// TTL to be set in Redis for memoization entries.
         /// </summary>
         [DataMember]
-        public int RedisMemoizationExpiryTimeMinutes {
-            get => _redisMemoizationExpiryTimeMinutes == 0 ? ContentHashBumpTimeMinutes : _redisMemoizationExpiryTimeMinutes;
-            set => _redisMemoizationExpiryTimeMinutes = value;
-        }
-
-        /// <summary>
-        /// The map of environment to connection secrets
-        /// </summary>
-        [DataMember]
-        private IDictionary<string, string> ConnectionSecretNameMap { get; set; }
-
-        /// <summary>
-        /// The map of environment to connection secret pairs (one for content locations and one for machine ids)
-        /// </summary>
-        /// <remarks>Internal for access by config validation rules</remarks>
-        [DataMember]
-        public IDictionary<string, RedisContentSecretNames> ConnectionSecretNamesMap { get; set; }
-
-        /// <summary>
-        /// The map of drive paths to alternate paths to access them
-        /// </summary>
-        [DataMember]
-        private IDictionary<string, string> AlternateDriveMap { get; set; }
+        [Validation.Range(1, int.MaxValue)]
+        public int RedisMemoizationExpiryTimeMinutes { get; set; } = 1500;
 
         [DataMember]
         public string ContentAvailabilityGuarantee { get; set; }
@@ -147,14 +123,25 @@ namespace BuildXL.Cache.Host.Configuration
         public int? RedisConnectionErrorLimit { get; set; }
 
         [DataMember]
+        [Validation.Range(1, int.MaxValue)]
+        public int? RedisReconnectionLimitBeforeServiceRestart { get; set; }
+
+        [DataMember]
         public bool? TraceRedisFailures { get; set; }
 
         [DataMember]
         public bool? TraceRedisTransientFailures { get; set; }
 
         [DataMember]
+        public TimeSpan? MinRedisReconnectInterval { get; set; }
+
+        [DataMember]
         [Validation.Range(-1, int.MaxValue)]
         public int? RedisGetBlobTimeoutMilliseconds { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, int.MaxValue)]
+        public int? RedisGetCheckpointStateTimeoutInSeconds { get; set; }
 
         // TODO: file a work item to remove the flag!
         [DataMember]
@@ -212,6 +199,9 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         public bool UseContextualEntryDatabaseOperationLogging { get; set; } = false;
+
+        [DataMember]
+        public bool TraceTouches { get; set; } = true;
 
         [DataMember]
         public bool LogReconciliationHashes { get; set; } = false;
@@ -284,6 +274,10 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public bool UseFullEvictionSort { get; set; } = false;
 
+        [DataMember]
+        [Validation.Range(0, double.MaxValue)]
+        public double? ThrottledEvictionIntervalMinutes { get; set; }
+
         /// <summary>
         /// Configures whether ages of content are updated when sorting during eviction
         /// </summary>
@@ -298,6 +292,9 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         public bool PrioritizeDesignatedLocationsOnCopies { get; set; } = false;
+
+        [DataMember]
+        public bool DeprioritizeMasterOnCopies { get; set; } = false;
 
         [DataMember]
         [Validation.Range(0, int.MaxValue)]
@@ -362,12 +359,6 @@ namespace BuildXL.Cache.Host.Configuration
 
         #region Grpc Copier
         /// <summary>
-        /// Use GRPC for file copies between CASaaS.
-        /// </summary>
-        [DataMember]
-        public bool IsGrpcCopierEnabled { get; set; } = false;
-
-        /// <summary>
         /// Whether or not GZip is enabled for GRPC copies.
         /// </summary>
         [DataMember]
@@ -379,6 +370,15 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int MaxGrpcClientCount { get; set; } = DefaultMaxConcurrentCopyOperations;
+
+        [DataMember]
+        public bool UseUnsafeByteStringConstruction { get; set; } = false;
+
+        /// <summary>
+        /// When set to true, we will shut down the quota keeper before hibernating sessions to prevent a race condition of evicting pinned content
+        /// </summary>
+        [DataMember]
+        public bool ShutdownEvictionBeforeHibernation { get; set; } = false;
 
         /// <summary>
         /// Maximum cached age for GRPC clients.
@@ -439,6 +439,9 @@ namespace BuildXL.Cache.Host.Configuration
         public int? PinMinUnverifiedCount { get; set; }
 
         [DataMember]
+        public int? StartCopyWhenPinMinUnverifiedCountThreshold { get; set; }
+
+        [DataMember]
         [Validation.Range(0, 1, minInclusive: false, maxInclusive: false)]
         public double? MachineRisk { get; set; }
 
@@ -453,6 +456,9 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         public bool UseDistributedCentralStorage { get; set; } = false;
+
+        [DataMember]
+        public bool UseSelfCheckSettingsForDistributedCentralStorage { get; set; } = false;
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
@@ -474,13 +480,13 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? DistributedCentralStoragePeerToPeerCopyTimeoutSeconds { get; set; } = null;
 
+        [DataMember]
+        public bool? DistributedCentralStorageImmutabilityOptimizations { get; set; }
+
         #endregion
 
         [DataMember]
         public bool IsMasterEligible { get; set; } = false;
-
-        [DataMember]
-        public bool IsRedisGarbageCollectionEnabled { get; set; } = false;
 
         /// <summary>
         /// Disabling reconciliation is an unsafe option that can cause builds to fail because the machine's state can be off compared to the LLS's state.
@@ -501,10 +507,11 @@ namespace BuildXL.Cache.Host.Configuration
         public int? ReconciliationMaxRemoveHashesCycleSize { get; set; } = null;
 
         [DataMember]
-        public bool IsContentLocationDatabaseEnabled { get; set; } = false;
+        [Validation.Range(0, 1)]
+        public double? ReconciliationMaxRemoveHashesAddPercentage { get; set; } = null;
 
         [DataMember]
-        public bool StoreClusterStateInDatabase { get; set; } = true;
+        public bool IsContentLocationDatabaseEnabled { get; set; } = false;
 
         [DataMember]
         public bool IsMachineReputationEnabled { get; set; } = true;
@@ -521,11 +528,10 @@ namespace BuildXL.Cache.Host.Configuration
         public int? ContentLocationDatabaseGcIntervalMinutes { get; set; }
 
         [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int? ContentLocationDatabaseEntryTimeToLiveMinutes { get; set; }
+        public bool ContentLocationDatabaseLogsBackupEnabled { get; set; }
 
         [DataMember]
-        public bool ContentLocationDatabaseLogsBackupEnabled { get; set; }
+        public bool? ContentLocationDatabaseOpenReadOnly { get; set; }
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
@@ -533,7 +539,7 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
-        public int? FullRangeCompactionIntervalMinutes { get; set; }
+        public double? FullRangeCompactionIntervalMinutes { get; set; }
 
         [DataMember]
         public string FullRangeCompactionVariant { get; set; }
@@ -604,6 +610,10 @@ namespace BuildXL.Cache.Host.Configuration
         public string SecondaryGlobalRedisSecretName { get; set; }
 
         [DataMember]
+        [Validation.Enum(typeof(Severity), allowNull: true)]
+        public string RedisInternalLogSeverity { get; set; }
+
+        [DataMember]
         public bool? MirrorClusterState { get; set; }
 
         [DataMember]
@@ -619,26 +629,16 @@ namespace BuildXL.Cache.Host.Configuration
         public double? RestoreCheckpointIntervalMinutes { get; set; }
 
         [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? UpdateClusterStateIntervalSeconds { get; set; }
+
+        [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? SafeToLazilyUpdateMachineCountThreshold { get; set; }
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? CentralStorageOperationTimeoutInMinutes { get; set; }
-
-        /// <summary>
-        /// Valid values: LocalLocationStore, Redis, Both (see ContentStore.Distributed.ContentLocationMode)
-        /// </summary>
-        [DataMember]
-        [Validation.Enum(typeof(ContentLocationMode))]
-        public string ContentLocationReadMode { get; set; } = nameof(ContentLocationMode.Redis);
-
-        /// <summary>
-        /// Valid values: LocalLocationStore, Redis, Both (see ContentStore.Distributed.ContentLocationMode)
-        /// </summary>
-        [DataMember]
-        [Validation.Enum(typeof(ContentLocationMode))]
-        public string ContentLocationWriteMode { get; set; } = nameof(ContentLocationMode.Redis);
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
@@ -649,12 +649,29 @@ namespace BuildXL.Cache.Host.Configuration
         public int? RestoreCheckpointAgeThresholdMinutes { get; set; }
 
         [DataMember]
+        public bool? PacemakerEnabled { get; set; }
+
+        [DataMember]
+        public uint? PacemakerNumberOfBuckets { get; set; }
+
+        [DataMember]
+        public bool? PacemakerUseRandomIdentifier { get; set; }
+
+        [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? TouchFrequencyMinutes { get; set; }
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
-        public int? MachineExpiryMinutes { get; set; }
+        public int? MachineStateRecomputeIntervalMinutes { get; set; }
+
+        [DataMember]
+        [Validation.Range(1, int.MaxValue)]
+        public int? MachineActiveToClosedIntervalMinutes { get; set; }
+
+        [DataMember]
+        [Validation.Range(1, int.MaxValue)]
+        public int? MachineActiveToExpiredIntervalMinutes { get; set; }
 
         // Files smaller than this will use the untrusted hash
         [DataMember]
@@ -701,7 +718,7 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
-        public int? MaximumConcurrentPutAndPlaceFileOperations { get; set; } 
+        public int? MaximumConcurrentPutAndPlaceFileOperations { get; set; }
 
         [DataMember]
         public bool EnableMetadataStore { get; set; } = false;
@@ -784,29 +801,15 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(1, int.MaxValue)]
         public double TimeoutForProactiveCopiesMinutes { get; set; } = 15;
 
-        #endregion
-
+        #endregion        
         /// <summary>
-        /// Gets the secret name to connect to Redis for a particular CloudBuild stamp.
+        /// The map of drive paths to alternate paths to access them
         /// </summary>
-        /// <param name="stampId">The ID of the stamp.</param>
-        /// <returns>The secret name in the AP secret store.</returns>
-        public RedisContentSecretNames GetRedisConnectionSecretNames(string stampId)
-        {
-            if (!IsDistributedContentEnabled)
-            {
-                return null;
-            }
+        [DataMember]
+        private IDictionary<string, string> AlternateDriveMap { get; set; }
 
-            if (ConnectionSecretNamesMap != null)
-            {
-                return ConnectionSecretNamesMap.Single(kvp => Regex.IsMatch(stampId, kvp.Key, RegexOptions.IgnoreCase))
-                    .Value;
-            }
-
-            return new RedisContentSecretNames(
-                ConnectionSecretNameMap.Single(kvp => Regex.IsMatch(stampId, kvp.Key, RegexOptions.IgnoreCase)).Value);
-        }
+        [DataMember]
+        public bool TouchContentHashLists { get; set; }
 
         public IReadOnlyDictionary<string, string> GetAutopilotAlternateDriveMap()
         {

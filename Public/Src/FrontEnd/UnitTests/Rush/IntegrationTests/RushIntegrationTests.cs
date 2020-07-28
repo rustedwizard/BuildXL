@@ -3,19 +3,23 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using BuildXL.Engine.Tracing;
+using BuildXL.Native.IO;
 using BuildXL.Pips.Graph;
 using BuildXL.Pips.Operations;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Configuration.Mutable;
 using Test.BuildXL.EngineTestUtilities;
+using Test.BuildXL.FrontEnd.Core;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace Test.BuildXL.FrontEnd.Rush
 {
+    [Trait("Category", "RushIntegrationTests")]
     public class RushIntegrationTests : RushIntegrationTestBase
     {
         public RushIntegrationTests(ITestOutputHelper output)
@@ -27,23 +31,10 @@ namespace Test.BuildXL.FrontEnd.Rush
         public void EndToEndPipExecutionWithDependencies()
         {
             // Create two projects A and B such that A -> B.
-
-            const string ProjectA = "a.js";
-            var projectAPath = R("src", "A", ProjectA);
-            const string PackageJSonA = "package.json";
-            var pathToPackageJSonA = R("src", "A", PackageJSonA);
-
-            const string ProjectB = "b.js";
-            var projectBPath = R("src", "B", ProjectB);
-            const string PackageJSonB = "package.json";
-            var pathToPackageJSonB = R("src", "B", PackageJSonB);
-
-            var config = Build(new Dictionary<string, string> { ["PATH"] = PathToNodeFolder})
-                    .AddSpec(projectAPath, "module.exports = function A(){}")
-                    .AddSpec(pathToPackageJSonA, CreatePackageJson("@ms/project-A", "a.js", new string[] { }))
-                    .AddSpec(projectBPath, "const A = require('@ms/project-A'); return A();")
-                    .AddSpec(pathToPackageJSonB, CreatePackageJson("@ms/project-B", "b.js", new string[] { "@ms/project-A" }))
-                    .PersistSpecsAndGetConfiguration();
+            var config = Build()
+                .AddJavaScriptProject("@ms/project-A", "src/A", "module.exports = function A(){}")
+                .AddJavaScriptProject("@ms/project-B", "src/B", "const A = require('@ms/project-A'); return A();", new string[] { "@ms/project-A"})
+                .PersistSpecsAndGetConfiguration();
 
             var engineResult = RunRushProjects(config, new[] {
                 ("src/A", "@ms/project-A"),
@@ -68,14 +59,8 @@ namespace Test.BuildXL.FrontEnd.Rush
         {
             var testCache = new TestCache();
 
-            const string ProjectA = "a.js";
-            var projectAPath = R("src", "A", ProjectA);
-            const string PackageJSonA = "package.json";
-            var pathToPackageJSonA = R("src", "A", PackageJSonA);
-
-            var config = (CommandLineConfiguration)Build(new Dictionary<string, string> { ["PATH"] = PathToNodeFolder })
-                    .AddSpec(projectAPath, "module.exports = function A(){}")
-                    .AddSpec(pathToPackageJSonA, CreatePackageJson("@ms/project-A", "a.js", new string[] { }))
+            var config = (CommandLineConfiguration)Build()
+                    .AddJavaScriptProject("@ms/project-A", "src/A")
                     .PersistSpecsAndGetConfiguration();
 
             config.Cache.CacheGraph = true;
@@ -111,18 +96,18 @@ namespace Test.BuildXL.FrontEnd.Rush
         {
             var testCache = new TestCache();
 
-            const string ProjectA = "a.js";
-            var projectAPath = R("src", "A", ProjectA);
-            const string PackageJSonA = "package.json";
-            var pathToPackageJSonA = R("src", "A", PackageJSonA);
-
             // Set env var 'Test' to an arbitrary value, but override that value in the main config, so
             // we actually don't depend on it
             Environment.SetEnvironmentVariable("Test", "2");
 
-            var config = (CommandLineConfiguration)Build(new Dictionary<string, string> { ["PATH"] = PathToNodeFolder, ["Test"] = "3" })
-                    .AddSpec(projectAPath, "module.exports = function A(){}")
-                    .AddSpec(pathToPackageJSonA, CreatePackageJson("@ms/project-A", "a.js", new string[] { }))
+            var environment = new Dictionary<string, string>
+            {
+                ["PATH"] = PathToNodeFolder,
+                ["Test"] = "3"
+            };
+
+            var config = (CommandLineConfiguration)Build(environment)
+                    .AddJavaScriptProject("@ms/project-A", "src/A")
                     .PersistSpecsAndGetConfiguration();
 
             config.Cache.CacheGraph = true;
@@ -158,11 +143,6 @@ namespace Test.BuildXL.FrontEnd.Rush
         {
             var testCache = new TestCache();
 
-            const string ProjectA = "a.js";
-            var projectAPath = R("src", "A", ProjectA);
-            const string PackageJSonA = "package.json";
-            var pathToPackageJSonA = R("src", "A", PackageJSonA);
-
             Environment.SetEnvironmentVariable("Test", "originalValue");
 
             var environment = new Dictionary<string, DiscriminatingUnion<string, UnitValue>> { 
@@ -170,8 +150,7 @@ namespace Test.BuildXL.FrontEnd.Rush
                 ["Test"] = new DiscriminatingUnion<string, UnitValue>(UnitValue.Unit) };
 
             var config = (CommandLineConfiguration)Build(environment)
-                .AddSpec(projectAPath, "module.exports = function A(){}")
-                .AddSpec(pathToPackageJSonA, CreatePackageJson("@ms/project-A", "a.js", new string[] { }))
+                .AddJavaScriptProject("@ms/project-A", "src/A")
                 .PersistSpecsAndGetConfiguration();
 
             config.Cache.CacheGraph = true;
@@ -201,6 +180,70 @@ namespace Test.BuildXL.FrontEnd.Rush
 
             AssertInformationalEventLogged(global::BuildXL.FrontEnd.Core.Tracing.LogEventId.FrontEndStartEvaluateValues, count: 0);
             AssertInformationalEventLogged(LogEventId.EndDeserializingEngineState);
+        }
+
+        [Fact]
+        public void DuplicateProjectNamesAreBlocked()
+        {
+            // Create two projects with the same package name
+            var config = Build()
+                    .AddJavaScriptProject("@ms/project-A", "src/A")
+                    .AddJavaScriptProject("@ms/project-A", "src/B")
+                    .PersistSpecsAndGetConfiguration();
+
+            var engineResult = RunRushProjects(config, new[] {
+                ("src/A", "@ms/project-A"),
+                ("src/B", "@ms/project-A"),
+            });
+
+            Assert.False(engineResult.IsSuccess);
+
+            AssertErrorEventLogged(global::BuildXL.FrontEnd.JavaScript.Tracing.LogEventId.ProjectGraphConstructionError);
+            AssertErrorEventLogged(global::BuildXL.FrontEnd.Core.Tracing.LogEventId.CannotBuildWorkspace);
+        }
+
+        [Fact]
+        public void IntermediateDirectoryCasingIsPreserved()
+        {
+            var testCache = new TestCache();
+
+            // Run a project that writes a file under a nested directory
+            var config = (CommandLineConfiguration)Build()
+                    .AddJavaScriptProjectWithExplicitVersions(
+                        "@ms/project-A", 
+                        "src/A", 
+                        "var fs = require('fs'); fs.mkdirSync('CamelCasedLib'); fs.writeFileSync('CamelCasedLib/out.txt', 'hello');",
+                        new[] { ("path", "0.12.7") })
+                    .PersistSpecsAndGetConfiguration();
+
+            config.Cache.CacheGraph = true;
+            config.Cache.AllowFetchingCachedGraphFromContentCache = true;
+            config.Cache.Incremental = true;
+
+            var engineResult = RunRushProjects(
+                config,
+                new[] { ("src/A", "@ms/project-A") },
+                testCache);
+
+            // Make sure the directory was written with the expected case (via a case sensitive comparison)
+            Assert.True(engineResult.IsSuccess);
+            string intermediateDir = Directory.EnumerateDirectories(Path.Combine(SourceRoot, "src", "A"))
+                .First(dir => dir.EndsWith("CamelCasedLib", StringComparison.Ordinal));
+            Assert.NotNull(intermediateDir);
+
+            // Delete the created directory and run from cache
+            FileUtilities.DeleteDirectoryContents(intermediateDir, deleteRootDirectory: true);
+
+            engineResult = RunRushProjects(
+                config,
+                new[] { ("src/A", "@ms/project-A") },
+                testCache);
+
+            // The result should have preserved casing
+            Assert.True(engineResult.IsSuccess);
+            intermediateDir = Directory.EnumerateDirectories(Path.Combine(SourceRoot, "src", "A"))
+                .First(dir => dir.EndsWith("CamelCasedLib", StringComparison.Ordinal));
+            Assert.NotNull(intermediateDir);
         }
     }
 }

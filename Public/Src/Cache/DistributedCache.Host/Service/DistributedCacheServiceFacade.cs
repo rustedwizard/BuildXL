@@ -12,10 +12,11 @@ using BuildXL.Cache.ContentStore.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
-using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Cache.Host.Configuration;
 using BuildXL.Cache.Host.Service.Internal;
 using BuildXL.Cache.Logging;
@@ -38,7 +39,9 @@ namespace BuildXL.Cache.Host.Service
             await Task.Yield();
 
             var host = arguments.Host;
-            var startUpTime = Stopwatch.StartNew();
+            var timer = Stopwatch.StartNew();
+
+            InitializeGlobalLifetimeManager(host);
 
             // NOTE(jubayard): this is the entry point for running CASaaS. At this point, the Logger inside the
             // arguments holds the client's implementation of our logging interface ILogger. Here, we may override the
@@ -49,27 +52,22 @@ namespace BuildXL.Cache.Host.Service
             arguments.Logger = loggerReplacement.Logger;
             using var disposableToken = loggerReplacement.DisposableToken;
 
-            if (arguments.BuildCopyInfrastructure != null)
-            {
-                var (copier, pathTransformer, copyRequester) = arguments.BuildCopyInfrastructure(arguments.Logger);
-                arguments.Copier = copier;
-                arguments.PathTransformer = pathTransformer;
-                arguments.CopyRequester = copyRequester;
-            }
+            AdjustCopyInfrastructure(arguments);
 
-            var logger = arguments.Logger;
+            var context = new Context(arguments.Logger);
+
+            await ReportStartingServiceAsync(context, host);
+
             var factory = new CacheServerFactory(arguments);
 
-            await host.OnStartingServiceAsync();
+            var operationContext = new OperationContext(context);
+            ServiceOfflineDurationTracker serviceRunningTracker = null;
 
             // Technically, this method doesn't own the file copier, but no one actually owns it.
             // So to clean up the resources (and print some stats) we dispose it here.
             using (arguments.Copier as IDisposable)
             using (var server = factory.Create())
             {
-                var context = new Context(logger);
-                var ctx = new OperationContext(context);
-
                 try
                 {
                     var startupResult = await server.StartupAsync(context);
@@ -78,43 +76,82 @@ namespace BuildXL.Cache.Host.Service
                         throw new CacheException(startupResult.ToString());
                     }
 
-                    host.OnStartedService();
-
-                    using var serviceRunningTracker = DistributedCacheServiceRunningTracker.Create(
-                        ctx,
+                    var serviceRunningTrackerResult = ServiceOfflineDurationTracker.Create(
+                        operationContext,
                         SystemClock.Instance,
                         new PassThroughFileSystem(),
-                        arguments.Configuration,
-                        startUpTime.Elapsed).GetValueOrDefault();
+                        arguments.Configuration);
 
+                    ReportServiceStarted(operationContext, host, serviceRunningTrackerResult, timer.Elapsed);
+
+                    serviceRunningTracker = serviceRunningTrackerResult.GetValueOrDefault();
                     await arguments.Cancellation.WaitForCancellationAsync();
-
-                    context.Always("Exit event set");
+                    ReportShuttingDownService(context);
+                }
+                catch (Exception e)
+                {
+                    ReportServiceStartupFailed(context, e, timer.Elapsed);
+                    throw;
                 }
                 finally
                 {
-                    var timeoutInMinutes = arguments?.Configuration?.DistributedContentSettings?.MaxShutdownDurationInMinutes ?? 30;
-                    BoolResult result = await ShutdownWithTimeoutAsync(context, server, TimeSpan.FromMinutes(timeoutInMinutes));
-                    if (!result)
-                    {
-                        context.Warning($"Failed to shutdown local content server: {result}");
-                    }
+                    // Writing the current time before shutting the service down.
+                    serviceRunningTracker?.LogCurrentTimeStampToFile(operationContext);
 
-                    host.OnTeardownCompleted();
+                    timer.Reset();
+                    var timeoutInMinutes = arguments.Configuration?.DistributedContentSettings?.MaxShutdownDurationInMinutes ?? 30;
+                    var result = await server
+                        .ShutdownAsync(context)
+                        .WithTimeoutAsync("Server shutdown", TimeSpan.FromMinutes(timeoutInMinutes));
+
+                    serviceRunningTracker?.Dispose();
+                    ReportServiceStopped(context, host, result, timer.Elapsed);
                 }
             }
         }
 
-        private static async Task<BoolResult> ShutdownWithTimeoutAsync(Context context, IStartupShutdownSlim server, TimeSpan timeout)
+        private static void AdjustCopyInfrastructure(DistributedCacheServiceArguments arguments)
         {
-            var shutdownTask = server.ShutdownAsync(context);
-            if (await Task.WhenAny(shutdownTask, Task.Delay(timeout)) != shutdownTask)
+            if (arguments.BuildCopyInfrastructure != null)
             {
-                return new BoolResult($"Server shutdown didn't finished after '{timeout}'.");
+                var (copier, pathTransformer, copyRequester) = arguments.BuildCopyInfrastructure(arguments.Logger);
+                arguments.Copier = copier;
+                arguments.PathTransformer = pathTransformer;
+                arguments.CopyRequester = copyRequester;
             }
+        }
 
-            // shutdownTask is done already. Just getting the result out of it.
-            return await shutdownTask;
+        private static void ReportServiceStartupFailed(Context context, Exception exception, TimeSpan startupDuration)
+        {
+            LifetimeTrackerTracer.ServiceStartupFailed(context, exception, startupDuration);
+        }
+
+        private static Task ReportStartingServiceAsync(Context context, IDistributedCacheServiceHost host)
+        {
+            LifetimeTrackerTracer.StartingService(context);
+            return host.OnStartingServiceAsync();
+        }
+
+        private static void ReportServiceStarted(
+            OperationContext context,
+            IDistributedCacheServiceHost host,
+            Result<ServiceOfflineDurationTracker> trackerResult,
+            TimeSpan startupDuration)
+        {
+            var shutdownTimeUtc = trackerResult.Then(v => v.GetShutdownTime(context, logTimeStampToFile: true));
+            LifetimeTrackerTracer.ServiceStarted(context, startupDuration, shutdownTimeUtc);
+            host.OnStartedService();
+        }
+
+        private static void ReportShuttingDownService(Context context)
+        {
+            LifetimeTrackerTracer.ShuttingDownService(context);
+        }
+
+        private static void ReportServiceStopped(Context context, IDistributedCacheServiceHost host, BoolResult result, TimeSpan shutdownDuration)
+        {
+            LifetimeTrackerTracer.ServiceStopped(context, result, shutdownDuration);
+            host.OnTeardownCompleted();
         }
 
         /// <summary>
@@ -232,26 +269,10 @@ namespace BuildXL.Cache.Host.Service
             // will likely be shared across all stamps, so there's no "stamp-specific" configuration in there. That
             // means all stamp-level configuration must be done through the JSON.
 
-            AzureBlobStorageCredentials credentials = null;
-
-            if (configuration.UseSasTokens)
-            {
-                var secrets = await arguments.Host.RetrieveSecretsAsync(new List<RetrieveSecretsRequest>()
-                {
-                    new RetrieveSecretsRequest(configuration.SecretName, SecretKind.SasToken)
-                }, token: operationContext.Token);
-
-                credentials = new AzureBlobStorageCredentials((UpdatingSasToken)secrets[configuration.SecretName]);
-            }
-            else
-            {
-                var secrets = await arguments.Host.RetrieveSecretsAsync(new List<RetrieveSecretsRequest>()
-                {
-                    new RetrieveSecretsRequest(configuration.SecretName, SecretKind.PlainText)
-                }, token: operationContext.Token);
-
-                credentials = new AzureBlobStorageCredentials((PlainTextSecret)secrets[configuration.SecretName]);
-            }
+            AzureBlobStorageCredentials credentials = await arguments.Host.GetBlobCredentialsAsync(
+                configuration.SecretName, 
+                configuration.UseSasTokens, 
+                operationContext.Token);
 
             var azureBlobStorageLogConfiguration = ToInternalConfiguration(configuration);
 
@@ -261,7 +282,8 @@ namespace BuildXL.Cache.Host.Service
                 clock: SystemClock.Instance,
                 fileSystem: new PassThroughFileSystem(),
                 telemetryFieldsProvider: arguments.TelemetryFieldsProvider,
-                credentials: credentials);
+                credentials: credentials,
+                additionalBlobMetadata: null);
 
             await azureBlobStorageLog.StartupAsync().ThrowIfFailure();
 
@@ -306,6 +328,20 @@ namespace BuildXL.Cache.Host.Service
             }
 
             return result;
+        }
+
+        private static void InitializeGlobalLifetimeManager(IDistributedCacheServiceHost host)
+        {
+            LifetimeManager.SetLifetimeManager(new DistributedCacheServiceHostBasedLifetimeManager(host));
+        }
+
+        private class DistributedCacheServiceHostBasedLifetimeManager : ILifetimeManager
+        {
+            private readonly IDistributedCacheServiceHost _host;
+
+            public DistributedCacheServiceHostBasedLifetimeManager(IDistributedCacheServiceHost host) => _host = host;
+
+            public void RequestTeardown(string reason) => _host.RequestTeardown(reason);
         }
     }
 }

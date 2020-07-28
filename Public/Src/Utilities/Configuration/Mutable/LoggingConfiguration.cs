@@ -41,15 +41,14 @@ namespace BuildXL.Utilities.Configuration.Mutable
             FancyConsole = true;
             FancyConsoleMaxStatusPips = 5;
             LogStatus = true;
+            LogTracer = true;
             FailPipOnFileAccessError = true;
             UseCustomPipDescriptionOnConsole = true;
             CacheMissAnalysisOption = CacheMissAnalysisOption.Disabled();
             CacheMissDiffFormat = CacheMissDiffFormat.CustomJsonDiff;
-            
-            // Temporarily disable it by default due to crash.
-            // TODO: Enable it by default once crash is fixed.
-            CacheMissBatch = false;
-            
+            AriaIndividualMessageSizeLimitBytes = (int)(0.8 * 1024 * 1024); // 0.8Mb out of Aria's current 1Mb max limit
+            MaxNumPipTelemetryBatches = 1;
+            CacheMissBatch = true;
             RedirectedLogsDirectory = AbsolutePath.Invalid;
         }
 
@@ -69,6 +68,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             LogExecution = template.LogExecution;
             ExecutionLog = pathRemapper.Remap(template.ExecutionLog);
             StoreFingerprints = template.StoreFingerprints;
+            SaveFingerprintStoreToLogs = template.SaveFingerprintStoreToLogs;
             FingerprintStoreMode = template.FingerprintStoreMode;
             FingerprintStoreMaxEntryAgeMinutes = template.FingerprintStoreMaxEntryAgeMinutes;
             FingerprintStoreBulkLoad = template.FingerprintStoreBulkLoad;
@@ -119,8 +119,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
             SubstTarget = pathRemapper.Remap(template.SubstTarget);
             DisableLoggedPathTranslation = template.DisableLoggedPathTranslation;
             LogStatus = template.LogStatus;
+            LogTracer = template.LogTracer;
             StatusFrequencyMs = template.StatusFrequencyMs;
             StatusLog = pathRemapper.Remap(template.StatusLog);
+            TraceLog = pathRemapper.Remap(template.TraceLog);
             CacheMissLog = pathRemapper.Remap(template.CacheMissLog);
             DevLog = pathRemapper.Remap(template.DevLog);
             RpcLog = pathRemapper.Remap(template.RpcLog);
@@ -139,6 +141,8 @@ namespace BuildXL.Utilities.Configuration.Mutable
             InvocationExpandedCommandLineArguments = template.InvocationExpandedCommandLineArguments;
             OptimizeProgressUpdatingForAzureDevOps = template.OptimizeProgressUpdatingForAzureDevOps;
             OptimizeVsoAnnotationsForAzureDevOps = template.OptimizeVsoAnnotationsForAzureDevOps;
+            AriaIndividualMessageSizeLimitBytes = template.AriaIndividualMessageSizeLimitBytes;
+            MaxNumPipTelemetryBatches = template.MaxNumPipTelemetryBatches;
         }
 
         /// <inheritdoc />
@@ -182,6 +186,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public FingerprintStoreMode FingerprintStoreMode { get; set; }
+
+        /// <inheritdoc />
+        public bool? SaveFingerprintStoreToLogs { get; set; }
 
         /// <inheritdoc />
         public int FingerprintStoreMaxEntryAgeMinutes { get; set; }
@@ -299,7 +306,13 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public bool LogStatus { get; set; }
 
         /// <inheritdoc />
+        public bool LogTracer { get; set; }
+
+        /// <inheritdoc />
         public AbsolutePath StatusLog { get; set; }
+
+        /// <inheritdoc />
+        public AbsolutePath TraceLog { get; set; }
 
         /// <inheritdoc />
         public AbsolutePath CacheMissLog { get; set; }
@@ -351,5 +364,11 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public bool OptimizeWarningOrErrorAnnotationsForAzureDevOps { get; set; }
+
+        /// <inheritdoc />
+        public int AriaIndividualMessageSizeLimitBytes { get; set; }
+
+        /// <inheritdoc />
+        public int MaxNumPipTelemetryBatches { get; set; }
     }
 }

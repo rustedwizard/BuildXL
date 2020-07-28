@@ -34,7 +34,7 @@ namespace BuildXL.Utilities.Configuration
     }
 
     /// <summary>
-    /// White List entry
+    /// Unsafe Sandbox Configuration
     /// </summary>
     public interface IUnsafeSandboxConfiguration
     {
@@ -79,6 +79,11 @@ namespace BuildXL.Utilities.Configuration
         /// Whether BuildXL is to ignore reparse points. Ignoring reparse points is an unsafe configuration. Defaults to off (i.e., not ignoring reparse points).
         /// </summary>
         bool IgnoreReparsePoints { get; }
+        
+        /// <summary>
+        /// Whether BuildXL is to ignore fully resolving symbolic links. Ignoring symlink resolving is an unsafe configuration. Defaults to on (i.e., skipping full resolving, due to backwards compatibility).
+        /// </summary>
+        bool IgnoreFullSymlinkResolving { get; }
 
         /// <summary>
         /// Whether BuildXL is to ignore Dlls loaded before Detours was started. Ignoring the preloaded (statically loaded) dlls is an unsafe configuration. Defaults to on (i.e., ignoring preloaded Dlls).
@@ -155,6 +160,18 @@ namespace BuildXL.Utilities.Configuration
         /// </remarks>
         bool ProbeDirectorySymlinkAsDirectory { get; }
 
+
+        /// <summary>
+        /// Makes sure any access that contains a directory symlink gets properly processed
+        /// </summary>
+        /// <remarks>
+        /// This is an experimental flag, and hopefully will eventually become the norm.
+        /// This option is not actually unsafe, it is here to stress its experimental nature.
+        /// Only has an effect on Windows-based OS. Mac sandbox already process symlinks correctly.
+        /// </remarks>
+        bool? ProcessSymlinkedAccesses { get; }
+
+
         // NOTE: if you add a property here, don't forget to update UnsafeSandboxConfigurationExtensions
 
         // NOTE: whenever unsafe options change, the fingerprint version needs to be bumped
@@ -205,6 +222,12 @@ namespace BuildXL.Utilities.Configuration
             writer.Write(@this.IgnoreUndeclaredAccessesUnderSharedOpaques);
             writer.Write(@this.IgnoreCreateProcessReport);
             writer.Write(@this.ProbeDirectorySymlinkAsDirectory);
+            writer.Write(@this.ProcessSymlinkedAccesses.HasValue);
+            if (@this.ProcessSymlinkedAccesses.HasValue)
+            {
+                writer.Write(@this.ProcessSymlinkedAccesses.Value);
+            }
+            writer.Write(@this.IgnoreFullSymlinkResolving);
         }
 
         /// <nodoc/>
@@ -232,6 +255,8 @@ namespace BuildXL.Utilities.Configuration
                 IgnoreUndeclaredAccessesUnderSharedOpaques = reader.ReadBoolean(),
                 IgnoreCreateProcessReport = reader.ReadBoolean(),
                 ProbeDirectorySymlinkAsDirectory = reader.ReadBoolean(),
+                ProcessSymlinkedAccesses = reader.ReadBoolean() ? (bool?) reader.ReadBoolean() : null,
+                IgnoreFullSymlinkResolving = reader.ReadBoolean(),
             };
         }
 
@@ -245,6 +270,7 @@ namespace BuildXL.Utilities.Configuration
                 && IsAsSafeOrSafer(lhs.IgnoreGetFinalPathNameByHandle, rhs.IgnoreGetFinalPathNameByHandle, SafeDefaults.IgnoreGetFinalPathNameByHandle)
                 && IsAsSafeOrSafer(lhs.IgnoreNonCreateFileReparsePoints, rhs.IgnoreNonCreateFileReparsePoints, SafeDefaults.IgnoreNonCreateFileReparsePoints)
                 && IsAsSafeOrSafer(lhs.IgnoreReparsePoints, rhs.IgnoreReparsePoints, SafeDefaults.IgnoreReparsePoints)
+                && IsAsSafeOrSafer(lhs.IgnoreFullSymlinkResolving, rhs.IgnoreFullSymlinkResolving, SafeDefaults.IgnoreFullSymlinkResolving)
                 && IsAsSafeOrSafer(lhs.IgnoreSetFileInformationByHandle, rhs.IgnoreSetFileInformationByHandle, SafeDefaults.IgnoreSetFileInformationByHandle)
                 && IsAsSafeOrSafer(lhs.IgnoreZwOtherFileInformation, rhs.IgnoreZwOtherFileInformation, SafeDefaults.IgnoreZwOtherFileInformation)
                 && IsAsSafeOrSafer(lhs.IgnoreZwRenameFileInformation, rhs.IgnoreZwRenameFileInformation, SafeDefaults.IgnoreZwRenameFileInformation)
@@ -260,7 +286,9 @@ namespace BuildXL.Utilities.Configuration
                 && IsAsSafeOrSafer(lhs.DoubleWritePolicy(), rhs.DoubleWritePolicy(), SafeDefaults.DoubleWritePolicy())
                 && IsAsSafeOrSafer(lhs.IgnoreUndeclaredAccessesUnderSharedOpaques, rhs.IgnoreUndeclaredAccessesUnderSharedOpaques, SafeDefaults.IgnoreUndeclaredAccessesUnderSharedOpaques)
                 && IsAsSafeOrSafer(lhs.IgnoreCreateProcessReport, rhs.IgnoreCreateProcessReport, SafeDefaults.IgnoreCreateProcessReport)
-                && IsAsSafeOrSafer(lhs.ProbeDirectorySymlinkAsDirectory, rhs.ProbeDirectorySymlinkAsDirectory, SafeDefaults.ProbeDirectorySymlinkAsDirectory);
+                && IsAsSafeOrSafer(lhs.ProbeDirectorySymlinkAsDirectory, rhs.ProbeDirectorySymlinkAsDirectory, SafeDefaults.ProbeDirectorySymlinkAsDirectory)
+                && IsAsSafeOrSafer(lhs.ProcessSymlinkedAccesses(), rhs.ProcessSymlinkedAccesses(), SafeDefaults.ProcessSymlinkedAccesses());
+
         }
 
         /// <nodoc />

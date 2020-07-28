@@ -3,7 +3,7 @@
 
 namespace BasicFilesystem{
     @@public
-    export const dll = BuildXLSdk.test({
+    export const dll = BuildXLSdk.cacheTest({
         assemblyName: "BuildXL.Cache.BasicFilesystem.Test",
         sources: globR(d`.`, "*.cs"),
         references: [
@@ -17,6 +17,7 @@ namespace BasicFilesystem{
             importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
             importFrom("BuildXL.Cache.ContentStore").UtilitiesCore.dll,
             importFrom("BuildXL.Utilities").dll,
+            importFrom("BuildXL.Utilities").Native.dll,
         ]
     });
 }

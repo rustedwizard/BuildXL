@@ -3,8 +3,10 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -12,6 +14,7 @@ using System.Threading;
 using BuildXL.Interop.Unix;
 using BuildXL.Native.Processes;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
 
 namespace BuildXL.Processes
@@ -21,6 +24,9 @@ namespace BuildXL.Processes
     /// </summary>
     public sealed class SandboxConnectionKext : ISandboxConnection
     {
+        /// <inheritdoc />
+        public SandboxKind Kind => SandboxKind.MacOsKext;
+
         /// <summary>
         /// Configuration for <see cref="SandboxConnectionKext"/>.
         /// </summary>
@@ -74,7 +80,7 @@ Use the the following command to load/reload the sandbox kernel extension and fi
         /// </summary>
         private const int MaxVersionNumberLength = 17;
 
-        private readonly ConcurrentDictionary<long, SandboxedProcessMac> m_pipProcesses = new ConcurrentDictionary<long, SandboxedProcessMac>();
+        private readonly ConcurrentDictionary<long, SandboxedProcessUnix> m_pipProcesses = new ConcurrentDictionary<long, SandboxedProcessUnix>();
 
         private Sandbox.KextConnectionInfo m_kextConnectionInfo;
         private readonly Sandbox.KextSharedMemoryInfo m_sharedMemoryInfo;
@@ -97,7 +103,7 @@ Use the the following command to load/reload the sandbox kernel extension and fi
         public TimeSpan CurrentDrought => DateTime.UtcNow.Subtract(new DateTime(ticks: LastReportReceivedTimestampTicks));
 
         /// <summary>
-        /// Initializes the sandbox kernel extension connection manager, setting up the kernel extension connection and workers that drain the
+        /// Initializes the sandbox kernel extension connection, setting up the kernel extension connection and workers that drain the
         /// kernel event queue and report file accesses
         /// </summary>
         public SandboxConnectionKext(Config config = null, bool skipDisposingForTests = false)
@@ -246,7 +252,7 @@ Use the the following command to load/reload the sandbox kernel extension and fi
         }
 
         /// <inheritdoc />
-        public bool NotifyPipStarted(LoggingContext loggingContext, FileAccessManifest fam, SandboxedProcessMac process)
+        public bool NotifyPipStarted(LoggingContext loggingContext, FileAccessManifest fam, SandboxedProcessUnix process)
         {
             Contract.Requires(process.Started);
             Contract.Requires(fam.PipId != 0);
@@ -288,13 +294,26 @@ Use the the following command to load/reload the sandbox kernel extension and fi
         }
 
         /// <inheritdoc />
+        public IEnumerable<(string, string)> AdditionalEnvVarsToSet(long pipId)
+        {
+            return Enumerable.Empty<(string, string)>();
+        }
+
+        /// <inheritdoc />
         public void NotifyPipProcessTerminated(long pipId, int processId)
         {
             Sandbox.SendPipProcessTerminated(pipId, processId, type: Sandbox.ConnectionType.Kext, info: ref m_kextConnectionInfo);
         }
 
         /// <inheritdoc />
-        public bool NotifyProcessFinished(long pipId, SandboxedProcessMac process)
+        public void NotifyRootProcessExited(long pipId, SandboxedProcessUnix process)
+        {
+            // this implementation keeps track of what the root process is an when it exits,
+            // so it doesn't need to be notified about it separately
+        }
+
+        /// <inheritdoc />
+        public bool NotifyPipFinished(long pipId, SandboxedProcessUnix process)
         {
             if (m_pipProcesses.TryRemove(pipId, out var proc))
             {

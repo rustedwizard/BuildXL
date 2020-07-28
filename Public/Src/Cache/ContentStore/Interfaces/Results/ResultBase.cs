@@ -164,7 +164,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         /// <summary>
         /// Check if equal to another.
         /// </summary>
-        protected bool EqualsBase(ResultBase other)
+        protected bool EqualsBase(ResultBase? other)
         {
             return !(other is null) && ErrorMessage == other.ErrorMessage;
         }
@@ -260,6 +260,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
                    exception is OutOfMemoryException ||
                    exception.GetType().Name == "ContractException" ||
                    exception is InvalidOperationException ||
+                   exception is DivideByZeroException ||
                    (exception is AggregateException ae && ae.Flatten().InnerExceptions.Any(e => IsCritical(e)));
         }
 

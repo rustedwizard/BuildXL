@@ -17,6 +17,7 @@ using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
 using static BuildXL.Utilities.FormattableStringEx;
+using static BuildXL.Cache.ContentStore.Interfaces.FileSystem.VfsUtilities;
 
 namespace BuildXL.Engine.Cache.Plugin.CacheCore
 {
@@ -268,8 +269,13 @@ namespace BuildXL.Engine.Cache.Plugin.CacheCore
 
                 if (!mayBeDelete.Succeeded)
                 {
-                    return mayBeDelete.Failure.Annotate(LocalDiskContentStore.ExistingFileDeletionFailure);
+                    return new FailToDeleteForMaterializationFailure(mayBeDelete.Failure);
                 }
+            }
+
+            if (fileRealizationModes.AllowVirtualization)
+            {
+                pathForCache = AddVfsSuffix(pathForCache);
             }
 
             Possible<ICacheSession, Failure> maybeOpen = m_cache.Get(nameof(TryMaterializeAsync));
@@ -416,30 +422,30 @@ namespace BuildXL.Engine.Cache.Plugin.CacheCore
         /// the cache to pick a correct CAS root if CAS roots exist on various drives which
         /// would allow it to use a hardlink rather than copy if the appropriate CAS root is chosen.
         /// </summary>
-        public string GetExpandedPathForCache(ExpandedAbsolutePath path)
+        public string GetExpandedPathForCache(ExpandedAbsolutePath path, FileRealizationMode mode = default)
         {
             if (m_rootTranslator == null)
-            {
-                return path.ExpandedPath;
-            }
-            else
-            {
-                var translatedPath = m_rootTranslator.Translate(path.ExpandedPath);
-                if (translatedPath[0].ToUpperInvariantFast() == path.ExpandedPath[0].ToUpperInvariantFast() &&
-                    translatedPath.Length > path.ExpandedPath.Length)
                 {
-                    // The path root did not change as a result of path translation and its longer
-                    // so , just return the original path since the cache only cares about the root
-                    // when deciding a particular CAS to hardlink from to avoid MAX_PATH issues
                     return path.ExpandedPath;
                 }
+                else
+                {
+                    var translatedPath = m_rootTranslator.Translate(path.ExpandedPath);
+                    if (translatedPath[0].ToUpperInvariantFast() == path.ExpandedPath[0].ToUpperInvariantFast() &&
+                        translatedPath.Length > path.ExpandedPath.Length)
+                    {
+                        // The path root did not change as a result of path translation and its longer
+                        // so , just return the original path since the cache only cares about the root
+                        // when deciding a particular CAS to hardlink from to avoid MAX_PATH issues
+                        return path.ExpandedPath;
+                    }
 
-                return translatedPath;
-            }
+                    return translatedPath;
+                }
         }
 
         /// <inheritdoc />
-        public Task<Possible<Stream, Failure>> TryOpenContentStreamAsync(ContentHash contentHash)
+        public Task<Possible<StreamWithLength, Failure>> TryOpenContentStreamAsync(ContentHash contentHash)
         {
             return m_cache.Get(nameof(TryOpenContentStreamAsync))
                 .ThenAsync(cache => cache.GetStreamAsync(new CasHash(new global::BuildXL.Cache.Interfaces.Hash(contentHash))));
@@ -447,13 +453,13 @@ namespace BuildXL.Engine.Cache.Plugin.CacheCore
 
         private static FileState GetFileStateForRealizationMode(FileRealizationMode mode)
         {
-            switch (mode)
+            switch (mode.DiskMode)
             {
-                case FileRealizationMode.Copy:
+                case DiskFileRealizationMode.Copy:
                     return FileState.Writeable;
-                case FileRealizationMode.HardLink:
+                case DiskFileRealizationMode.HardLink:
                     return FileState.ReadOnly;
-                case FileRealizationMode.HardLinkOrCopy:
+                case DiskFileRealizationMode.HardLinkOrCopy:
                     return FileState.ReadOnly;
                 default:
                     throw Contract.AssertFailure("Unhandled FileRealizationMode");

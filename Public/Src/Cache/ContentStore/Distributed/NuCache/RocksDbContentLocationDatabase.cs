@@ -85,7 +85,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private enum ClusterStateKeys
         {
-            MaxMachineId,
             StoredEpoch
         }
 
@@ -221,6 +220,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     }
                 }
 
+                bool dbAlreadyExists = Directory.Exists(storeLocation);
                 Directory.CreateDirectory(storeLocation);
 
                 Tracer.Info(context, $"Creating RocksDb store at '{storeLocation}'. Clean={clean}, Configured Epoch='{_configuration.Epoch}'");
@@ -235,6 +235,20 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         RotateLogsMaxAge = TimeSpan.FromHours(_configuration.LogsKeepLongTerm ? 12 : 1),
                         EnableStatistics = true,
                         FastOpen = true,
+                        // We take the user's word here. This may be completely wrong, but we don't have enough
+                        // information at this point to take a decision here. If a machine is master and demoted to
+                        // worker, EventHub may continue to process events for a little while. If we set this to
+                        // read-only during that checkpoint, those last few events will fail with RocksDbException.
+                        // NOTE: we need to check that the database exists because RocksDb will refuse to open an empty
+                        // read-only instance.
+                        ReadOnly = _configuration.OpenReadOnly && dbAlreadyExists,
+                        // The RocksDb database here is read-only from the perspective of the default column family,
+                        // but read/write from the perspective of the ClusterState (which is rewritten on every
+                        // heartbeat). This means that the database may perform background compactions on the column
+                        // families, possibly triggering a RocksDb corruption "block checksum mismatch" error.
+                        // Since the writes to ClusterState are relatively few, we can make-do with disabling
+                        // compaction here and pretending like we are using a read-only database.
+                        DisableAutomaticCompactions = !IsDatabaseWriteable,
                     },
                     // When an exception is caught from within methods using the database, this handler is called to
                     // decide whether the exception should be rethrown in user code, and the database invalidated. Our
@@ -494,75 +508,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        protected override void UpdateClusterStateCore(OperationContext context, ClusterState clusterState, bool write)
-        {
-            _keyValueStore.Use(
-                    store =>
-                    {
-                        int maxMachineId = ClusterState.InvalidMachineId;
-                        if (!store.TryGetValue(nameof(ClusterStateKeys.MaxMachineId), out var maxMachinesString, nameof(Columns.ClusterState)) ||
-                            !int.TryParse(maxMachinesString, out maxMachineId))
-                        {
-                            Tracer.OperationDebug(context, $"Unable to load cluster state from db. MaxMachineId='{maxMachinesString}'");
-                            if (!write)
-                            {
-                                // No machine state in db. Return if we are not updating the db.
-                                return;
-                            }
-                        }
-
-                        void logSynchronize()
-                        {
-                            Tracer.OperationDebug(context, $"Synchronizing cluster state: MaxMachineId={clusterState.MaxMachineId}, Database.MaxMachineId={maxMachineId}]");
-                        }
-
-                        if (clusterState.MaxMachineId > maxMachineId && write)
-                        {
-                            logSynchronize();
-
-                            // Update db with values from cluster state
-                            for (int machineIndex = maxMachineId + 1; machineIndex <= clusterState.MaxMachineId; machineIndex++)
-                            {
-                                if (clusterState.TryResolve(new MachineId(machineIndex), out var machineLocation))
-                                {
-                                    Tracer.OperationDebug(context, $"Storing machine mapping ({machineIndex}={machineLocation})");
-                                    store.Put(machineIndex.ToString(), machineLocation.Path, nameof(Columns.ClusterState));
-                                }
-                                else
-                                {
-                                    throw Contract.AssertFailure($"Unabled to resolve machine location for machine id={machineIndex}");
-                                }
-                            }
-
-                            store.Put(nameof(ClusterStateKeys.MaxMachineId), clusterState.MaxMachineId.ToString(), nameof(Columns.ClusterState));
-                        }
-                        else if (maxMachineId > clusterState.MaxMachineId)
-                        {
-                            logSynchronize();
-
-                            // Update cluster state with values from db
-                            var unknownMachines = new Dictionary<MachineId, MachineLocation>();
-                            for (int machineIndex = clusterState.MaxMachineId + 1; machineIndex <= maxMachineId; machineIndex++)
-                            {
-                                if (store.TryGetValue(machineIndex.ToString(), out var machineLocationData, nameof(Columns.ClusterState)))
-                                {
-                                    var machineId = new MachineId(machineIndex);
-                                    var machineLocation = new MachineLocation(machineLocationData);
-                                    context.LogMachineMapping(Tracer, machineId, machineLocation);
-                                    unknownMachines[machineId] = machineLocation;
-                                }
-                                else
-                                {
-                                    throw Contract.AssertFailure($"Unabled to find machine location for machine id={machineIndex}");
-                                }
-                            }
-
-                            clusterState.AddUnknownMachines(maxMachineId, unknownMachines);
-                        }
-                    }).ThrowOnError();
-        }
-
-        /// <inheritdoc />
         protected override IEnumerable<ShortHash> EnumerateSortedKeysFromStorage(OperationContext context)
         {
             return EnumerateEntriesWithSortedKeysFromStorage(context, valueFilter: null, returnKeysOnly: true)
@@ -643,7 +588,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                             killSwitchUsed = killSwitch.IsCancellationRequested;
                         }).ToBoolResult();
-                }, messageFactory: _ => $"KillSwitch=[{killSwitchUsed}] ReturnKeysOnly=[{returnKeysOnly}]").ThrowIfFailure();
+                }, messageFactory: _ => $"KillSwitch=[{killSwitchUsed}] ReturnKeysOnly=[{returnKeysOnly}] Canceled=[{token.IsCancellationRequested}]").ThrowIfFailure();
 
                 foreach (var key in keyBuffer)
                 {
@@ -739,22 +684,25 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        public override GetContentHashListResult GetContentHashList(OperationContext context, StrongFingerprint strongFingerprint)
+        public override Result<MetadataEntry?> GetMetadataEntry(OperationContext context, StrongFingerprint strongFingerprint, bool touch)
         {
             var key = GetMetadataKey(strongFingerprint);
-            ContentHashListWithDeterminism? result = null;
+            MetadataEntry? result = null;
             var status = _keyValueStore.Use(
                 store =>
                 {
                     if (store.TryGetValue(key, out var data, nameof(Columns.Metadata)))
                     {
                         var metadata = DeserializeMetadataEntry(data);
-                        result = metadata.ContentHashListWithDeterminism;
+                        result = metadata;
 
-                        // Update the time, only if no one else has changed it in the mean time. We don't
-                        // really care if this succeeds or not, because if it doesn't it only means someone
-                        // else changed the stored value before this operation but after it was read.
-                        Analysis.IgnoreResult(this.CompareExchange(context, strongFingerprint, metadata.ContentHashListWithDeterminism, metadata.ContentHashListWithDeterminism));
+                        if (!_configuration.OpenReadOnly && touch)
+                        {
+                            // Update the time, only if no one else has changed it in the mean time. We don't
+                            // really care if this succeeds or not, because if it doesn't it only means someone
+                            // else changed the stored value before this operation but after it was read.
+                            Analysis.IgnoreResult(this.CompareExchange(context, strongFingerprint, metadata.ContentHashListWithDeterminism, metadata.ContentHashListWithDeterminism));
+                        }
 
                         // TODO(jubayard): since we are inside the ContentLocationDatabase, we can validate that all
                         // hashes exist. Moreover, we can prune content.
@@ -763,15 +711,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             if (!status.Succeeded)
             {
-                return new GetContentHashListResult(status.Failure.CreateException());
+                return new Result<MetadataEntry?>(status.Failure.CreateException());
             }
 
-            if (result is null)
-            {
-                return new GetContentHashListResult(new ContentHashListWithDeterminism(null, CacheDeterminism.None));
-            }
-
-            return new GetContentHashListResult(result.Value);
+            return new Result<MetadataEntry?>(result, isNullAllowed: true);
         }
 
         /// <summary>
@@ -784,7 +727,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             OperationContext context,
             StrongFingerprint strongFingerprint,
             ContentHashListWithDeterminism replacement,
-            Func<MetadataEntry, bool> shouldReplace)
+            Func<MetadataEntry, bool> shouldReplace,
+            DateTime? lastAccessTimeUtc)
         {
             return _keyValueStore.Use(
                 store =>
@@ -796,14 +740,33 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         if (store.TryGetValue(key, out var data, nameof(Columns.Metadata)))
                         {
                             var current = DeserializeMetadataEntry(data);
+
                             if (!shouldReplace(current))
                             {
-                                return false;
+                                if (lastAccessTimeUtc != null)
+                                {
+                                    // Not updated contents but content should be touched
+                                    replacement = current.ContentHashListWithDeterminism;
+                                }
+                                else
+                                {
+                                    return false;
+                                }
+                            }
+
+                            if (lastAccessTimeUtc < current.LastAccessTimeUtc)
+                            {
+                                lastAccessTimeUtc = current.LastAccessTimeUtc;
                             }
                         }
 
-                        var replacementMetadata = new MetadataEntry(replacement, Clock.UtcNow.ToFileTimeUtc());
-                        store.Put(key, SerializeMetadataEntry(replacementMetadata), nameof(Columns.Metadata));
+                        // Don't put if content hash list is null since this represents a touch which arrived before
+                        // the initial put for the content hash list.
+                        if (replacement.ContentHashList != null)
+                        {
+                            var replacementMetadata = new MetadataEntry(replacement, lastAccessTimeUtc ?? Clock.UtcNow);
+                            store.Put(key, SerializeMetadataEntry(replacementMetadata), nameof(Columns.Metadata));
+                        }
                     }
 
                     return true;
@@ -900,6 +863,19 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             return DeserializeCore(data, reader => MetadataEntry.DeserializeLastAccessTimeUtc(reader));
         }
 
+
+        private Result<long> GetLongProperty(IBuildXLKeyValueStore store, string propertyName, string columnFamilyName)
+        {
+            try
+            {
+                return long.Parse(store.GetProperty(propertyName, columnFamilyName));
+            }
+            catch (Exception exception)
+            {
+                return new Result<long>(exception);
+            }
+        }
+
         /// <inheritdoc />
         protected override BoolResult GarbageCollectMetadataCore(OperationContext context)
         {
@@ -911,16 +887,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 // guarantee that an entry we remove is truly the one we should be removing. Moreover, since we store
                 // information what the last access times were, our internal priority queue may go stale over time as
                 // well.
-                var liveDbSizeInBytesBeforeGc = int.Parse(store.GetProperty(
-                    "rocksdb.estimate-live-data-size",
-                    columnFamilyName: nameof(Columns.Metadata)));
+                var liveDbSizeInBytesBeforeGc = GetLongProperty(store, "rocksdb.estimate-live-data-size", columnFamilyName: nameof(Columns.Metadata));
 
                 var scannedEntries = 0;
                 var removedEntries = 0;
 
                 using (var cts = CancellationTokenSource.CreateLinkedTokenSource(killSwitch, context.Token))
                 {
-
                     // This is a min-heap using lexicographic order: an element will be at the `Top` if its `fileTimeUtc`
                     // is the smallest (i.e. the oldest). Hence, we always know what the cut-off point is for the top K: if
                     // a new element is smaller than the Top, it's not in the top K, if larger, it is.
@@ -975,9 +948,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 Counters[ContentLocationDatabaseCounters.GarbageCollectMetadataEntriesRemoved].Add(removedEntries);
                 Counters[ContentLocationDatabaseCounters.GarbageCollectMetadataEntriesScanned].Add(scannedEntries);
 
-                var liveDbSizeInBytesAfterGc = int.Parse(store.GetProperty(
-                    "rocksdb.estimate-live-data-size",
-                    columnFamilyName: nameof(Columns.Metadata)));
+                var liveDbSizeInBytesAfterGc = GetLongProperty(store, "rocksdb.estimate-live-data-size", columnFamilyName: nameof(Columns.Metadata));
 
                 // NOTE(jubayard): since we report the live DB size, it is possible it may increase after GC, because
                 // new tombstones have been added. However, there is no way to compute how much we added/removed that
@@ -991,10 +962,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <inheritdoc />
         public override Result<long> GetContentDatabaseSizeBytes()
         {
-            return _keyValueStore.Use(store =>
-            {
-                return long.Parse(store.GetProperty("rocksdb.live-sst-files-size"));
-            }).ToResult();
+            return _keyValueStore.Use(store => long.Parse(store.GetProperty("rocksdb.live-sst-files-size"))).ToResult();
         }
 
         private void FullRangeCompaction(OperationContext context)
@@ -1044,8 +1012,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private BoolResult CompactColumnFamily(OperationContext context, IBuildXLKeyValueStore store, string columnFamilyName)
         {
-            byte? startByte = null;
-            byte? endByte = null;
+            uint? startRange = null;
+            uint? endRange = null;
 
             return context.PerformOperation(Tracer, () =>
             {
@@ -1062,8 +1030,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                         var compactionEndPrefix = unchecked((byte)(info.LastCompactionEndPrefix + _configuration.FullRangeCompactionByteIncrementStep));
 
-                        startByte = info.LastCompactionEndPrefix;
-                        endByte = compactionEndPrefix;
+                        startRange = info.LastCompactionEndPrefix;
+                        endRange = compactionEndPrefix;
 
                         var start = new byte[] { info.LastCompactionEndPrefix };
                         var limit = new byte[] { compactionEndPrefix };
@@ -1087,10 +1055,41 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                             columnFamilyName);
                         break;
                     }
+                    case FullRangeCompactionVariant.WordIncrements:
+                    {
+                        var info = GetCompactionInfo(store, columnFamilyName);
+
+                        var compactionEndPrefix = unchecked((ushort)(info.LastWordCompactionEndPrefix + _configuration.FullRangeCompactionByteIncrementStep));
+
+                        startRange = info.LastWordCompactionEndPrefix;
+                        endRange = compactionEndPrefix;
+
+                        var start = BitConverter.GetBytes(info.LastWordCompactionEndPrefix);
+                        var limit = BitConverter.GetBytes(compactionEndPrefix);
+                        if (info.LastWordCompactionEndPrefix > compactionEndPrefix)
+                        {
+                            // We'll wrap around when we add the increment step at the end of the range; hence, we produce two compactions.
+                            store.CompactRange(start, null, columnFamilyName);
+                            store.CompactRange(null, limit, columnFamilyName);
+                        }
+                        else
+                        {
+                            store.CompactRange(start, limit, columnFamilyName);
+                        }
+
+                        StoreCompactionInfo(
+                            store,
+                            new CompactionInfo
+                            {
+                                LastWordCompactionEndPrefix = compactionEndPrefix,
+                            },
+                            columnFamilyName);
+                        break;
+                    }
                 }
 
                 return BoolResult.Success;
-            }, messageFactory: _ => $"ColumnFamily=[{columnFamilyName}] Variant=[{_configuration.FullRangeCompactionVariant}] Start=[{startByte?.ToString() ?? "NULL"}] End=[{endByte?.ToString() ?? "NULL"}]");
+            }, messageFactory: _ => $"ColumnFamily=[{columnFamilyName}] Variant=[{_configuration.FullRangeCompactionVariant}] Start=[{startRange?.ToString() ?? "NULL"}] End=[{endRange?.ToString() ?? "NULL"}]");
         }
 
         private void StoreCompactionInfo(IBuildXLKeyValueStore store, CompactionInfo compactionInfo, string columnFamilyName)
@@ -1098,7 +1097,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             Contract.RequiresNotNull(store);
             Contract.RequiresNotNullOrEmpty(columnFamilyName);
 
-            var key = Encoding.UTF8.GetBytes($"{columnFamilyName}_CompactionInfo");
+            var key = Encoding.UTF8.GetBytes($"{columnFamilyName}_CompactionInfoV2");
             var value = SerializeCompactionInfo(compactionInfo);
             store.Put(key, value, columnFamilyName: nameof(Columns.DatabaseManagement));
         }
@@ -1108,7 +1107,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             Contract.RequiresNotNull(store);
             Contract.RequiresNotNullOrEmpty(columnFamilyName);
 
-            var key = Encoding.UTF8.GetBytes($"{columnFamilyName}_CompactionInfo");
+            var key = Encoding.UTF8.GetBytes($"{columnFamilyName}_CompactionInfoV2");
             if (store.TryGetValue(key, out var value, columnFamilyName: nameof(Columns.DatabaseManagement)))
             {
                 return DeserializeCompactionInfo(value);
@@ -1131,17 +1130,23 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             public byte LastCompactionEndPrefix { get; set; }
 
+            public ushort LastWordCompactionEndPrefix { get; set; }
+
             public void Serialize(BuildXLWriter writer)
             {
                 writer.Write(LastCompactionEndPrefix);
+                writer.Write(LastWordCompactionEndPrefix);
             }
 
             public static CompactionInfo Deserialize(BuildXLReader reader)
             {
                 var lastCompactionEndPrefix = reader.ReadByte();
+                var lastWordCompactionEndPrefix = reader.ReadUInt16();
+
                 return new CompactionInfo()
                 {
                     LastCompactionEndPrefix = lastCompactionEndPrefix,
+                    LastWordCompactionEndPrefix = lastWordCompactionEndPrefix,
                 };
             }
         }

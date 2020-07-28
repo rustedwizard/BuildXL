@@ -75,6 +75,7 @@ namespace BuildXL.Pips
         PipViewerRequest,
         ViewerAnalyzer,
         LoggingUncacheableProcessImpact,
+        HandlePipStepOnWorker,
         LoggingPipFailedOnWorker,
         Test,
         PipQueueGetCpuQueueProcessResources,
@@ -91,8 +92,8 @@ namespace BuildXL.Pips
         PreserveOutput,
         CacheMaterializationError,
         VisualStudioDebugView,
-        End,
-        PathSetAugmentation,
+        PathSetAugmentation,        
+        End // This must be the last entry
 #pragma warning restore 1591
     }
 }

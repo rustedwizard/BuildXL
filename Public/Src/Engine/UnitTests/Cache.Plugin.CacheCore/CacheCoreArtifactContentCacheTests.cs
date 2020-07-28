@@ -107,10 +107,10 @@ namespace Test.BuildXL.Engine.Cache.Plugin.CacheCore
             ContentHash availableHash = await AddContent("Very useful data");
             await LoadContentAndExpectAvailable(ContentCache, availableHash);
 
-            Possible<Stream> maybeStream = await ContentCache.TryOpenContentStreamAsync(availableHash);
+            Possible<StreamWithLength> maybeStream = await ContentCache.TryOpenContentStreamAsync(availableHash);
             XAssert.IsTrue(maybeStream.Succeeded);
 
-            using (Stream stream = maybeStream.Result)
+            using (StreamWithLength stream = maybeStream.Result)
             {
                 XAssert.AreEqual(availableHash, await ContentHashingUtilities.HashContentStreamAsync(stream));
             }
@@ -121,7 +121,7 @@ namespace Test.BuildXL.Engine.Cache.Plugin.CacheCore
         {
             ContentHash unavailableHash = HashContent("A stream made of wishes");
 
-            Possible<Stream> maybeStream = await ContentCache.TryOpenContentStreamAsync(unavailableHash);
+            Possible<StreamWithLength> maybeStream = await ContentCache.TryOpenContentStreamAsync(unavailableHash);
             XAssert.IsFalse(maybeStream.Succeeded);
         }
 
@@ -158,7 +158,7 @@ namespace Test.BuildXL.Engine.Cache.Plugin.CacheCore
 
                     XAssert.IsFalse(maybeMaterialized.Succeeded, "Expected materialization failure due to open file handle, but it succeed");
 
-                    XAssert.Contains(maybeMaterialized.Failure.DescribeIncludingInnerFailures(), LocalDiskContentStore.ExistingFileDeletionFailure);
+                    XAssert.IsTrue(maybeMaterialized.Failure is FailToDeleteForMaterializationFailure);
                 }
             }
         }

@@ -14,10 +14,12 @@ namespace Utilities {
             importFrom("BuildXL.Utilities").Collections.dll,
             importFrom("BuildXL.Utilities").Configuration.dll,
             importFrom("BuildXL.Engine").Processes.dll,
+            Script.dll,
             importFrom("Newtonsoft.Json").pkg,
             Sdk.dll,
             SdkProjectGraph.dll,
             TypeScript.Net.dll,
+            ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
         ],
     });
 }

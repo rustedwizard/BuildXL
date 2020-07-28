@@ -36,6 +36,7 @@ using Xunit.Abstractions;
 using ProcessOutputs = BuildXL.Pips.Builders.ProcessOutputs;
 using BuildXL.Utilities.VmCommandProxy;
 using BuildXL.Scheduler.Fingerprints;
+using System;
 
 namespace Test.BuildXL.Scheduler
 {
@@ -45,9 +46,9 @@ namespace Test.BuildXL.Scheduler
     public class SchedulerIntegrationTestBase : PipTestBase
     {
         public List<ScheduleRunResult> PriorResults = new List<ScheduleRunResult>();
-        public CommandLineConfiguration Configuration;
-        public EngineCache Cache;
-        public FileContentTable FileContentTable;
+        public CommandLineConfiguration Configuration { get; set; }
+        public EngineCache Cache { get; set; }
+        public FileContentTable FileContentTable { get; set; }
         public DirectoryTranslator DirectoryTranslator = new DirectoryTranslator();
 
         // Keep track of whether the graph was changed between runs of the scheduler for sake of passing the same graph and
@@ -96,7 +97,6 @@ namespace Test.BuildXL.Scheduler
         public SchedulerIntegrationTestBase(ITestOutputHelper output) : base(output)
         {
             m_testOutputHelper = output;
-            CaptureAllDiagnosticMessages = false;
 
             // Each event listener that we want to capture events from must be listed here
             foreach (var eventSource in BuildXLApp.GeneratedEventSources)
@@ -131,7 +131,7 @@ namespace Test.BuildXL.Scheduler
 
             // Disable currently enabled unsafe option.
             Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreCreateProcessReport = false;
-
+            
             // Populate file system capabilities.
             // Here, for example, we use copy-on-write instead of hardlinks when Unix file system supports copy-on-write.
             // Particular tests can override this by setting Configuration.Engine.UseHardlinks.
@@ -367,7 +367,8 @@ namespace Test.BuildXL.Scheduler
             IEnumerable<(Pip before, Pip after)> constraintExecutionOrder = null,
             PerformanceCollector performanceCollector = null,
             bool updateStatusTimerEnabled = false,
-            CancellationToken cancellationToken = default(CancellationToken))
+            Action<TestScheduler> verifySchedulerPostRun = default,
+            CancellationToken cancellationToken = default)
         {
             if (m_graphWasModified || LastGraph == null)
             {
@@ -386,6 +387,7 @@ namespace Test.BuildXL.Scheduler
                 constraintExecutionOrder,
                 performanceCollector: performanceCollector,
                 updateStatusTimerEnabled: updateStatusTimerEnabled,
+                verifySchedulerPostRun: verifySchedulerPostRun,
                 cancellationToken: cancellationToken);
         }
 
@@ -423,22 +425,23 @@ namespace Test.BuildXL.Scheduler
             string runNameOrDescription = null,
             PerformanceCollector performanceCollector = null,
             bool updateStatusTimerEnabled = false,
-            CancellationToken cancellationToken = default(CancellationToken))
+            Action<TestScheduler> verifySchedulerPostRun = default,
+            CancellationToken cancellationToken = default)
         {
             MarkSchedulerRun(runNameOrDescription);
 
             // This is a new logging context to be used just for this instantiation of the scheduler. That way it can
             // be validated against the LoggingContext to make sure the scheduler's return result and error logging
             // are in agreement.
-            var localLoggingContext = BuildXLTestBase.CreateLoggingContextForTest(new AppLogger());
+            var localLoggingContext = BuildXLTestBase.CreateLoggingContextForTest();
             var config = new CommandLineConfiguration(Configuration);
 
             // Populating the configuration may modify the configuration, so it should occur first.
             BuildXLEngine.PopulateLoggingAndLayoutConfiguration(config, Context.PathTable, bxlExeLocation: null, inTestMode: true);
             BuildXLEngine.PopulateAndValidateConfiguration(config, config, Context.PathTable, LoggingContext);
 
-            FileAccessWhitelist whitelist = new FileAccessWhitelist(Context);
-            whitelist.Initialize(config);
+            FileAccessAllowlist allowlist = new FileAccessAllowlist(Context);
+            allowlist.Initialize(config);
 
             IReadOnlyList<string> junctionRoots = Configuration.Engine.DirectoriesToTranslate?.Select(a => a.ToPath.ToString(Context.PathTable)).ToList();
 
@@ -493,7 +496,7 @@ namespace Test.BuildXL.Scheduler
                 cache: Cache,
                 configuration: config,
                 journalState: m_journalState,
-                fileAccessWhitelist: whitelist,
+                fileAccessAllowlist: allowlist,
                 fingerprintSalt: Configuration.Cache.CacheSalt,
                 directoryMembershipFingerprinterRules: new DirectoryMembershipFingerprinterRuleSet(Configuration, Context.StringTable),
                 tempCleaner: tempCleaner,
@@ -555,6 +558,9 @@ namespace Test.BuildXL.Scheduler
                     // to write out the stats perf JSON file
                     testScheduler.LogStats(localLoggingContext, null);
                 }
+
+                // Verify internal data of scheduler.
+                verifySchedulerPostRun?.Invoke(testScheduler);
 
                 var runResult = new ScheduleRunResult
                 {

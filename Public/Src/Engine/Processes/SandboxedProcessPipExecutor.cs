@@ -9,13 +9,16 @@ using System.Diagnostics.ContractsLight;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Interop;
 using BuildXL.Native.IO;
 using BuildXL.Native.Processes;
 using BuildXL.Pips;
+using BuildXL.Pips.Filter;
 using BuildXL.Pips.Operations;
 using BuildXL.Processes.Containers;
 using BuildXL.Processes.Internal;
@@ -24,6 +27,7 @@ using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
+using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.VmCommandProxy;
 using static BuildXL.Processes.SandboxedProcessFactory;
 using static BuildXL.Utilities.BuildParameters;
@@ -84,6 +88,11 @@ namespace BuildXL.Processes
         private static readonly ConcurrentDictionary<ExpandedRegexDescriptor, Lazy<Task<Regex>>> s_regexTasks =
             new ConcurrentDictionary<ExpandedRegexDescriptor, Lazy<Task<Regex>>>();
 
+        /// <summary>
+        /// Indicate whether a intentional retry attempt is initiated for the sake of integration testing.
+        /// </summary>
+        private static bool s_testRetryOccurred;
+
         private readonly PipExecutionContext m_context;
         private readonly PathTable m_pathTable;
 
@@ -99,7 +108,7 @@ namespace BuildXL.Processes
 
         private readonly PipFragmentRenderer m_pipDataRenderer;
 
-        private readonly FileAccessWhitelist m_fileAccessWhitelist;
+        private readonly FileAccessAllowlist m_fileAccessAllowlist;
 
         private readonly Process m_pip;
 
@@ -182,6 +191,7 @@ namespace BuildXL.Processes
         private readonly IReadOnlyList<AbsolutePath> m_changeAffectedInputs;
         
         private readonly IDetoursEventListener m_detoursListener;
+        private readonly SymlinkedAccessResolver m_symlinkedAccessResolver;
 
         /// <summary>
         /// Whether the process invokes an incremental tool with preserveOutputs mode.
@@ -200,6 +210,8 @@ namespace BuildXL.Processes
 
         private FileAccessPolicy DefaultMask => NoFakeTimestamp ? ~FileAccessPolicy.Deny : ~FileAccessPolicy.AllowRealInputTimestamps;
 
+        private readonly IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> m_staleOutputsUnderSharedOpaqueDirectories;
+
         /// <summary>
         /// Name of the diretory in Log directory for std output files
         /// </summary>
@@ -217,7 +229,7 @@ namespace BuildXL.Processes
             ILoggingConfiguration loggingConfig,
             IReadOnlyDictionary<string, string> rootMappings,
             ProcessInContainerManager processInContainerManager,
-            FileAccessWhitelist whitelist,
+            FileAccessAllowlist allowlist,
             Func<FileArtifact, Task<bool>> makeInputPrivate,
             Func<string, Task<bool>> makeOutputPrivate,
             SemanticPathExpander semanticPathExpander,
@@ -238,7 +250,9 @@ namespace BuildXL.Processes
             SubstituteProcessExecutionInfo shimInfo = null,
             IReadOnlyList<RelativePath> incrementalTools = null,
             IReadOnlyList<AbsolutePath> changeAffectedInputs = null,
-            IDetoursEventListener detoursListener = null)
+            IDetoursEventListener detoursListener = null,
+            SymlinkedAccessResolver symlinkedAccessResolver = null,
+            IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> staleOutputsUnderSharedOpaqueDirectories = null)
         {
             Contract.Requires(pip != null);
             Contract.Requires(context != null);
@@ -269,6 +283,7 @@ namespace BuildXL.Processes
                     MonitorZwCreateOpenQueryFile = sandBoxConfig.UnsafeSandboxConfiguration.MonitorZwCreateOpenQueryFile,
                     ForceReadOnlyForRequestedReadWrite = sandBoxConfig.ForceReadOnlyForRequestedReadWrite,
                     IgnoreReparsePoints = sandBoxConfig.UnsafeSandboxConfiguration.IgnoreReparsePoints,
+                    IgnoreFullSymlinkResolving = sandBoxConfig.UnsafeSandboxConfiguration.IgnoreFullSymlinkResolving,
                     IgnorePreloadedDlls = sandBoxConfig.UnsafeSandboxConfiguration.IgnorePreloadedDlls,
                     IgnoreZwRenameFileInformation = sandBoxConfig.UnsafeSandboxConfiguration.IgnoreZwRenameFileInformation,
                     IgnoreZwOtherFileInformation = sandBoxConfig.UnsafeSandboxConfiguration.IgnoreZwOtherFileInformation,
@@ -299,7 +314,7 @@ namespace BuildXL.Processes
                 m_fileAccessManifest.DisableDetours = true;
             }
 
-            m_fileAccessWhitelist = whitelist;
+            m_fileAccessAllowlist = allowlist;
             m_makeInputPrivate = makeInputPrivate;
             m_makeOutputPrivate = makeOutputPrivate;
             m_semanticPathExpander = semanticPathExpander;
@@ -375,6 +390,8 @@ namespace BuildXL.Processes
 
             m_changeAffectedInputs = changeAffectedInputs;
             m_detoursListener = detoursListener;
+            m_symlinkedAccessResolver = symlinkedAccessResolver;
+            m_staleOutputsUnderSharedOpaqueDirectories = staleOutputsUnderSharedOpaqueDirectories;
         }
 
         /// <inheritdoc />
@@ -414,11 +431,53 @@ namespace BuildXL.Processes
         }
 
         /// <summary>
-        /// <see cref="SandboxedProcess.GetActivePeakWorkingSet"/>
+        /// <see cref="SandboxedProcess.GetMemoryCountersSnapshot"/>
         /// </summary>
-        public ulong? GetActivePeakWorkingSet()
+        public ProcessMemoryCountersSnapshot? GetMemoryCountersSnapshot()
         {
-            return m_activeProcess?.GetActivePeakWorkingSet();
+            return m_activeProcess?.GetMemoryCountersSnapshot();
+        }
+
+        /// <summary>
+        /// <see cref="SandboxedProcess.TryEmptyWorkingSet"/>
+        /// </summary>
+        public EmptyWorkingSetResult TryEmptyWorkingSet(bool isSuspend)
+        {
+            var result = m_activeProcess?.TryEmptyWorkingSet(isSuspend) ?? EmptyWorkingSetResult.None;
+
+            if (result.HasFlag(EmptyWorkingSetResult.EmptyWorkingSetFailed) &&
+                result.HasFlag(EmptyWorkingSetResult.SetMaxWorkingSetFailed) &&
+                result.HasFlag(EmptyWorkingSetResult.SuspendFailed))
+            {
+                var errorCode = Marshal.GetLastWin32Error();
+                Tracing.Logger.Log.ResumeOrSuspendProcessError(
+                    m_loggingContext,
+                    m_pip.FormattedSemiStableHash,
+                    result.ToString(),
+                    errorCode);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// <see cref="SandboxedProcess.TryResumeProcess"/>
+        /// </summary>
+        public bool TryResumeProcess()
+        {
+            var result = m_activeProcess?.TryResumeProcess();
+
+            if (result == false)
+            {
+                var errorCode = Marshal.GetLastWin32Error();
+                Tracing.Logger.Log.ResumeOrSuspendProcessError(
+                    m_loggingContext,
+                    m_pip.FormattedSemiStableHash,
+                    "ResumeProcess",
+                    errorCode);
+            }
+
+            return result ?? false;
         }
 
         private static Task<Regex> GetRegexAsync(ExpandedRegexDescriptor descriptor)
@@ -680,22 +739,33 @@ namespace BuildXL.Processes
             ISandboxConnection sandboxConnection = null,
             SidebandWriter sidebandWriter = null)
         {
+            if (!s_testRetryOccurred)
+            {
+                // For the integration test, we simulate a retryable failure here via ProcessStartFailure.
+                if (m_pip.Priority == Process.IntegrationTestPriority &&
+                    m_pip.Tags.Any(a => a.ToString(m_context.StringTable) == TagFilter.TriggerWorkerProcessStartFailed))
+                {
+                    s_testRetryOccurred = true;
+                    return SandboxedProcessPipExecutionResult.FailureButRetryAble(SandboxedProcessPipExecutionStatus.ExecutionFailed,
+                        RetryInfo.RetryOnDifferentWorker(RetryReason.ProcessStartFailure));
+                }
+            }
+
             try
             {
                 var sandboxPrepTime = System.Diagnostics.Stopwatch.StartNew();
-
-                var environmentVariables = m_pipEnvironment.GetEffectiveEnvironmentVariables(m_pip, m_pipDataRenderer, m_pip.RequireGlobalDependencies ? m_sandboxConfig.GlobalUnsafePassthroughEnvironmentVariables : null);
 
                 if (!PrepareWorkingDirectory())
                 {
                     return SandboxedProcessPipExecutionResult.PreparationFailure();
                 }
 
-                PrepareEnvironmentVariables(ref environmentVariables);
+                var environmentVariables = PrepareEnvironmentVariables();
 
                 if (!PrepareTempDirectory(ref environmentVariables))
                 {
-                    return SandboxedProcessPipExecutionResult.PreparationFailure();
+                    return SandboxedProcessPipExecutionResult.FailureButRetryAble(SandboxedProcessPipExecutionStatus.PreparationFailed,
+                        RetryInfo.RetryOnDifferentWorker(RetryReason.TempDirectoryCleanupFailure));
                 }
 
                 if (!await PrepareResponseFileAsync())
@@ -719,7 +789,7 @@ namespace BuildXL.Processes
                     // on directories containing inputs, those are faked as well.
                     // The set is kept for two reasons 1) so we avoid duplicate work: as soon as a path is found to be already in this set, we can
                     // shortcut the upward traversal on a given path when doing timestamp faking setup and 2) so GetObservedFileAccesses
-                    // doesn't need to recompute this and it can distinguish between accesses that only pertain to outputs vs inptus
+                    // doesn't need to recompute this and it can distinguish between accesses that only pertain to outputs vs inputs
                     // in the scope of a shared opaque
                     HashSet<AbsolutePath> allInputPathsUnderSharedOpaques = allInputPathsUnderSharedOpaquesWrapper.Instance;
 
@@ -761,6 +831,7 @@ namespace BuildXL.Processes
                         SandboxKind = m_sandboxConfig.UnsafeSandboxConfiguration.SandboxKind,
                         AllowedSurvivingChildProcessNames = m_pip.AllowedSurvivingChildProcessNames.Select(n => n.ToString(m_pathTable.StringTable)).ToArray(),
                         NestedProcessTerminationTimeout = m_pip.NestedProcessTerminationTimeout ?? SandboxedProcessInfo.DefaultNestedProcessTerminationTimeout,
+                        DetoursFailureFile = m_detoursFailuresFile
                     };
 
                     var result = ShouldSandboxedProcessExecuteExternal
@@ -791,20 +862,22 @@ namespace BuildXL.Processes
             }
         }
 
-        private bool SandboxedProcessNeedsExecuteExternal
-            => // Execution mode is external
-               m_sandboxConfig.AdminRequiredProcessExecutionMode.ExecuteExternal()
-               // Only pip that requires admin privilege.
-               && m_pip.RequiresAdmin;
+        private bool SandboxedProcessNeedsExecuteExternal =>
+            // Execution mode is external
+            m_sandboxConfig.AdminRequiredProcessExecutionMode.ExecuteExternal()
+            // Only pip that requires admin privilege.
+            && m_pip.RequiresAdmin;
 
-        private bool ShouldSandboxedProcessExecuteExternal
-            => SandboxedProcessNeedsExecuteExternal
-               // Container is disabled.
-               && !m_containerConfiguration.IsIsolationEnabled
-               // Windows only.
-               && !OperatingSystemHelper.IsUnixOS;
+        private bool ShouldSandboxedProcessExecuteExternal =>
+            SandboxedProcessNeedsExecuteExternal
+            // Container is disabled.
+            && !m_containerConfiguration.IsIsolationEnabled;
 
-        private bool ShouldSandboxedProcessExecuteInVm => ShouldSandboxedProcessExecuteExternal && m_sandboxConfig.AdminRequiredProcessExecutionMode.ExecuteExternalVm();
+        private bool ShouldSandboxedProcessExecuteInVm =>
+            ShouldSandboxedProcessExecuteExternal
+            && m_sandboxConfig.AdminRequiredProcessExecutionMode.ExecuteExternalVm()
+            // Windows only.
+            && !OperatingSystemHelper.IsUnixOS;
 
         private async Task<SandboxedProcessPipExecutionResult> RunInternalAsync(
             SandboxedProcessInfo info,
@@ -878,7 +951,7 @@ namespace BuildXL.Processes
                                 if (!s_isIsolationSupported)
                                 {
                                     Tracing.Logger.Log.PipSpecifiedToRunInContainerButIsolationIsNotSupported(m_loggingContext, m_pip.SemiStableHash, m_pipDescription);
-                                    return SandboxedProcessPipExecutionResult.PreparationFailure(processLaunchRetryCount, (int)SharedLogEventId.PipSpecifiedToRunInContainerButIsolationIsNotSupported, maxDetoursHeapSize: maxDetoursHeapSize);
+                                    return SandboxedProcessPipExecutionResult.PreparationFailure((int)SharedLogEventId.PipSpecifiedToRunInContainerButIsolationIsNotSupported, maxDetoursHeapSize: maxDetoursHeapSize);
                                 }
 
                                 Tracing.Logger.Log.PipInContainerStarting(m_loggingContext, m_pip.SemiStableHash, m_pipDescription, m_containerConfiguration.ToDisplayString());
@@ -941,7 +1014,7 @@ namespace BuildXL.Processes
                                     ex.LogEventMessage);
                             }
 
-                            return SandboxedProcessPipExecutionResult.PreparationFailure(processLaunchRetryCount, ex.LogEventErrorCode, maxDetoursHeapSize: maxDetoursHeapSize);
+                            return SandboxedProcessPipExecutionResult.FailureButRetryAble(SandboxedProcessPipExecutionStatus.ExecutionFailed, RetryInfo.RetryOnDifferentWorker(RetryReason.ProcessStartFailure), maxDetoursHeapSize: maxDetoursHeapSize);
                         }
                     }
 
@@ -1009,7 +1082,7 @@ namespace BuildXL.Processes
                 }
                 else
                 {
-                    Contract.Assert(m_sandboxConfig.AdminRequiredProcessExecutionMode == AdminRequiredProcessExecutionMode.ExternalVM);
+                    Contract.Assert(ShouldSandboxedProcessExecuteInVm);
 
                     // Initialize VM once.
                     await m_vmInitializer.LazyInitVmAsync.Value;
@@ -1030,7 +1103,7 @@ namespace BuildXL.Processes
                     ex.LogEventErrorCode,
                     ex.LogEventMessage);
 
-                return SandboxedProcessPipExecutionResult.PreparationFailure(0, ex.LogEventErrorCode);
+                return SandboxedProcessPipExecutionResult.FailureButRetryAble(SandboxedProcessPipExecutionStatus.ExecutionFailed, RetryInfo.RetryOnDifferentWorker(RetryReason.ProcessStartFailure));
             }
 
             return await GetAndProcessResultAsync(process, allInputPathsUnderSharedOpaques, sandboxPrepTime, cancellationToken);
@@ -1048,7 +1121,7 @@ namespace BuildXL.Processes
         private void TranslateHostSharedUncDrive(SandboxedProcessInfo info)
         {
             DirectoryTranslator newTranslator = info.FileAccessManifest.DirectoryTranslator?.GetUnsealedClone() ?? new DirectoryTranslator();
-            newTranslator.AddTranslation($@"\\{VmIOConstants.Host.IpAddress}\{VmIOConstants.Host.NetUseDrive}", $@"{VmIOConstants.Host.NetUseDrive}:");
+            newTranslator.AddTranslation($@"\\{VmConstants.Host.IpAddress}\{VmConstants.Host.NetUseDrive}", $@"{VmConstants.Host.NetUseDrive}:");
             newTranslator.Seal();
             info.FileAccessManifest.DirectoryTranslator = newTranslator;
         }
@@ -1192,7 +1265,7 @@ namespace BuildXL.Processes
                 // could be a way to do it in the future. This is enforced by the process builder.
                 Contract.Assert(!directoryContext.GetSealDirectoryKind(inputDirectory).IsSourceSeal());
 
-                var directoryContent = directoryContext.ListSealDirectoryContents(inputDirectory);
+                var directoryContent = directoryContext.ListSealDirectoryContents(inputDirectory, out _);
 
                 foreach (var inputArtifact in directoryContent)
                 {
@@ -1253,7 +1326,7 @@ namespace BuildXL.Processes
                 FlagsAndAttributes.FILE_ATTRIBUTE_NORMAL,
                 manifestPath,
                 path: (path == manifestPath) ? null : path.ToString(m_pathTable),
-                enumeratePatttern: null,
+                enumeratePattern: null,
                 FileAccessStatusMethod.TrustedTool);
 
             return true;
@@ -1444,9 +1517,21 @@ namespace BuildXL.Processes
             Dictionary<string, int> pipProperties = null;
 
             bool allOutputsPresent = false;
+            bool loggingSuccess = true;
 
             ProcessTimes primaryProcessTimes = result.PrimaryProcessTimes;
             JobObject.AccountingInformation? jobAccounting = result.JobAccountingInformation;
+
+            var start = DateTime.UtcNow;
+            // If this operation fails, error was logged already
+            bool sharedOpaqueProcessingSuccess = TryGetObservedFileAccesses(
+                    result,
+                    allInputPathsUnderSharedOpaques,
+                    out var unobservedOutputs,
+                    out var sharedDynamicDirectoryWriteAccesses,
+                    out SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> observed);
+
+            LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseGettingObservedFileAccesses, DateTime.UtcNow.Subtract(start), $"(count: {observed.Length})");
 
             TimeSpan time = primaryProcessTimes.TotalWallClockTime;
             if (result.TimedOut)
@@ -1492,72 +1577,80 @@ namespace BuildXL.Processes
                     if (!canceled)
                     {
                         LogFinishedFailed(result);
-                        pipProperties = await SetPipPropertiesAsync(result);
-
-                        if (exitedButCanBeRetried)
+                        var propertiesResult = await TrySetPipPropertiesAsync(result);
+                        pipProperties = propertiesResult.PipProperties;
+                        if (!propertiesResult.Success)
                         {
-                            Tuple<AbsolutePath, Encoding> encodedStandardError = null;
-                            Tuple<AbsolutePath, Encoding> encodedStandardOutput = null;
-                            if (await TrySaveAndLogStandardOutputAsync(result))
-                            {
-                                encodedStandardOutput = GetEncodedStandardConsoleStream(result.StandardOutput);
-                            }
-
-                            if (await TrySaveAndLogStandardErrorAsync(result))
-                            {
-                                encodedStandardError = GetEncodedStandardConsoleStream(result.StandardError);
-                            }
-                            return SandboxedProcessPipExecutionResult.RetryProcessDueToUserSpecifiedExitCode(
-                                result.NumberOfProcessLaunchRetries,
-                                result.ExitCode,
-                                primaryProcessTimes,
-                                jobAccounting,
-                                result.DetouringStatuses,
-                                sandboxPrepMs,
-                                sw.ElapsedMilliseconds,
-                                result.ProcessStartTime,
-                                maxDetoursHeapSize,
-                                m_containerConfiguration,
-                                encodedStandardError,
-                                encodedStandardOutput,
-                                pipProperties);
+                            Contract.Assert(loggingContext.ErrorWasLogged, "Error should be logged upon TrySetPipPropertiesAsync failure.");
+                            // There was an error logged when extracting properties from the pip. The pip needs to fail and not retry
+                            loggingSuccess = false;
                         }
-                        else if (m_sandboxConfig.RetryOnAzureWatsonExitCode && result.Processes.Any(p => p.ExitCode == AzureWatsonExitCode))
+                        else
                         {
-                            // Retry if the exit code is 0xDEAD.
-                            var deadProcess = result.Processes.Where(p => p.ExitCode == AzureWatsonExitCode).First();
-                            Tracing.Logger.Log.PipRetryDueToExitedWithAzureWatsonExitCode(
-                                m_loggingContext,
-                                m_pip.SemiStableHash,
-                                m_pipDescription,
-                                deadProcess.Path,
-                                deadProcess.ProcessId);
+                            if (exitedButCanBeRetried)
+                            {
+                                Tuple<AbsolutePath, Encoding> encodedStandardError = null;
+                                Tuple<AbsolutePath, Encoding> encodedStandardOutput = null;
 
-                            return SandboxedProcessPipExecutionResult.RetryProcessDueToAzureWatsonExitCode(
-                                result.NumberOfProcessLaunchRetries,
-                                result.ExitCode,
-                                primaryProcessTimes,
-                                jobAccounting,
-                                result.DetouringStatuses,
-                                sandboxPrepMs,
-                                sw.ElapsedMilliseconds,
-                                result.ProcessStartTime,
-                                maxDetoursHeapSize,
-                                m_containerConfiguration,
-                                pipProperties);
+                                if (await TrySaveAndLogStandardOutputAsync(result) && await TrySaveAndLogStandardErrorAsync(result))
+                                {
+                                    encodedStandardOutput = GetEncodedStandardConsoleStream(result.StandardOutput);
+                                    encodedStandardError = GetEncodedStandardConsoleStream(result.StandardError);
+                                    return SandboxedProcessPipExecutionResult.RetryProcessDueToUserSpecifiedExitCode(
+                                        result.ExitCode,
+                                        primaryProcessTimes,
+                                        jobAccounting,
+                                        result.DetouringStatuses,
+                                        sandboxPrepMs,
+                                        sw.ElapsedMilliseconds,
+                                        result.ProcessStartTime,
+                                        maxDetoursHeapSize,
+                                        m_containerConfiguration,
+                                        encodedStandardError,
+                                        encodedStandardOutput,
+                                        pipProperties,
+                                        sharedDynamicDirectoryWriteAccesses);
+                                }
+
+                                Contract.Assert(loggingContext.ErrorWasLogged, "Error should be logged upon TrySaveAndLogStandardOutput/Error failure.");
+                                // There was an error logged when saving stdout or stderror.
+                                loggingSuccess = false;
+                            }
+                            else if (m_sandboxConfig.RetryOnAzureWatsonExitCode && result.Processes.Any(p => p.ExitCode == AzureWatsonExitCode))
+                            {
+                                // Retry if the exit code is 0xDEAD.
+                                var deadProcess = result.Processes.Where(p => p.ExitCode == AzureWatsonExitCode).First();
+                                Tracing.Logger.Log.PipRetryDueToExitedWithAzureWatsonExitCode(
+                                    m_loggingContext,
+                                    m_pip.SemiStableHash,
+                                    m_pipDescription,
+                                    deadProcess.Path,
+                                    deadProcess.ProcessId);
+
+                                return SandboxedProcessPipExecutionResult.RetryProcessDueToAzureWatsonExitCode(
+                                    result.ExitCode,
+                                    primaryProcessTimes,
+                                    jobAccounting,
+                                    result.DetouringStatuses,
+                                    sandboxPrepMs,
+                                    sw.ElapsedMilliseconds,
+                                    result.ProcessStartTime,
+                                    maxDetoursHeapSize,
+                                    m_containerConfiguration,
+                                    pipProperties);
+                            }
                         }
                     }
                 }
             }
 
             int numSurvivingChildErrors = 0;
-            if (result.SurvivingChildProcesses != null &&
-                result.SurvivingChildProcesses.Any())
+            if (!canceled && result.SurvivingChildProcesses?.Any() == true)
             {
                 numSurvivingChildErrors = ReportSurvivingChildProcesses(result);
             }
 
-            var start = DateTime.UtcNow;
+            start = DateTime.UtcNow;
 
             var fileAccessReportingContext = new FileAccessReportingContext(
                 loggingContext,
@@ -1565,7 +1658,7 @@ namespace BuildXL.Processes
                 m_sandboxConfig,
                 m_pip,
                 m_validateDistribution,
-                m_fileAccessWhitelist);
+                m_fileAccessAllowlist);
 
             // Note that when MonitorFileAccesses == false, we should not assume the various reported-access sets are non-null.
             if (m_sandboxConfig.UnsafeSandboxConfiguration.MonitorFileAccesses)
@@ -1604,16 +1697,28 @@ namespace BuildXL.Processes
                     numSurvivingChildErrors);
             }
 
-            // This is the overall success of the process. At a high level, there are 4 things that can cause a process pip to fail:
+            bool failedDueToWritingToStdErr = m_pip.WritingToStandardErrorFailsExecution && result.StandardError.HasLength;
+            if (failedDueToWritingToStdErr)
+            {
+                Tracing.Logger.Log.PipProcessWroteToStandardErrorOnCleanExit(
+                    m_loggingContext,
+                    pipSemiStableHash: m_pip.SemiStableHash,
+                    pipDescription: m_pipDescription,
+                    pipSpecPath: m_pip.Provenance.Token.Path.ToString(m_context.PathTable),
+                    pipWorkingDirectory: m_pip.WorkingDirectory.ToString(m_context.PathTable));
+            }
+
+            // This is the overall success of the process. At a high level, these are the things that can cause a process pip to fail:
             //      1. The process being killed (built into mainProcessExitedCleanly)
             //      2. The process not exiting with the appropriate exit code (mainProcessExitedCleanly)
             //      3. The process not creating all outputs (allOutputsPresent)
             //      4. The process running in a container, and even though succeeding, its outputs couldn't be moved to their expected locations
-            bool mainProcessSuccess = mainProcessExitedCleanly && allOutputsPresent;
+            //      5. The process wrote to standard error, and even though it may have exited with a succesfull exit code, WritingToStandardErrorFailsPip 
+            //         is set (failedDueToWritingToStdErr)
+            bool mainProcessSuccess = mainProcessExitedCleanly && allOutputsPresent && !failedDueToWritingToStdErr;
 
             bool standardOutHasBeenWrittenToLog = false;
             bool errorOrWarnings = !mainProcessSuccess || m_numWarnings > 0;
-            bool loggingSuccess = true;
 
             bool shouldPersistStandardOutput = errorOrWarnings || m_pip.StandardOutput.IsValid;
             if (shouldPersistStandardOutput)
@@ -1636,15 +1741,6 @@ namespace BuildXL.Processes
             LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseProcessingStandardOutputs, DateTime.UtcNow.Subtract(start));
 
             start = DateTime.UtcNow;
-            SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> observed =
-                GetObservedFileAccesses(
-                    result,
-                    allInputPathsUnderSharedOpaques,
-                    out var unobservedOutputs,
-                    out var sharedDynamicDirectoryWriteAccesses);
-            LogSubPhaseDuration(m_loggingContext, m_pip, SandboxedProcessCounters.SandboxedPipExecutorPhaseGettingObservedFileAccesses, DateTime.UtcNow.Subtract(start), $"(count: {observed.Length})");
-
-            start = DateTime.UtcNow;
 
             // After standard output and error may been saved, and shared dynamic write accesses were identified, we can merge
             // outputs back to their original locations
@@ -1656,12 +1752,14 @@ namespace BuildXL.Processes
             }
 
             bool errorWasTruncated = false;
-            // if some outputs are missing, we are logging this process as a failed one (even if it finished with a success exit code).
-            if ((!mainProcessExitedCleanly || !allOutputsPresent) && !canceled && loggingSuccess)
+            // if some outputs are missing or the process wrote to stderr, we are logging this process as a failed one (even if it finished with a success exit code).
+            if ((!mainProcessExitedCleanly || !allOutputsPresent || failedDueToWritingToStdErr) && !canceled && loggingSuccess)
             {
                 standardOutHasBeenWrittenToLog = true;
 
-                LogErrorResult logErrorResult = await TryLogErrorAsync(result, exitedWithSuccessExitCode);
+                // We only checked if all outputs are present if exitedSuccessfullyAndGracefully is true. So if exitedSuccessfullyAndGracefully is false,
+                // we don't log anything at this respect.
+                LogErrorResult logErrorResult = await TryLogErrorAsync(result, (!exitedSuccessfullyAndGracefully || allOutputsPresent), failedDueToWritingToStdErr);
                 errorWasTruncated = logErrorResult.ErrorWasTruncated;
                 loggingSuccess = logErrorResult.Success;
             }
@@ -1748,6 +1846,7 @@ namespace BuildXL.Processes
             }
 
             SandboxedProcessPipExecutionStatus status = SandboxedProcessPipExecutionStatus.ExecutionFailed;
+            RetryInfo retryInfo = null;
             if (result.HasDetoursInjectionFailures)
             {
                 status = SandboxedProcessPipExecutionStatus.PreparationFailed;
@@ -1755,6 +1854,10 @@ namespace BuildXL.Processes
             else if (canceled)
             {
                 status = SandboxedProcessPipExecutionStatus.Canceled;
+            }
+            else if (!sharedOpaqueProcessingSuccess)
+            {
+                status = SandboxedProcessPipExecutionStatus.SharedOpaquePostProcessingFailed;
             }
             else if (mainProcessSuccess && loggingSuccess && !hasMessageParsingError)
             {
@@ -1783,7 +1886,8 @@ namespace BuildXL.Processes
                           m_pipDescription,
                           "'" + expandedOutputPath + "'. " + (isFile ? "Found path is a file" : "Found path is a directory"));
 
-                        status = SandboxedProcessPipExecutionStatus.OutputWithNoFileAccessFailed;
+                        status = SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed;
+                        retryInfo = RetryInfo.RetryOnSameWorker(RetryReason.OutputWithNoFileAccessFailed);
                     }
                 }
             }
@@ -1801,7 +1905,6 @@ namespace BuildXL.Processes
                 numberOfWarnings: m_numWarnings,
                 primaryProcessTimes: primaryProcessTimes,
                 jobAccountingInformation: jobAccounting,
-                numberOfProcessLaunchRetries: result.NumberOfProcessLaunchRetries,
                 exitCode: result.ExitCode,
                 sandboxPrepMs: sandboxPrepMs,
                 processSandboxedProcessResultMs: sw.ElapsedMilliseconds,
@@ -1810,24 +1913,34 @@ namespace BuildXL.Processes
                 detouringStatuses: result.DetouringStatuses,
                 maxDetoursHeapSize: maxDetoursHeapSize,
                 containerConfiguration: m_containerConfiguration,
-                pipProperties: pipProperties);
+                pipProperties: pipProperties,
+                timedOut: result.TimedOut,
+                retryInfo: retryInfo);
         }
 
-        private async Task<Dictionary<string, int>> SetPipPropertiesAsync(SandboxedProcessResult result)
+        private async Task<(bool Success, Dictionary<string, int> PipProperties)> TrySetPipPropertiesAsync(SandboxedProcessResult result)
         {
             OutputFilter propertyFilter = OutputFilter.GetPipPropertiesFilter(m_pip.EnableMultiLineErrorScanning);
 
-            string errorMatches = (await TryFilterAsync(result.StandardError, propertyFilter, appendNewLine: true)).FilteredOutput;
-            string outputMatches = (await TryFilterAsync(result.StandardOutput, propertyFilter, appendNewLine: true)).FilteredOutput;
+            var filteredErr = await TryFilterAsync(result.StandardError, propertyFilter, appendNewLine: true);
+            var filteredOut = await TryFilterAsync(result.StandardOutput, propertyFilter, appendNewLine: true);
+            if (filteredErr.HasError || filteredOut.HasError)
+            {
+                // We have logged an error when processing the standard error or standard output stream. 
+                return (Success: false, PipProperties: null);
+            }
+
+            string errorMatches = filteredErr.FilteredOutput;
+            string outputMatches = filteredOut.FilteredOutput;
             string allMatches = errorMatches + Environment.NewLine + outputMatches;
 
             if (!string.IsNullOrWhiteSpace(allMatches))
             {
                 string[] matchedProperties = allMatches.Split(new[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries);
-                return matchedProperties.ToDictionary(val => val, val => 1);
+                return (Success: true, PipProperties: matchedProperties.ToDictionary(val => val, val => 1));
             }
 
-            return null;
+            return (Success: true, PipProperties: null);
         }
 
         private Tuple<AbsolutePath, Encoding> GetEncodedStandardConsoleStream(SandboxedProcessOutput output)
@@ -1983,24 +2096,21 @@ namespace BuildXL.Processes
                     Analysis.IgnoreResult(FileUtilities.TryDeleteFile(m_detoursFailuresFile, tempDirectoryCleaner: m_tempDirectoryCleaner));
                 }
 
-                if (!string.IsNullOrEmpty(m_detoursFailuresFile))
+                if (allowInternalErrorsLogging)
                 {
-                    if (allowInternalErrorsLogging)
-                    {
-                        m_fileAccessManifest.InternalDetoursErrorNotificationFile = m_detoursFailuresFile;
-                    }
+                    m_fileAccessManifest.InternalDetoursErrorNotificationFile = m_detoursFailuresFile;
+                }
 
-                    // TODO: named semaphores are not supported in NetStandard2.0
-                    if ((!m_pip.RequiresAdmin || m_sandboxConfig.AdminRequiredProcessExecutionMode == AdminRequiredProcessExecutionMode.Internal)
-                        && checkMessageCount
-                        && !OperatingSystemHelper.IsUnixOS)
+                // TODO: named semaphores are not supported in NetStandard2.0
+                if ((!m_pip.RequiresAdmin || m_sandboxConfig.AdminRequiredProcessExecutionMode == AdminRequiredProcessExecutionMode.Internal)
+                    && checkMessageCount
+                    && !OperatingSystemHelper.IsUnixOS)
+                {
+                    // Semaphore names don't allow '\\' chars.
+                    if (!m_fileAccessManifest.SetMessageCountSemaphore(m_detoursFailuresFile.Replace('\\', '_')))
                     {
-                        // Semaphore names don't allow '\\' chars.
-                        if (!m_fileAccessManifest.SetMessageCountSemaphore(m_detoursFailuresFile.Replace('\\', '_')))
-                        {
-                            Tracing.Logger.Log.LogMessageCountSemaphoreExists(m_loggingContext, m_pip.SemiStableHash, m_pipDescription);
-                            return false;
-                        }
+                        Tracing.Logger.Log.LogMessageCountSemaphoreExists(m_loggingContext, m_pip.SemiStableHash, m_pipDescription);
+                        return false;
                     }
                 }
             }
@@ -2086,28 +2196,41 @@ namespace BuildXL.Processes
                     ? AbsolutePath.Create(m_pathTable, s_possibleRedirectedUserProfilePath)
                     : AbsolutePath.Invalid;
 
+                var vmAdminProfilePath = ShouldSandboxedProcessExecuteInVm
+                    ? AbsolutePath.Create(m_pathTable, VmConstants.UserProfile.Path)
+                    : AbsolutePath.Invalid;
+
                 foreach (AbsolutePath path in pip.UntrackedPaths)
                 {
                     // We mask Report to simplify handling of explicitly-reported directory-dependency or transitive-dependency accesses
                     // (they should never fail for untracked accesses, which should be invisible).
 
                     // We allow the real input timestamp to be seen for untracked paths. This is to preserve existing behavior, where the timestamp of untracked stuff is never modified.
-                    AddUntrackedPathToManifest(path);
-                    AllowCreateDirectoryForDirectoriesOnPath(path, processedPaths);
+                    addUntrackedPath(path, processedPaths);
 
                     var correspondingPath = CreatePathForActualRedirectedUserProfilePair(path, userProfilePath, redirectedUserProfilePath);
-                    if (correspondingPath.IsValid)
+                    addUntrackedPath(correspondingPath, processedPaths);
+
+                    if (ShouldSandboxedProcessExecuteInVm)
                     {
-                        AddUntrackedPathToManifest(correspondingPath);
-                        AllowCreateDirectoryForDirectoriesOnPath(correspondingPath, processedPaths);
+                        var vmPath = CreatePathForVmAdminUserProfile(vmAdminProfilePath, path, userProfilePath, redirectedUserProfilePath);
+                        addUntrackedPath(vmPath, processedPaths);
                     }
 
                     // Untrack real logs directory if the redirected one is untracked.
                     if (m_loggingConfiguration != null && m_loggingConfiguration.RedirectedLogsDirectory.IsValid && m_loggingConfiguration.RedirectedLogsDirectory == path)
                     {
-                        AddUntrackedPathToManifest(m_loggingConfiguration.LogsDirectory);
-                        AllowCreateDirectoryForDirectoriesOnPath(m_loggingConfiguration.LogsDirectory, processedPaths);
+                        addUntrackedPath(m_loggingConfiguration.LogsDirectory, processedPaths);
                     }
+                }
+
+                if (ShouldSandboxedProcessExecuteInVm)
+                {
+                    // User profiles are tricky on the Admin VM since it's potentially running some of the first processes launched
+                    // on a newly provisioned VM. When this happens various directories that would usually already be existing may be created.
+                    // We assign a generous access policy for CreateDirectory access under the user profile to handle this.
+                    m_fileAccessManifest.AddScope(userProfilePath, values: FileAccessPolicy.AllowCreateDirectory, mask: FileAccessPolicy.AllowAll);
+                    m_fileAccessManifest.AddScope(redirectedUserProfilePath, values: FileAccessPolicy.AllowCreateDirectory, mask: FileAccessPolicy.AllowAll);
                 }
 
                 foreach (AbsolutePath path in pip.UntrackedScopes)
@@ -2118,21 +2241,21 @@ namespace BuildXL.Processes
 
                     // The default mask for untracked scopes is to not report anything.
                     // We block input timestamp faking for untracked scopes. This is to preserve existing behavior, where the timestamp of untracked stuff is never modified.
-                    AddUntrackedScopeToManifest(path);
-                    AllowCreateDirectoryForDirectoriesOnPath(path, processedPaths);
+                    addUntrackedScope(path, processedPaths);
 
                     var correspondingPath = CreatePathForActualRedirectedUserProfilePair(path, userProfilePath, redirectedUserProfilePath);
-                    if (correspondingPath.IsValid)
+                    addUntrackedScope(correspondingPath, processedPaths);
+
+                    if (ShouldSandboxedProcessExecuteInVm)
                     {
-                        AddUntrackedScopeToManifest(correspondingPath);
-                        AllowCreateDirectoryForDirectoriesOnPath(correspondingPath, processedPaths);
+                        var vmPath = CreatePathForVmAdminUserProfile(vmAdminProfilePath, path, userProfilePath, redirectedUserProfilePath);
+                        addUntrackedScope(vmPath, processedPaths);
                     }
 
                     // Untrack real logs directory if the redirected one is untracked.
                     if (m_loggingConfiguration != null && m_loggingConfiguration.RedirectedLogsDirectory.IsValid && m_loggingConfiguration.RedirectedLogsDirectory == path)
                     {
-                        AddUntrackedScopeToManifest(m_loggingConfiguration.LogsDirectory);
-                        AllowCreateDirectoryForDirectoriesOnPath(m_loggingConfiguration.LogsDirectory, processedPaths);
+                        addUntrackedScope(m_loggingConfiguration.LogsDirectory, processedPaths);
                     }
                 }
 
@@ -2148,7 +2271,7 @@ namespace BuildXL.Processes
                             FileAccessPolicy.AllowAll | // Symlink creation is allowed under opaques.
                             FileAccessPolicy.AllowRealInputTimestamps |
                             // For shared opaques, we need to know the (write) accesses that occurred, since we determine file ownership based on that.
-                            (directory.IsSharedOpaque? FileAccessPolicy.ReportAccess : FileAccessPolicy.Deny) |
+                            (directory.IsSharedOpaque ? FileAccessPolicy.ReportAccess : FileAccessPolicy.Deny) |
                             // For shared opaques and if allowed undeclared source reads is enabled, make sure that any file used as an undeclared input under the
                             // shared opaque gets deny write access. Observe that with exclusive opaques they are wiped out before the pip runs, so it is moot to check for inputs
                             // TODO: considering configuring this policy for all shared opaques, and not only when AllowedUndeclaredSourceReads is set. The case of a write on an undeclared
@@ -2187,11 +2310,13 @@ namespace BuildXL.Processes
                             // Allow read accesses and reporting. Reporting is needed since these may be dynamic accesses and we need to cross check them
                             var values = FileAccessPolicy.AllowReadIfNonexistent | FileAccessPolicy.AllowRead | FileAccessPolicy.ReportAccess;
 
-                            // In the case of a partial sealed directory under a shared opaque, we don't want to block writes
+                            // In the case of a writable sealed directory under a produced shared opaque, we don't want to block writes
                             // for the entire cone: some files may be dynamically written in the context of the shared opaque that may fall
-                            // under the cone of the partial sealed directory. So for partial sealed directories under a shared opaque we
-                            // don't establish any specific policies
-                            if (m_directoryArtifactContext.GetSealDirectoryKind(directory) != SealDirectoryKind.Partial || !IsPathUnderASharedOpaqueRoot(directory.Path))
+                            // under the cone of the sealed directory. So for partial sealed directories and shared opaque directories that
+                            // are under a produced shared opaque we don't establish any specific policies.
+                            var kind = m_directoryArtifactContext.GetSealDirectoryKind(directory);
+                            if (!(IsPathUnderASharedOpaqueRoot(directory.Path)
+                                && (kind == SealDirectoryKind.Partial || kind == SealDirectoryKind.SharedOpaque)))
                             {
                                 // TODO: Consider an UntrackedScope or UntrackedPath above that has exactly the same path.
                                 //       That results in a manifest entry with AllowWrite masked out yet re-added via AllowWrite in the values.
@@ -2205,6 +2330,11 @@ namespace BuildXL.Processes
                     }
                 }
 
+                if (OperatingSystemHelper.IsUnixOS)
+                {
+                    AddUnixSpecificSandboxedProcessFileAccessPolicies();
+                }
+
                 m_fileAccessManifest.MonitorChildProcesses = !pip.HasUntrackedChildProcesses;
 
                 if (!string.IsNullOrEmpty(m_detoursFailuresFile))
@@ -2216,6 +2346,52 @@ namespace BuildXL.Processes
                 {
                     LogFileAccessTables(pip);
                 }
+            }
+
+            void addUntrackedPath(AbsolutePath untrackedPath, HashSet<AbsolutePath> processedPaths)
+            {
+                if (untrackedPath.IsValid)
+                {
+                    AddUntrackedPathToManifest(untrackedPath);
+                    AllowCreateDirectoryForDirectoriesOnPath(untrackedPath, processedPaths);
+                }
+            }
+
+            void addUntrackedScope(AbsolutePath untrackedScope, HashSet<AbsolutePath> processedPaths)
+            {
+                if (untrackedScope.IsValid)
+                {
+                    AddUntrackedScopeToManifest(untrackedScope);
+                    AllowCreateDirectoryForDirectoriesOnPath(untrackedScope, processedPaths);
+                }
+            }
+        }
+
+        private void AddUnixSpecificSandboxedProcessFileAccessPolicies()
+        {
+            Contract.Requires(OperatingSystemHelper.IsUnixOS);
+
+            if (ShouldSandboxedProcessExecuteExternal)
+            {
+                // When executing the pip using external tool, the file access manifest tree is sealed by
+                // serializing it as bytes. Thus, after the external tool deserializes the manifest tree,
+                // the manifest cannot be modified further.
+
+                // CODESYNC: SandboxedProcessUnix.cs
+                // The sandboxed process for unix modifies the manifest tree. We do the same modification here.
+                m_fileAccessManifest.AddPath(
+                    AbsolutePath.Create(m_pathTable, SandboxedProcessUnix.ShellExecutable),
+                    mask: FileAccessPolicy.MaskNothing,
+                    values: FileAccessPolicy.AllowReadAlways);
+
+                AbsolutePath stdInFile = AbsolutePath.Create(
+                    m_pathTable,
+                    SandboxedProcessUnix.GetStdInFilePath(m_pip.WorkingDirectory.ToString(m_pathTable), m_pip.SemiStableHash));
+                
+                m_fileAccessManifest.AddPath(
+                   stdInFile,
+                   mask: FileAccessPolicy.MaskNothing,
+                   values: FileAccessPolicy.AllowAll);
             }
         }
 
@@ -2245,13 +2421,42 @@ namespace BuildXL.Processes
             return AbsolutePath.Invalid;
         }
 
+        private AbsolutePath CreatePathForVmAdminUserProfile(
+            AbsolutePath vmAdminProfilePath,
+            AbsolutePath path,
+            AbsolutePath realUserProfilePath,
+            AbsolutePath redirectedUserProfilePath)
+        {
+            if (!vmAdminProfilePath.IsValid)
+            {
+                return AbsolutePath.Invalid;
+            }
+
+            if (realUserProfilePath.IsValid && path.IsWithin(m_pathTable, realUserProfilePath))
+            {
+                return path.Relocate(m_pathTable, realUserProfilePath, vmAdminProfilePath);
+            }
+
+            if (redirectedUserProfilePath.IsValid && path.IsWithin(m_pathTable, redirectedUserProfilePath))
+            {
+                return path.Relocate(m_pathTable, redirectedUserProfilePath, vmAdminProfilePath);
+            }
+
+            return AbsolutePath.Invalid;
+        }
+
         private void AddSharedOpaqueInputContentToManifest(DirectoryArtifact directory, HashSet<AbsolutePath> allInputPathsUnderSharedOpaques)
         {
-            var content = m_directoryArtifactContext.ListSealDirectoryContents(directory);
+            var content = m_directoryArtifactContext.ListSealDirectoryContents(directory, out var temporaryFiles);
 
             foreach (var fileArtifact in content)
             {
-                AddDynamicInputFileAndAncestorsToManifest(fileArtifact, allInputPathsUnderSharedOpaques, directory.Path);
+                // A shared opaque might contain files that are marked as 'absent'. Essentially these are "temp" files produced by a pip in the cone
+                // of that shared opaque. We do not add these paths to the manifest, so detours would not block write accesses.
+                if (!temporaryFiles.Contains(fileArtifact.Path))
+                {
+                    AddDynamicInputFileAndAncestorsToManifest(fileArtifact, allInputPathsUnderSharedOpaques, directory.Path);
+                }
             }
         }
 
@@ -2267,7 +2472,9 @@ namespace BuildXL.Processes
                 // to it. Explicitly block this (no need to check if this is under a shared opaque, since otherwise
                 // it didn't have write access to begin with). Observe we already know this is not a rewrite since dynamic rewrites
                 // are not allowed by construction under shared opaques.
-                mask: DefaultMask & ~FileAccessPolicy.AllowWrite);
+                // Observe that if double writes are allowed, then we can't just block writes: we need to allow them to happen and then
+                // observe the result to figure out if they conform to the double write policy
+                mask: DefaultMask & (m_pip.DoubleWritePolicy.ImpliesDoubleWriteAllowed()? FileAccessPolicy.MaskNothing : ~FileAccessPolicy.AllowWrite));
 
             allInputPathsUnderSharedOpaques.Add(path);
 
@@ -2406,12 +2613,52 @@ namespace BuildXL.Processes
             return true;
         }
 
-        private void PrepareEnvironmentVariables(ref IBuildParameters environmentVariables)
+        private IBuildParameters PrepareEnvironmentVariables()
         {
+            var environmentVariables = m_pipEnvironment.GetEffectiveEnvironmentVariables(
+                m_pip,
+                m_pipDataRenderer,
+                m_pip.RequireGlobalDependencies ? m_sandboxConfig.GlobalUnsafePassthroughEnvironmentVariables : null);
+
             if (ShouldSandboxedProcessExecuteInVm)
             {
-                environmentVariables = environmentVariables.Override(new[] { new KeyValuePair<string, string>(VmSpecialEnvironmentVariables.IsInVm, "1")});
+                var vmSpecificEnvironmentVariables = new[]
+                {
+                    new KeyValuePair<string, string>(VmSpecialEnvironmentVariables.IsInVm, "1"),
+                    new KeyValuePair<string, string>(
+                        VmSpecialEnvironmentVariables.HostHasRedirectedUserProfile,
+                        m_layoutConfiguration != null && m_layoutConfiguration.RedirectedUserProfileJunctionRoot.IsValid ? "1" : "0"),
+                    new KeyValuePair<string, string>(
+                        VmSpecialEnvironmentVariables.HostUserProfile,
+                        m_layoutConfiguration != null && m_layoutConfiguration.RedirectedUserProfileJunctionRoot.IsValid
+                            ? s_possibleRedirectedUserProfilePath
+                            : s_userProfilePath)
+                };
+
+                // Because the pip is going to be run under a different user (i.e., Admin) in VM, all passthrough environment
+                // variables that are related to user profile, like %UserProfile%, %UserName%, %AppData%, %LocalAppData%, etc, need
+                // to be overriden with C:\User\Administrator. The original value of user-profile %ENVVAR%, if any, will be preserved
+                // in %[BUILDXL]VM_HOST_<ENVVAR>%
+                //
+                // We cannot delay the values for all passthrough environment variables until the pip is "sent" to the VM because the pip
+                // may need the environment variables and only the host has the values for them. For example, some pips need
+                // %__CLOUDBUILD_AUTH_HELPER_ROOT__% that only exists in the host.
+                var vmPassThroughEnvironmentVariables = m_pip.EnvironmentVariables
+                    .Where(e => e.IsPassThrough && VmConstants.UserProfile.Environments.ContainsKey(m_pipDataRenderer.Render(e.Name)))
+                    .SelectMany(e =>
+                    {
+                        string name = m_pipDataRenderer.Render(e.Name);
+                        return new[]
+                        {
+                                new KeyValuePair<string, string>(name, VmConstants.UserProfile.Environments[name].value),
+                                new KeyValuePair<string, string>(VmSpecialEnvironmentVariables.HostEnvVarPrefix + name, environmentVariables[name])
+                            };
+                    });
+
+                environmentVariables = environmentVariables.Override(vmSpecificEnvironmentVariables.Concat(vmPassThroughEnvironmentVariables));
             }
+
+            return environmentVariables;
         }
 
         /// <summary>
@@ -2457,7 +2704,7 @@ namespace BuildXL.Processes
                 }
                 catch (BuildXLException ex)
                 {
-                    Tracing.Logger.Log.PipTempDirectorySetupError(
+                    Tracing.Logger.Log.PipTempDirectorySetupFailure(
                         m_loggingContext,
                         m_pip.SemiStableHash,
                         m_pipDescription,
@@ -2481,7 +2728,11 @@ namespace BuildXL.Processes
                     string redirectedTempDirectoryPath = redirectedTempDirectory.ToString(m_pathTable);
                     var overridenEnvVars = DisallowedTempVariables
                         .Select(v => new KeyValuePair<string, string>(v, redirectedTempDirectoryPath))
-                        .Append(new KeyValuePair<string, string>(VmSpecialEnvironmentVariables.VmTemp, redirectedTempDirectoryPath));
+                        .Concat(new[]
+                        {
+                            new KeyValuePair<string, string>(VmSpecialEnvironmentVariables.VmTemp, redirectedTempDirectoryPath),
+                            new KeyValuePair<string, string>(VmSpecialEnvironmentVariables.VmOriginalTemp, m_pip.TempDirectory.ToString(m_pathTable)),
+                        });
 
                     environmentVariables = environmentVariables.Override(overridenEnvVars);
                 }
@@ -2509,7 +2760,7 @@ namespace BuildXL.Processes
             }
             catch (BuildXLException ex)
             {
-                Tracing.Logger.Log.PipTempDirectoryCleanupError(
+                Tracing.Logger.Log.PipTempDirectoryCleanupFailure(
                     m_loggingContext,
                     m_pip.SemiStableHash,
                     m_pipDescription,
@@ -2544,7 +2795,7 @@ namespace BuildXL.Processes
             }
             catch (BuildXLException ex)
             {
-                Tracing.Logger.Log.PipTempDirectorySetupError(
+                Tracing.Logger.Log.PipTempDirectorySetupFailure(
                     m_loggingContext,
                     m_pip.SemiStableHash,
                     m_pipDescription,
@@ -2558,7 +2809,7 @@ namespace BuildXL.Processes
             // guaranteed to exist when running locally on desktop.
             string redirectedTempRoot = m_sandboxConfig.RedirectedTempFolderRootForVmExecution.IsValid
                 ? m_sandboxConfig.RedirectedTempFolderRootForVmExecution.ToString(m_pathTable)
-                : VmIOConstants.Temp.Root;
+                : VmConstants.Temp.Root;
 
             // Create a target temp folder in VM, e.g., T:\BxlTemp\D__\Bxl\Out\Object\Pip123\Temp\t_0.
             // Note that this folder may not exist yet in VM. The sandboxed process executor that runs in the VM is responsible for
@@ -2625,17 +2876,17 @@ namespace BuildXL.Processes
         /// </summary>
         private async Task<bool> PrepareOutputsAsync()
         {
-            using (var preserveOutputWhitelistWrapper = Pools.GetAbsolutePathSet())
+            using (var preserveOutputAllowlistWrapper = Pools.GetAbsolutePathSet())
             using (var dependenciesWrapper = Pools.GetAbsolutePathSet())
             using (var outputDirectoriesWrapper = Pools.GetAbsolutePathSet())
             {
-                var preserveOutputWhitelist = preserveOutputWhitelistWrapper.Instance;
-                foreach (AbsolutePath path in m_pip.PreserveOutputWhitelist)
+                var preserveOutputAllowlist = preserveOutputAllowlistWrapper.Instance;
+                foreach (AbsolutePath path in m_pip.PreserveOutputAllowlist)
                 {
-                    preserveOutputWhitelist.Add(path);
+                    preserveOutputAllowlist.Add(path);
                 }
 
-                if (!await PrepareDirectoryOutputsAsync(preserveOutputWhitelist))
+                if (!await PrepareDirectoryOutputsAsync(preserveOutputAllowlist))
                 {
                     return false;
                 }
@@ -2666,7 +2917,7 @@ namespace BuildXL.Processes
                     {
                         if (!dependencies.Contains(output.Path))
                         {
-                            if (ShouldPreserveDeclaredOutput(output.Path, preserveOutputWhitelist))
+                            if (ShouldPreserveDeclaredOutput(output.Path, preserveOutputAllowlist))
                             {
                                 Contract.Assume(m_makeOutputPrivate != null);
                                 // A process may be configured to allow its prior outputs to be seen by future
@@ -2797,7 +3048,7 @@ namespace BuildXL.Processes
             return true;
         }
 
-        private async Task<bool> PrepareDirectoryOutputsAsync(HashSet<AbsolutePath> preserveOutputWhitelist)
+        private async Task<bool> PrepareDirectoryOutputsAsync(HashSet<AbsolutePath> preserveOutputAllowlist)
         {
             foreach (var directoryOutput in m_pip.DirectoryOutputs)
             {
@@ -2813,10 +3064,19 @@ namespace BuildXL.Processes
                         {
                             FileUtilities.CreateDirectory(directoryPathStr);
                         }
+                        // if the directory is present, check whether there are any known stale outputs
+                        else if (m_staleOutputsUnderSharedOpaqueDirectories != null
+                            && m_staleOutputsUnderSharedOpaqueDirectories.TryGetValue(directoryOutput.Path, out var staleOutputs))
+                        {
+                            foreach (var output in staleOutputs)
+                            {
+                                PreparePathForOutputFile(output.Path);
+                            }
+                        }
                     }
                     else
                     {
-                        if (dirExist && ShouldPreserveDeclaredOutput(directoryOutput.Path, preserveOutputWhitelist))
+                        if (dirExist && ShouldPreserveDeclaredOutput(directoryOutput.Path, preserveOutputAllowlist))
                         {
                             using (var wrapper = Pools.GetStringList())
                             {
@@ -3126,8 +3386,8 @@ namespace BuildXL.Processes
         /// <returns>True is the file should be excluded, otherwise false.</returns>
         /// <remarks>
         /// Some perform file accesses, which don't yet fall into any configurable file access manifest category.
-        /// These special tools/cases should be whitelisted, but we already have customers deployed specs without
-        /// using white lists.
+        /// These special tools/cases should be allowlisted, but we already have customers deployed specs without
+        /// using allowlists.
         /// </remarks>
         private bool GetSpecialCaseRulesForSpecialTools(AbsolutePath processPath, AbsolutePath fileAccessPath)
         {
@@ -3244,21 +3504,26 @@ namespace BuildXL.Processes
         /// Additionally, it returns the write accesses that were observed in shared dynamic
         /// directories, which are used later to determine pip ownership.
         /// </remarks>
-        private SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> GetObservedFileAccesses(
+        /// <returns>Whether the operation succeeded. This operation may fail only in regards to shared dynamic write access processing.</returns>
+        private bool TryGetObservedFileAccesses(
             SandboxedProcessResult result,
             HashSet<AbsolutePath> allInputPathsUnderSharedOpaques,
             out List<AbsolutePath> unobservedOutputs,
-            out IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>> sharedDynamicDirectoryWriteAccesses)
+            out IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> sharedDynamicDirectoryWriteAccesses,
+            out SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> observedAccesses)
         {
             unobservedOutputs = null;
             if (result.ExplicitlyReportedFileAccesses == null || result.ExplicitlyReportedFileAccesses.Count == 0)
             {
                 unobservedOutputs = m_pip.FileOutputs.Where(f => RequireOutputObservation(f)).Select(f => f.Path).ToList();
-                sharedDynamicDirectoryWriteAccesses = CollectionUtilities.EmptyDictionary<AbsolutePath, IReadOnlyCollection<AbsolutePath>>();
-                return SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>.FromSortedArrayUnsafe(
+                sharedDynamicDirectoryWriteAccesses = CollectionUtilities.EmptyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>>();
+                observedAccesses = SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>.FromSortedArrayUnsafe(
                         ReadOnlyArray<ObservedFileAccess>.Empty,
                         new ObservedFileAccessExpandedPathComparer(m_context.PathTable.ExpandedPathComparer));
+                return true;
             }
+
+            bool sharedOutputDirectoriesAreRedirected = m_pip.NeedsToRunInContainer && m_pip.ContainerIsolationLevel.IsolateSharedOpaqueOutputDirectories();
 
             // Note that we are enumerating an unordered set to produce the array of observed paths.
             // As noted in SandboxedProcessPipExecutionResult, the caller must assume no particular order.
@@ -3296,19 +3561,47 @@ namespace BuildXL.Processes
                         continue;
                     }
 
+                    // Let's resolve all intermediate symlink dirs if configured.
+                    // TODO: this logic will be eventually replaced by doing the right thing on detours side.
+                    // This option is Windows-specific
+                    ReportedFileAccess finalReported;
+                    if (m_sandboxConfig.UnsafeSandboxConfiguration.ProcessSymlinkedAccesses())
+                    {
+                        Contract.Assume(m_symlinkedAccessResolver != null);
+                        if (m_symlinkedAccessResolver.ResolveDirectorySymlinks(reported, parsedPath, out finalReported, out var finalPath))
+                        {
+                            // If the final path falls under a configured policy that ignores accesses, then we also ignore it
+                            var success = m_fileAccessManifest.TryFindManifestPathFor(finalPath, out _, out var nodePolicy);
+                            if (success & (nodePolicy & FileAccessPolicy.ReportAccess) == 0)
+                            {
+                                continue;
+                            }
+
+                            // Let's generate read accesses for the intermediate dir symlinks on the original path, so we avoid
+                            // underbuilds if those change
+                            m_symlinkedAccessResolver.AddReadsForIntermediateSymlinks(m_fileAccessManifest, reported, parsedPath, accessesByPath);
+
+                            parsedPath = finalPath;
+                        }
+                    }
+                    else
+                    {
+                        finalReported = reported;
+                    }
+
                     bool shouldExclude = false;
 
                     // Remove special accesses see Bug: #121875.
                     // Some perform file accesses, which don't yet fall into any configurable file access manifest category.
-                    // These special tools/cases should be whitelisted, but we already have customers deployed specs without
-                    // using white lists.
+                    // These special tools/cases should be allowlisted, but we already have customers deployed specs without
+                    // using allowlists.
                     if (GetSpecialCaseRulesForCoverageAndSpecialDevices(parsedPath))
                     {
                         shouldExclude = true;
                     }
                     else
                     {
-                        if (AbsolutePath.TryCreate(m_context.PathTable, reported.Process.Path, out AbsolutePath processPath)
+                        if (AbsolutePath.TryCreate(m_context.PathTable, finalReported.Process.Path, out AbsolutePath processPath)
                             && (excludedToolsAndPaths.Contains((processPath, parsedPath))
                                 || GetSpecialCaseRulesForSpecialTools(processPath, parsedPath)))
                         {
@@ -3320,7 +3613,7 @@ namespace BuildXL.Processes
                     accessesByPath.TryGetValue(parsedPath, out CompactSet<ReportedFileAccess> existingAccessesToPath);
                     accessesByPath[parsedPath] =
                         !shouldExclude
-                        ? existingAccessesToPath.Add(reported)
+                        ? existingAccessesToPath.Add(finalReported)
                         : existingAccessesToPath;
                 }
 
@@ -3412,7 +3705,7 @@ namespace BuildXL.Processes
                             }
 
                             // if the access is a write on a file (that is, not on a directory), then the path is a candidate to be part of a shared opaque
-                            isPathCandidateToBeOwnedByASharedOpaque |= 
+                            isPathCandidateToBeOwnedByASharedOpaque |=
                                 access.RequestedAccess.HasFlag(RequestedAccess.Write) &&
                                 !access.FlagsAndAttributes.HasFlag(FlagsAndAttributes.FILE_ATTRIBUTE_DIRECTORY) &&
                                 !access.IsDirectoryCreationOrRemoval();
@@ -3422,6 +3715,7 @@ namespace BuildXL.Processes
                         // in the cone of a shared opaque, then it is a dynamic write access
                         bool? isAccessUnderASharedOpaque = null;
                         if (isPathCandidateToBeOwnedByASharedOpaque && IsAccessUnderASharedOpaque(
+                                entry.Key,
                                 firstAccess,
                                 dynamicWriteAccesses,
                                 out AbsolutePath sharedDynamicDirectoryRoot))
@@ -3441,7 +3735,7 @@ namespace BuildXL.Processes
                             // then we just skip reporting the access. Together with the above step, this means that no accesses under shared opaques that represent outputs are actually
                             // reported as observed accesses. This matches the same behavior that occurs on static outputs.
                             if (!allInputPathsUnderSharedOpaques.Contains(entry.Key) &&
-                                (isAccessUnderASharedOpaque == true || IsAccessUnderASharedOpaque(firstAccess, dynamicWriteAccesses, out _)))
+                                (isAccessUnderASharedOpaque == true || IsAccessUnderASharedOpaque(entry.Key, firstAccess, dynamicWriteAccesses, out _)))
                             {
                                 continue;
                             }
@@ -3487,13 +3781,69 @@ namespace BuildXL.Processes
 
                     var filteredAccessesUnsorted = accessesUnsorted.Where(shouldIncludeAccess).ToList();
 
-                    sharedDynamicDirectoryWriteAccesses = dynamicWriteAccesses.ToDictionary(
-                        kvp => kvp.Key,
-                        kvp => (IReadOnlyCollection<AbsolutePath>)kvp.Value.ToReadOnlyArray());
-
-                    return SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>.CloneAndSort(
+                    observedAccesses = SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer>.CloneAndSort(
                         filteredAccessesUnsorted,
                         new ObservedFileAccessExpandedPathComparer(m_context.PathTable.ExpandedPathComparer));
+
+                    var mutableWriteAccesses = new Dictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>>(dynamicWriteAccesses.Count);
+
+                    // We know that all accesses here were write accesses, but we don't actually know if in the end the corresponding file
+                    // still exists or whether the file was replaced with a directory afterwards. E.g.:
+                    // * the tool could have created a file but removed it right after
+                    // * the tool could have created a file but then removed it and created a directory
+                    // We only care about the access if its final shape is not a directory
+                    foreach (var kvp in dynamicWriteAccesses)
+                    {
+                        var fileWrites = new List<FileArtifactWithAttributes>(kvp.Value.Count);
+                        mutableWriteAccesses[kvp.Key] = fileWrites;
+                        foreach (AbsolutePath writeAccess in kvp.Value)
+                        {
+                            string outputPath;
+                            if (sharedOutputDirectoriesAreRedirected)
+                            {
+                                outputPath = m_processInContainerManager.GetRedirectedOpaqueFile(writeAccess, kvp.Key, m_containerConfiguration).ToString(m_pathTable);
+                            }
+                            else
+                            {
+                                outputPath = writeAccess.ToString(m_pathTable);
+                            }
+
+                            var maybeResult = FileUtilities.TryProbePathExistence(outputPath, followSymlink: false);
+                            if (!maybeResult.Succeeded)
+                            {
+                                Tracing.Logger.Log.CannotProbeOutputUnderSharedOpaque(
+                                    m_loggingContext,
+                                    m_pip.GetDescription(m_context),
+                                    writeAccess.ToString(m_pathTable),
+                                    maybeResult.Failure.DescribeIncludingInnerFailures());
+
+                                sharedDynamicDirectoryWriteAccesses = CollectionUtilities.EmptyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>>();
+
+                                return false;
+                            }
+
+                            switch (maybeResult.Result)
+                            {
+                                case PathExistence.ExistsAsDirectory:
+                                    // Directories are not reported as explicit content, since we don't have the functionality today to persist them in the cache.
+                                    continue;
+                                case PathExistence.ExistsAsFile:
+                                    // If outputs are redirected, we don't want to store a tombstone file
+                                    if (!sharedOutputDirectoriesAreRedirected || !FileUtilities.IsWciTombstoneFile(outputPath))
+                                    {
+                                        fileWrites.Add(FileArtifactWithAttributes.Create(FileArtifact.CreateOutputFile(writeAccess), FileExistence.Required));
+                                    }
+                                    break;
+                                case PathExistence.Nonexistent:
+                                    fileWrites.Add(FileArtifactWithAttributes.Create(FileArtifact.CreateOutputFile(writeAccess), FileExistence.Temporary));
+                                    break;
+                            }
+                        }
+                    }
+
+                    sharedDynamicDirectoryWriteAccesses = mutableWriteAccesses;
+
+                    return true;
 
                     bool shouldIncludeAccess(ObservedFileAccess access)
                     {
@@ -3506,7 +3856,7 @@ namespace BuildXL.Processes
                         // else, include IFF:
                         //   (1) access is a directory enumeration, AND
                         //   (2) the directory was not created by this pip
-                        return 
+                        return
                             access.ObservationFlags.HasFlag(ObservationFlags.Enumeration)
                             && !access.Accesses.Any(rfa => rfa.IsDirectoryCreation());
                     }
@@ -3514,7 +3864,11 @@ namespace BuildXL.Processes
             }
         }
 
-        private bool IsAccessUnderASharedOpaque(ReportedFileAccess access, Dictionary<AbsolutePath, HashSet<AbsolutePath>> dynamicWriteAccesses, out AbsolutePath sharedDynamicDirectoryRoot)
+        private bool IsAccessUnderASharedOpaque(
+            AbsolutePath accessPath,
+            ReportedFileAccess access, 
+            Dictionary<AbsolutePath, HashSet<AbsolutePath>> dynamicWriteAccesses, 
+            out AbsolutePath sharedDynamicDirectoryRoot)
         {
             sharedDynamicDirectoryRoot = AbsolutePath.Invalid;
 
@@ -3533,7 +3887,14 @@ namespace BuildXL.Processes
             // Because of bottom-up search, if a pip declares nested shared opaque directories, the innermost directory
             // wins the ownership of a produced file.
 
-            var initialNode = access.ManifestPath.Value;
+            // We need to consider opaque directory exclusions here. So if there are any exclusions configured, we can't start from the manifest
+            // path, since the exclusion can be configured to be under a given opaque root
+
+            var initialNode = m_pip.OutputDirectoryExclusions.Length == 0 ? access.ManifestPath.Value : accessPath.Value;
+
+            using var outputDirectoryExclusionSetWrapper = Pools.AbsolutePathSetPool.GetInstance();
+            var outputDirectoryExclusionSet = outputDirectoryExclusionSetWrapper.Instance;
+            outputDirectoryExclusionSet.AddRange(m_pip.OutputDirectoryExclusions);
 
             // TODO: consider adding a cache from manifest paths to containing shared opaques. It is likely
             // that many writes for a given pip happens under the same cones.
@@ -3541,14 +3902,29 @@ namespace BuildXL.Processes
             foreach (var currentNode in m_context.PathTable.EnumerateHierarchyBottomUp(initialNode))
             {
                 var currentPath = new AbsolutePath(currentNode);
-                if (dynamicWriteAccesses.ContainsKey(currentPath))
+                
+                // if the path is under an exclusion, then it is not under a shared opaque
+                if (outputDirectoryExclusionSet.Contains(currentPath))
+                {
+                    sharedDynamicDirectoryRoot = AbsolutePath.Invalid;
+                    return false;
+                }
+
+                // If we haven't found an owner yet, and the current path is a shared opaque root, then we found one
+                // Observe we may have found an owner already but we may be still searching upwards to make sure there 
+                // are no exclusions that would rule that out
+                if (!sharedDynamicDirectoryRoot.IsValid && dynamicWriteAccesses.ContainsKey(currentPath))
                 {
                     sharedDynamicDirectoryRoot = currentPath;
-                    return true;
+                    // If there are no exclusions, then we found an owning root and we can shortcut the search here
+                    if (outputDirectoryExclusionSet.Count == 0)
+                    {
+                        return true;
+                    }
                 }
             }
 
-            return false;
+            return sharedDynamicDirectoryRoot.IsValid;
         }
 
         /// <summary>
@@ -3947,7 +4323,7 @@ namespace BuildXL.Processes
         private void FormatOutputAndPaths(string standardOut, string standardError,
             string standardOutPath, string standardErrorPath,
             out string outputToLog, out string pathsToLog, out string extraMessage,
-            bool errorWasTruncated,
+            bool messageWasTruncated,
             bool errorWasFiltered)
         {
             // Only display error/out if it is non-empty. This avoids adding duplicated newlines in the message.
@@ -3959,13 +4335,13 @@ namespace BuildXL.Processes
 
             if (errorWasFiltered)
             {
-                extraMessage = "This error has been filtered by a regex. ";
+                extraMessage = "This message has been filtered by a regex. ";
             }
 
             var stdInLogDir = false;
             string standardOutPathInLog = string.Empty;
             string standardErrorPathInLog = string.Empty;
-            if (errorWasTruncated)
+            if (messageWasTruncated)
             {
                 if (m_sandboxConfig.OutputReportingMode == OutputReportingMode.TruncatedOutputOnError)
                 {
@@ -4004,7 +4380,7 @@ namespace BuildXL.Processes
                 (!standardOutEmpty && !standardErrorEmpty ? Environment.NewLine : string.Empty) +
                 (standardErrorEmpty ? string.Empty : standardErrorPathInLog);
 
-            pathsToLog = !errorWasTruncated
+            pathsToLog = !messageWasTruncated
                 ? string.Empty
                 : stdInLogDir
                 ? stdPathsInLogDir
@@ -4013,7 +4389,9 @@ namespace BuildXL.Processes
 
         private bool CopyFileToLogDirectory(string path, string formattedSemiStableHash, out string relativeFilePath)
         {
-            if (File.Exists(path) && Directory.Exists(m_loggingConfiguration.LogsDirectory.ToString(m_pathTable)))
+            if (File.Exists(path) 
+                && m_loggingConfiguration != null
+                && Directory.Exists(m_loggingConfiguration.LogsDirectory.ToString(m_pathTable)))
             {
                 var relativeDirectoryPath = Path.Combine(StdOutputsDirNameInLog, formattedSemiStableHash);
                 relativeFilePath = Path.Combine(relativeDirectoryPath, Path.GetFileName(path));
@@ -4065,7 +4443,7 @@ namespace BuildXL.Processes
             public readonly bool ErrorWasTruncated;
         }
 
-        private async Task<LogErrorResult> TryLogErrorAsync(SandboxedProcessResult result, bool exitedWithSuccessExitCode)
+        private async Task<LogErrorResult> TryLogErrorAsync(SandboxedProcessResult result, bool allOutputsPresent, bool failedDueToWritingToStdErr)
         {
             // Initializing error regex just before it is actually needed to save some cycles.
             if (!await TryInitializeErrorRegexAsync())
@@ -4112,7 +4490,7 @@ namespace BuildXL.Processes
                 HandleErrorsFromTool(standardError);
                 HandleErrorsFromTool(standardOutput);
 
-                LogPipProcessError(result, exitedWithSuccessExitCode, standardError, standardOutput, errorWasTruncated, standardErrorFilterResult.IsFiltered || standardOutputFilterResult.IsFiltered);
+                LogPipProcessError(result, allOutputsPresent, failedDueToWritingToStdErr, standardError, standardOutput, errorWasTruncated, standardErrorFilterResult.IsFiltered || standardOutputFilterResult.IsFiltered);
 
                 return new LogErrorResult(success: true, errorWasTruncated: errorWasTruncated);
             }
@@ -4187,7 +4565,7 @@ namespace BuildXL.Processes
                                 }
                             }
 
-                            LogPipProcessError(result, exitedWithSuccessExitCode, stdError, stdOut, errorWasTruncated, false);
+                            LogPipProcessError(result, allOutputsPresent, failedDueToWritingToStdErr, stdError, stdOut, errorWasTruncated, false);
                         }
 
                         return true;
@@ -4196,7 +4574,7 @@ namespace BuildXL.Processes
             }
         }
 
-        private void LogPipProcessError(SandboxedProcessResult result, bool exitedWithSuccessExitCode, string stdError, string stdOut, bool errorWasTruncated, bool errorWasFiltered)
+        private void LogPipProcessError(SandboxedProcessResult result, bool allOutputsPresent, bool failedDueToWritingToStdErr, string stdError, string stdOut, bool errorWasTruncated, bool errorWasFiltered)
         {
             string outputTolog;
             string outputPathsToLog;
@@ -4212,6 +4590,12 @@ namespace BuildXL.Processes
                 errorWasTruncated,
                 errorWasFiltered);
 
+            string optionalMessage = !allOutputsPresent ? 
+                EventConstants.PipProcessErrorMissingOutputsSuffix :
+                failedDueToWritingToStdErr?
+                    EventConstants.PipProcessErrorWroteToStandardError : 
+                    string.Empty;
+
             Tracing.Logger.Log.PipProcessError(
                 m_loggingContext,
                 m_pip.SemiStableHash,
@@ -4223,8 +4607,7 @@ namespace BuildXL.Processes
                 messageAboutPathsToLog,
                 AddTrailingNewLineIfNeeded(outputPathsToLog),
                 result.ExitCode,
-                // if the process finished successfully (exit code 0) and we entered this method --> some outputs are missing
-                exitedWithSuccessExitCode ? EventConstants.PipProcessErrorMissingOutputsSuffix : string.Empty,
+                optionalMessage,
                 m_pip.GetShortDescription(m_context));
         }
 
@@ -4494,7 +4877,7 @@ namespace BuildXL.Processes
                         m_pip.SemiStableHash,
                         m_pipDescription,
                         numErrors,
-                        Environment.NewLine + string.Join(Environment.NewLine, unexpectedSurvivingChildProcesses.Select(p => $"{p.Path} ({p.ProcessId})")));
+                        Environment.NewLine + string.Join(Environment.NewLine, unexpectedSurvivingChildProcesses.Select(p => $"{p.Path} ({p.ProcessId}) {getProcessArgs(p)}")));
             }
 
             return numErrors;
@@ -4502,6 +4885,16 @@ namespace BuildXL.Processes
             static bool hasProcessName(ReportedProcess pr, string name)
             {
                 return string.Equals(Path.GetFileName(pr.Path), name, StringComparison.OrdinalIgnoreCase);
+            }
+
+            static string getProcessArgs(ReportedProcess pr)
+            {
+                if (string.IsNullOrWhiteSpace(pr.ProcessArgs))
+                {
+                    return string.Empty;
+                }
+
+                return pr.ProcessArgs.Substring(0, Math.Min(256, pr.ProcessArgs.Length));
             }
         }
 
@@ -4616,7 +5009,7 @@ namespace BuildXL.Processes
         /// <summary>
         /// Whether we should preserve the given declared static file or directory output.
         /// </summary>
-        private bool ShouldPreserveDeclaredOutput(AbsolutePath path, HashSet<AbsolutePath> whitelist)
+        private bool ShouldPreserveDeclaredOutput(AbsolutePath path, HashSet<AbsolutePath> allowlist)
         {
             if (!m_shouldPreserveOutputs)
             {
@@ -4624,15 +5017,15 @@ namespace BuildXL.Processes
                 return false;
             }
 
-            if (whitelist.Count == 0)
+            if (allowlist.Count == 0)
             {
-                // If the whitelist is empty, every output is preserved
+                // If the allowlist is empty, every output is preserved
                 return true;
             }
 
-            if (whitelist.Contains(path))
+            if (allowlist.Contains(path))
             {
-                // Only preserve the file or directories that are given in the whitelist.
+                // Only preserve the file or directories that are given in the allowlist.
                 return true;
             }
 

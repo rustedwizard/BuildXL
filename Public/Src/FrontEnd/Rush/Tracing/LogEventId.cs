@@ -14,14 +14,7 @@ namespace BuildXL.FrontEnd.Rush.Tracing
         None = 0,
 
         // reserved 11700 .. 11800 for Rush front-end
-        InvalidResolverSettings = 11700,
-        ProjectGraphConstructionError = 11701,
-        GraphConstructionInternalError = 11702,
-        CannotDeleteSerializedGraphFile = 11703,
-        CycleInBuildTargets = 11704,
-        SchedulingPipFailure = 11705,
-        UnexpectedPipBuilderException = 11706,
-        GraphConstructionFinishedSuccessfullyButWithWarnings = 11707,
-        GraphBuilderFilesAreNotRemoved = 11708,
+        InvalidRushResolverSettings = 11700,
+        UsingRushLibBaseAt = 11701,
     }
 }

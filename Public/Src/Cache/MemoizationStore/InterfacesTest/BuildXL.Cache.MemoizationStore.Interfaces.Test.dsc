@@ -3,7 +3,7 @@
 
 namespace InterfacesTest {
     @@public
-    export const dll = BuildXLSdk.test({
+    export const dll = BuildXLSdk.cacheTest({
         assemblyName: "BuildXL.Cache.MemoizationStore.Interfaces.Test",
         sources: globR(d`.`,"*.cs"),
         skipTestRun: BuildXLSdk.restrictTestRunToSomeQualifiers,
@@ -15,7 +15,7 @@ namespace InterfacesTest {
             ContentStore.Library.dll,
             Interfaces.dll,
             importFrom("BuildXL.Utilities").dll,
-            importFrom("System.Interactive.Async").pkg,
+            ...BuildXLSdk.bclAsyncPackages,
         ],
     });
 }

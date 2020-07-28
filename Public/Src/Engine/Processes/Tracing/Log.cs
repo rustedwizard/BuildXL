@@ -70,10 +70,10 @@ namespace BuildXL.Processes.Tracing
         [GeneratedEvent(
             (int)LogEventId.PipProcessStartFailed,
             EventGenerators = EventGenerators.LocalOnly,
-            EventLevel = Level.Error,
+            EventLevel = Level.Warning,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
-            Message = EventConstants.PipPrefix + "Process start failed with error code {2:X8}: {3}")]
+            Message = EventConstants.PipPrefix + "Process start failed with error code {2:X8}: {3}. Pip may be retried or failed.")]
         public abstract void PipProcessStartFailed(LoggingContext context, long pipSemiStableHash, string pipDescription, int errorCode, string message);
 
         [GeneratedEvent(
@@ -292,15 +292,15 @@ namespace BuildXL.Processes.Tracing
             string path);
 
         [GeneratedEvent(
-            (int)LogEventId.PipProcessDisallowedFileAccessWhitelistedNonCacheable,
+            (int)LogEventId.PipProcessDisallowedFileAccessAllowlistedNonCacheable,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
             Message =
                 EventConstants.PipPrefix +
-                "Disallowed file access (non-cacheable) was detected on '{3}' with {2}. This message will become an error if the whitelist entry (in a top-level configuration file) allowing this access is removed.")]
-        public abstract void PipProcessDisallowedFileAccessWhitelistedNonCacheable(
+                "Disallowed file access (non-cacheable) was detected on '{3}' with {2}. This message will become an error if the allowlist entry (in a top-level configuration file) allowing this access is removed.")]
+        public abstract void PipProcessDisallowedFileAccessAllowlistedNonCacheable(
             LoggingContext context,
             long pipSemiStableHash,
             string pipDescription,
@@ -308,15 +308,15 @@ namespace BuildXL.Processes.Tracing
             string path);
 
         [GeneratedEvent(
-            (int)LogEventId.PipProcessDisallowedFileAccessWhitelistedCacheable,
+            (int)LogEventId.PipProcessDisallowedFileAccessAllowlistedCacheable,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
             Message =
                 EventConstants.PipPrefix +
-                "Disallowed file access (cacheable) was detected on '{3}' with {2}. This message will become an error if the whitelist entry (in a top-level configuration file) allowing this access is removed.")]
-        public abstract void PipProcessDisallowedFileAccessWhitelistedCacheable(
+                "Disallowed file access (cacheable) was detected on '{3}' with {2}. This message will become an error if the allowlist entry (in a top-level configuration file) allowing this access is removed.")]
+        public abstract void PipProcessDisallowedFileAccessAllowlistedCacheable(
             LoggingContext context,
             long pipSemiStableHash,
             string pipDescription,
@@ -324,15 +324,15 @@ namespace BuildXL.Processes.Tracing
             string path);
 
         [GeneratedEvent(
-            (int)LogEventId.FileAccessWhitelistFailedToParsePath,
+            (int)LogEventId.FileAccessAllowlistFailedToParsePath,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
             Message =
                 EventConstants.PipPrefix +
-                "Tool path '{3}' failed to parse at character '{4}' could not be parsed. File access whitelist entries matching on tool paths will not be checked for this access. (Accessed via {2})")]
-        public abstract void FileAccessWhitelistFailedToParsePath(
+                "Tool path '{3}' failed to parse at character '{4}' could not be parsed. File access allowlist entries matching on tool paths will not be checked for this access. (Accessed via {2})")]
+        public abstract void FileAccessAllowlistFailedToParsePath(
             LoggingContext context,
             long pipSemiStableHash,
             string pipDescription,
@@ -341,15 +341,15 @@ namespace BuildXL.Processes.Tracing
             int characterWithError);
 
         [GeneratedEvent(
-            (int)LogEventId.PipProcessUncacheableWhitelistNotAllowedInDistributedBuilds,
+            (int)LogEventId.PipProcessUncacheableAllowlistNotAllowedInDistributedBuilds,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (int)Tasks.PipExecutor,
             Message =
                 EventConstants.PipPrefix +
-                "Disallowed file access (non-cacheable) was detected on '{3}' with {2}. This message is an error because non-cacheable whitelist matches are not allowed in distributed builds.")]
-        public abstract void PipProcessUncacheableWhitelistNotAllowedInDistributedBuilds(
+                "Disallowed file access (non-cacheable) was detected on '{3}' with {2}. This message is an error because non-cacheable allowlist matches are not allowed in distributed builds.")]
+        public abstract void PipProcessUncacheableAllowlistNotAllowedInDistributedBuilds(
             LoggingContext context,
             long pipSemiStableHash,
             string pipDescription,
@@ -566,6 +566,15 @@ namespace BuildXL.Processes.Tracing
         public abstract void PipProcessMissingExpectedOutputOnCleanExit(LoggingContext context, long pipSemiStableHash, string pipDescription, string pipSpecPath, string pipWorkingDirectory, string path);
 
         [GeneratedEvent(
+            (int)LogEventId.PipProcessWroteToStandardErrorOnCleanExit,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
+            EventTask = (int)Tasks.PipExecutor,
+            Message = EventConstants.PipSpecPrefix + "Process exited succesfully but wrote to standard error. The process is configured to fail in this case, even if the exit code was successful.")]
+        public abstract void PipProcessWroteToStandardErrorOnCleanExit(LoggingContext context, long pipSemiStableHash, string pipDescription, string pipSpecPath, string pipWorkingDirectory);
+
+        [GeneratedEvent(
           (int)LogEventId.PipProcessExpectedMissingOutputs,
           EventGenerators = EventGenerators.LocalOnly,
           EventLevel = Level.Error,
@@ -734,22 +743,22 @@ namespace BuildXL.Processes.Tracing
             string outputToLog);
 
         [GeneratedEvent(
-            (ushort)LogEventId.PipTempDirectoryCleanupError,
-            EventLevel = Level.Error,
+            (ushort)LogEventId.PipTempDirectoryCleanupWarning,
+            EventLevel = Level.Warning,
             EventGenerators = EventGenerators.LocalOnly,
             Keywords = (int)(Keywords.UserMessage | Keywords.InfrastructureError),
             EventTask = (int)Tasks.PipExecutor,
-            Message = EventConstants.PipPrefix + "Failed to clean temp directory at '{directory}'. Pip will not be executed. {exceptionMessage}")]
-        public abstract void PipTempDirectoryCleanupError(LoggingContext context, long pipSemiStableHash, string pipDescription, string directory, string exceptionMessage);
+            Message = EventConstants.PipPrefix + "Failed to clean temp directory at '{directory}'. Pip may be retried or failed. {exceptionMessage}")]
+        public abstract void PipTempDirectoryCleanupFailure(LoggingContext context, long pipSemiStableHash, string pipDescription, string directory, string exceptionMessage);
 
         [GeneratedEvent(
-            (ushort)LogEventId.PipTempDirectorySetupError,
-            EventLevel = Level.Error,
+            (ushort)LogEventId.PipTempDirectorySetupWarning,
+            EventLevel = Level.Warning,
             EventGenerators = EventGenerators.LocalOnly,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
-            Message = EventConstants.PipPrefix + "Failed to create temp directory at '{directory}'. {exceptionMessage}")]
-        public abstract void PipTempDirectorySetupError(LoggingContext context, long pipSemiStableHash, string pipDescription, string directory, string exceptionMessage);
+            Message = EventConstants.PipPrefix + "Failed to create temp directory at '{directory}'. Pip may be retried or failed. {exceptionMessage}")]
+        public abstract void PipTempDirectorySetupFailure(LoggingContext context, long pipSemiStableHash, string pipDescription, string directory, string exceptionMessage);
 
         [GeneratedEvent(
             (ushort)LogEventId.PipTempSymlinkRedirectionError,
@@ -1062,5 +1071,23 @@ namespace BuildXL.Processes.Tracing
             EventTask = (int)Tasks.Engine,
             Message = "Cannot read sideband file '{fileName}': {error}")]
         public abstract void CannotReadSidebandFileWarning(LoggingContext context, string fileName, string error);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.ResumeOrSuspendProcessError,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "[{pipSemiStableHash}] occurred an error for {failedOperation}: {errorCode}")]
+        public abstract void ResumeOrSuspendProcessError(LoggingContext context, string pipSemiStableHash, string failedOperation, int errorCode);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.CannotProbeOutputUnderSharedOpaque,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "[{pipDescription}] Failed to probe '{path}' under a shared opaque directory : {details}")]
+        public abstract void CannotProbeOutputUnderSharedOpaque(LoggingContext context, string pipDescription, string path, string details);
     }
 }

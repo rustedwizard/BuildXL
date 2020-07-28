@@ -8,7 +8,6 @@ using BuildXL.Pips.Operations;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
-using BuildXL.Utilities.Tracing;
 using Test.BuildXL.Executables.TestProcess;
 using Test.BuildXL.Scheduler;
 using Test.BuildXL.TestUtilities.Xunit;
@@ -19,7 +18,6 @@ using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
 
 namespace ExternalToolTest.BuildXL.Scheduler
 {
-    [TestClassIfSupported(requiresWindowsBasedOperatingSystem: true)]
     public class ExternalToolExecutionTests : SchedulerIntegrationTestBase
     {
         public ExternalToolExecutionTests(ITestOutputHelper output) : base(output)
@@ -233,6 +231,12 @@ namespace ExternalToolTest.BuildXL.Scheduler
             RunScheduler().AssertFailure();
             AssertErrorEventLogged(ProcessesLogEventId.PipProcessTookTooLongError, count: 1);
             AssertErrorEventLogged(ProcessesLogEventId.PipProcessError, count: 1);
+
+            if (OperatingSystemHelper.IsUnixOS)
+            {
+                // Creating dump is not supported on non-Windows.
+                AssertWarningEventLogged(ProcessesLogEventId.PipFailedToCreateDumpFile, count: 1);
+            }
         }
 
         [Fact]

@@ -50,9 +50,9 @@ ReportResult AccessHandler::ReportFileOpAccess(FileOperation operation,
         .operation          = operation,
         .pid                = proc_selfpid(),
         .rootPid            = GetProcessId(),
-        .requestedAccess    = (DWORD)checkResult.RequestedAccess,
+        .requestedAccess    = (DWORD)checkResult.Access,
         .status             = checkResult.GetFileAccessStatus(),
-        .reportExplicitly   = checkResult.ReportLevel == ReportLevel::ReportExplicit,
+        .reportExplicitly   = checkResult.Level == ReportLevel::ReportExplicit,
         .error              = 0,
         .pipId              = GetPipId(),
         .path               = {0},
@@ -67,7 +67,7 @@ ReportResult AccessHandler::ReportFileOpAccess(FileOperation operation,
     if (status == kFailed)
     {
         log_error("Failed to send report :: '%s' | PID = %d | PipId = %#llx | requested access: %d | status: %d | '%s'",
-                  OpNames[operation], GetProcessId(), GetPipId(), checkResult.RequestedAccess,
+                  OpNames[operation], GetProcessId(), GetPipId(), checkResult.Access,
                   checkResult.GetFileAccessStatus(), policyResult.Path());
     }
 
@@ -146,7 +146,7 @@ void AccessHandler::LogAccessDenied(const char *path,
                                     kauth_action_t action,
                                     const char *errorMessage)
 {
-    log("[ACCESS DENIED] PID: %d, PipId: %#llx, Path: '%s', Action: '%d', Description '%s'",
+    log_debug("[ACCESS DENIED] PID: %d, PipId: %#llx, Path: '%s', Action: '%d', Description '%s'",
         proc_selfpid(), GetPipId(), path, action, errorMessage);
 }
 

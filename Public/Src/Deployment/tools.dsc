@@ -78,29 +78,6 @@ namespace Tools {
         });
     }
 
-    namespace BuildExplorer {
-        export declare const qualifier: {
-            configuration: "debug" | "release",
-            targetRuntime: "win-x64"
-        };
-
-        export const deployment : Deployment.Definition = {
-            contents: addIf(!BuildXLSdk.Flags.excludeBuildXLExplorer,
-                {
-                    subfolder: r`app`,
-                    contents: [importFrom("BuildXL.Explorer").App.app.appFolder],
-                }
-            )
-        };
-
-        const deployed = !BuildXLSdk.Flags.excludeBuildXLExplorer
-            ? BuildXLSdk.DeploymentHelpers.deploy({
-                definition: deployment,
-                targetLocation: r`${qualifier.configuration}/tools/bxp`
-              })
-            : undefined;
-    }
-
     namespace Bvfs
     {
         export declare const qualifier: {

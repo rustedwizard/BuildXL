@@ -138,7 +138,7 @@ namespace BuildXL.FrontEnd.Nuget
                     pathToModuleConfig,
                     new[] { pathToSpec },
                     allowedModuleDependencies: null,
-                    cyclicalFriendModules: null); // A NuGet package does not have any module dependency restrictions nor whitelists cycles
+                    cyclicalFriendModules: null); // A NuGet package does not have any module dependency restrictions nor allowlists cycles
             });
         }
 
@@ -1387,42 +1387,44 @@ namespace BuildXL.FrontEnd.Nuget
                 .Select(
                     new[]
                     {
-                            "ComSpec",
-                            "PATH",
-                            "PATHEXT",
-                            "NUMBER_OF_PROCESSORS",
-                            "OS",
-                            "PROCESSOR_ARCHITECTURE",
-                            "PROCESSOR_IDENTIFIER",
-                            "PROCESSOR_LEVEL",
-                            "PROCESSOR_REVISION",
-                            "SystemDrive",
-                            "SystemRoot",
-                            "SYSTEMTYPE",
-                            "NUGET_CREDENTIALPROVIDERS_PATH",
-                            "__CLOUDBUILD_AUTH_HELPER_CONFIG__",
-                            "__Q_DPAPI_Secrets_Dir",
+                        "ComSpec",
+                        "PATH",
+                        "PATHEXT",
+                        "NUMBER_OF_PROCESSORS",
+                        "OS",
+                        "PROCESSOR_ARCHITECTURE",
+                        "PROCESSOR_IDENTIFIER",
+                        "PROCESSOR_LEVEL",
+                        "PROCESSOR_REVISION",
+                        "SystemDrive",
+                        "SystemRoot",
+                        "SYSTEMTYPE",
+                        "NUGET_CREDENTIALPROVIDERS_PATH",
+                        "__CLOUDBUILD_AUTH_HELPER_CONFIG__",
+                        "__Q_DPAPI_Secrets_Dir",
 
-                            // Nuget Credential Provider env variables
-                            "1ESSHAREDASSETS_BUILDXL_FEED_PAT",
-                            "CLOUDBUILD_BUILDXL_SELFHOST_FEED_PAT",
+                        // Nuget Credential Provider env variables
+                        "1ESSHAREDASSETS_BUILDXL_FEED_PAT",
+                        "CLOUDBUILD_BUILDXL_SELFHOST_FEED_PAT",
 
-                            // Auth material needed for low-privilege build.
-                            "QAUTHMATERIALROOT"
+                        // Auth material needed for low-privilege build.
+                        "QAUTHMATERIALROOT"
                     })
                 .Override(
                     new Dictionary<string, string>()
                     {
-                            {"TMP", layout.TempDirectoryAsString},
-                            {"TEMP", layout.TempDirectoryAsString},
-                            {"NUGET_PACKAGES", layout.TempDirectoryAsString},
-                            {"NUGET_ROOT", layout.TempDirectoryAsString},
+                        {"TMP", layout.TempDirectoryAsString},
+                        {"TEMP", layout.TempDirectoryAsString},
+                        {"NUGET_PACKAGES", layout.TempDirectoryAsString},
+                        {"NUGET_ROOT", layout.TempDirectoryAsString},
                     });
             }
         }
 
         private class SandboxConnectionFake : ISandboxConnection
         {
+            public SandboxKind Kind => SandboxKind.MacOsKext;
+
             public int NumberOfKextConnections => 1;
 
             public ulong MinReportQueueEnqueueTime { get; set; }
@@ -1445,11 +1447,18 @@ namespace BuildXL.FrontEnd.Nuget
 
             public bool NotifyUsage(uint cpuUsage, uint availableRamMB) { return true; }
 
-            public bool NotifyPipStarted(LoggingContext loggingContext, FileAccessManifest fam, SandboxedProcessMac process) { return true; }
+            public bool NotifyPipStarted(LoggingContext loggingContext, FileAccessManifest fam, SandboxedProcessUnix process) { return true; }
+
+            public IEnumerable<(string, string)> AdditionalEnvVarsToSet(long pipId)
+            {
+                return Enumerable.Empty<(string, string)>();
+            }
 
             public void NotifyPipProcessTerminated(long pipId, int processId) { }
 
-            public bool NotifyProcessFinished(long pipId, SandboxedProcessMac process) { return true; }
+            public void NotifyRootProcessExited(long pipId, SandboxedProcessUnix process) { }
+
+            public bool NotifyPipFinished(long pipId, SandboxedProcessUnix process) { return true; }
 
             public void ReleaseResources() { }
         }
@@ -1498,7 +1507,7 @@ namespace BuildXL.FrontEnd.Nuget
                 // TODO: If this is set to true, then NuGet will fail if TMG Forefront client is running.
                 //                 Filtering out in SandboxedProcessReport won't work because Detours already blocks the access to FwcWsp.dll.
                 //                 Almost all machines in Office run TMG Forefront client.
-                //                 So far for WDG, FailUnexpectedFileAccesses is false due to whitelists.
+                //                 So far for WDG, FailUnexpectedFileAccesses is false due to allowlists.
                 //                 As a consequence, the file access manifest below gets nullified.
                 FailUnexpectedFileAccesses = false,
                 ReportFileAccesses = true,

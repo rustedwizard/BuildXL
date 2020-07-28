@@ -648,7 +648,7 @@ namespace BuildXL.Execution.Analyzer
                 m_writer.WritePropertyName("exe");
                 m_writer.WriteValue(process.GetToolName(context.PathTable).ToString(context.StringTable));
 
-                if (process.Semaphores != null && process.Semaphores.Length > 0)
+                if (process.Semaphores.Length > 0)
                 {
                     m_writer.WritePropertyName("semaphores");
                     m_writer.WriteStartArray();
@@ -781,16 +781,16 @@ namespace BuildXL.Execution.Analyzer
                             m_writer.WritePropertyName("total");
                             m_writer.WriteValue(monitoring.Total);
 
-                            if (monitoring.TotalWhitelisted > 0)
+                            if (monitoring.TotalAllowlisted > 0)
                             {
-                                m_writer.WritePropertyName("whitelisted");
-                                m_writer.WriteValue(monitoring.TotalWhitelisted);
+                                m_writer.WritePropertyName("allowlisted");
+                                m_writer.WriteValue(monitoring.TotalAllowlisted);
                             }
 
-                            if (monitoring.NumFileAccessesWhitelistedButNotCacheable > 0)
+                            if (monitoring.NumFileAccessesAllowlistedButNotCacheable > 0)
                             {
-                                m_writer.WritePropertyName("whitelistedButNotCacheable");
-                                m_writer.WriteValue(monitoring.NumFileAccessesWhitelistedButNotCacheable);
+                                m_writer.WritePropertyName("allowlistedButNotCacheable");
+                                m_writer.WriteValue(monitoring.NumFileAccessesAllowlistedButNotCacheable);
                             }
                         }
 

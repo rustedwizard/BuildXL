@@ -14,7 +14,8 @@ namespace Collections {
             "Test.BuildXL.Utilities.Collections",
         ],
         references: [
-            importFrom("BuildXL.Cache.ContentStore").Hashing.dll
+            importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
+            ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
         ]
     });
 }

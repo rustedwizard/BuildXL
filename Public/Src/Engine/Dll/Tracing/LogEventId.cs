@@ -33,11 +33,11 @@ namespace BuildXL.Engine.Tracing
         CannotHonorLowPriority = 95,
         ErrorRelatedLocation = 110,
         BusyOrUnavailableOutputDirectoriesRetry = 214,
-        FileAccessWhitelistCouldNotCreateIdentifier = 270,
-        FileAccessWhitelistFailedToParsePath = 274,
-        WhitelistFileAccess = 278,
+        FileAccessAllowlistCouldNotCreateIdentifier = 270,
+        FileAccessAllowlistFailedToParsePath = 274,
+        AllowlistFileAccess = 278,
         FileAccessManifestSummary = 279,
-        FileAccessWhitelistEntryHasInvalidRegex = 287,
+        FileAccessAllowlistEntryHasInvalidRegex = 287,
         EnvFreezing = 402,
 
         StorageCacheStartupError = 712,
@@ -70,6 +70,8 @@ namespace BuildXL.Engine.Tracing
         PostponingDeletionOfSharedOpaqueOutputs = 872,
         DeletingOutputsFromExtraneousSidebandFilesStarted = 873,
 
+        ScrubbingCancelled = 880,
+
         ConfigUnsafeDisabledFileAccessMonitoring = 900,
         ConfigUnsafeIgnoringChangeJournal = 901,
         ConfigUnsafeUnexpectedFileAccessesAsWarnings = 902,
@@ -87,7 +89,7 @@ namespace BuildXL.Engine.Tracing
         ConfigIgnoreDynamicWritesOnAbsentProbes = 916,
         ConfigIgnoreSetFileInformationByHandle = 917,
         ConfigPreserveOutputs = 918,
-        ConfigUnsafeLazySymlinkCreation = 919,
+        // was ConfigUnsafeLazySymlinkCreation = 919,
         ConfigDisableDetours = 920,
         ConfigDebuggingAndProfilingCannotBeSpecifiedSimultaneously = 921,
         ConfigIgnoreGetFinalPathNameByHandle = 922,
@@ -100,7 +102,6 @@ namespace BuildXL.Engine.Tracing
         ConfigIgnoreValidateExistingFileAccessesForOutputs = 929,
         ConfigUnsafeIgnoreUndeclaredAccessesUnderSharedOpaques = 930,
         ConfigUnsafeOptimizedAstConversion = 931,
-
         ConfigIncompatibleIncrementalSchedulingDisabled = 933,
         ConfigIncompatibleOptionWithDistributedBuildError = 934,
         ConfigIgnorePreloadedDlls = 935,
@@ -111,8 +112,8 @@ namespace BuildXL.Engine.Tracing
 
         ConfigIgnoreCreateProcessReport = 939,
         ConfigProbeDirectorySymlinkAsDirectory = 940,
-
         ConfigUnsafeAllowDuplicateTemporaryDirectory = 941,
+        ConfigIgnoreFullSymlinkResolving = 942,
 
 
         StartInitializingCache = 1502,
@@ -216,7 +217,7 @@ namespace BuildXL.Engine.Tracing
         // was PreserveOutputsRequiresTwoPhaseFingerprinting = 2875,
 
         FailedToDeserializeDueToFileNotFound = 2876,
-        FailedToInitalizeFileAccessWhitelist = 2877,
+        FailedToInitalizeFileAccessAllowlist = 2877,
         FailedToAcquireDirectoryDeletionLock = 2878,
 
         FetchedSerializedGraphFromCache = 2879,
@@ -233,17 +234,8 @@ namespace BuildXL.Engine.Tracing
 
         JournalProcessingStatisticsForGraphReuseCheckTelemetry = 2888,
         GraphInputArtifactChangesTokensMismatch = 2889,
-
-
-
-
-        FailedToResolveHistoricMetadataCacheFileName = 2940,
-        LoadingHistoricMetadataCacheFailed = 2941,
-        SavingHistoricMetadataCacheFailed = 2942,
-        HistoricMetadataCacheLoaded = 2943,
-        HistoricMetadataCacheSaved = 2944,
-
-        // Reserved  = 2890,
+        JournalDetectedGvfsProjectionChanges = 2890,
+        
         // Reserved = 2891,
 
         WrittenBuildInvocationToUserFolder = 2892,
@@ -253,21 +245,28 @@ namespace BuildXL.Engine.Tracing
         FailureLaunchingBuildExplorerFileNotFound = 2895,
         FailureLaunchingBuildExplorerException = 2896,
 
+        FailedToResolveHistoricMetadataCacheFileName = 2940,
+        LoadingHistoricMetadataCacheFailed = 2941,
+        SavingHistoricMetadataCacheFailed = 2942,
+        HistoricMetadataCacheLoaded = 2943,
+        HistoricMetadataCacheSaved = 2944,
+
+        FailedReloadPipGraph = 2986,
         InputTrackerDetectedMountChanged = 2987,
 
 
         // Critical Path Suggestions
-        StartLoadingRunningTimes = 3100,
-        EndLoadingRunningTimes = 3101,
-        StartSavingRunningTimes = 3102,
-        EndSavingRunningTimes = 3103,
+        StartLoadingHistoricPerfData = 3100,
+        EndLoadingHistoricPerfData = 3101,
+        StartSavingHistoricPerfData = 3102,
+        EndSavingHistoricPerfData = 3103,
         FailedToResolveHistoricDataFileName = 3104,
 
         // FREE 3105
-        LoadingRunningTimesFailed = 3106,
-        SavingRunningTimesFailed = 3107,
-        RunningTimesLoaded = 3108,
-        RunningTimesSaved = 3109,
+        LoadingHistoricPerfDataFailed = 3106,
+        SavingHistoricPerfDataFailed = 3107,
+        HistoricPerfDataLoaded = 3108,
+        HistoricPerfDataSaved = 3109,
         StartRehydratingConfigurationWithNewPathTable = 3117,
         EndRehydratingConfigurationWithNewPathTable = 3118,
 

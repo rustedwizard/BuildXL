@@ -116,7 +116,10 @@ param(
 
     [Parameter(Mandatory=$false)]
 	[switch]$UseDedupStore = $false,
-	
+
+    [Parameter(Mandatory=$false)]
+    [switch]$UseVfs = $false,
+
     [string]$VsoAccount = "mseng",
 
     [string]$CacheNamespace = "BuildXLSelfhost",
@@ -125,22 +128,16 @@ param(
     [switch]$Vs = $false,
 
     [Parameter(Mandatory=$false)]
-    [switch]$VsNew = $false,
-
-    [Parameter(Mandatory=$false)]
-    [switch]$VsNewNetCore = $false,
-
-    [Parameter(Mandatory=$false)]
-    [switch]$VsNewNet472 = $false,
-
-    [Parameter(Mandatory=$false)]
-    [switch]$VsNewAll = $false,
+    [switch]$VsAll = $false,
 	
     [Parameter(Mandatory=$false)]
     [switch]$UseManagedSharedCompilation = $true,
 
     [Parameter(ValueFromRemainingArguments=$true)]
-    [string[]]$DominoArguments
+    [string[]]$DominoArguments,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$NoQTest = $false
 )
 
 $ErrorActionPreference = "Stop";
@@ -159,7 +156,7 @@ $NormalizationLockRelativePath = "Out\.NormalizationLock"
 $NonVanillaOptions = @("/IncrementalScheduling", "/nowarn:909 /nowarn:11318 /nowarn:11319 /unsafe_IgnorePreloadedDlls- /historicMetadataCache+ /cachemiss");
 # Add the new-cache options including a unique build session name
 $NonVanillaOptions += @(
-        '/cacheSessionName:{0:yyyyMMdd_HHmmssff}-{1}@{2}' -f ((Get-Date), [System.Security.Principal.WindowsIdentity]::GetCurrent().Name.Replace('\', '-'), [System.Net.Dns]::GetHostName())
+        '/cacheSessionName:{0:yyyyMMdd_HHmmssff}-{1}@{2}' -f ((Get-Date), [System.Security.Principal.WindowsIdentity]::GetCurrent().Name.Replace(' ', '-').Replace('\', '-'), [System.Net.Dns]::GetHostName())
 );
 
 if ($SelfhostHelp) {
@@ -269,20 +266,22 @@ if ($TestClass -ne "") {
     $AdditionalBuildXLArguments += "/p:[UnitTest]Filter.testClass=$TestClass";
 }
 
-if ($Vs -or $VsNew -or $VsNewNetCore -or $VsNewNet472 -or $VsNewAll) {
+if ($Vs -or $VsAll) {
     $AdditionalBuildXLArguments += "/p:[Sdk.BuildXL]GenerateVSSolution=true /vs /vsnew";
-    if ($VsNewNet472) {
-        $AdditionalBuildXLArguments += "/q:DebugNet472 /vsTargetFramework:net472";
-    } elseif ($VsNewAll) {
-        $AdditionalBuildXLArguments += "/q:DebugNet472 /q:DebugDotNetCore";
+    if ($VsAll) {
+        # -vsAll builds both .NET Core and Net472 and doesn't specify any /vsTargetFramework filters 
+        $AdditionalBuildXLArguments += "/q:Debug /q:DebugNet472";
     } else {
+        # by default (-vs) we build only .NET Core and only projects targeting one of the .NET Core frameworks
         $AdditionalBuildXLArguments += "/q:Debug /vsTargetFramework:netcoreapp3.0 /vsTargetFramework:netcoreapp3.1 /vsTargetFramework:netstandard2.0 /vsTargetFramework:netstandard2.1";
     }
 }
 
+# Various tools consume language pack files under this path if they are installed. Untrack them to prevent DFAs in local builds
+$AdditionalBuildXLArguments +=@("/unsafe_GlobalUntrackedScopes:""C:\Program Files\WindowsApps""");
+
 # WARNING: CloudBuild selfhost builds do NOT use this script file. When adding a new argument below, we should add the argument to selfhost queues in CloudBuild. Please contact bxl team. 
 $AdditionalBuildXLArguments += @("/remotetelemetry", "/reuseOutputsOnDisk+", "/storeFingerprints", "/cacheMiss", "/enableEvaluationThrottling");
-
 
 # Lazy shared opaque deletion is an experimental feature. We want to turn it on only for internal builds and when this script is not 
 # running under ADO (so we keep the feature out of PR validations for now).
@@ -290,7 +289,12 @@ if (-not ($DominoArguments -like '*/ado*') -and $isMicrosoftInternal) {
     $AdditionalBuildXLArguments += @("/exp:LazySODeletion");
 }
 
-$AdditionalBuildXLArguments += @("/p:[Sdk.BuildXL]useQTest=true");
+if ($NoQTest) {
+    $AdditionalBuildXLArguments += "/p:[Sdk.BuildXL]useQTest=false";
+}
+else {
+    $AdditionalBuildXLArguments += "/p:[Sdk.BuildXL]useQTest=true";
+}
 
 if (($DominoArguments -match "logsDirectory:.*").Length -eq 0 -and ($DominoArguments -match "logPrefix:.*").Length -eq 0) {
     $AdditionalBuildXLArguments += "/logsToRetain:20";
@@ -344,6 +348,10 @@ function Get-CacheConfig {
          UseRocksDbMemoizationStore = $true;
     };
 
+    if ($UseVfs) {
+        $localCache.Add("VfsCasRoot", "[VfsCasRoot]");
+    }
+
     if (! $UseSharedCache) {
         return $localCache;
     }
@@ -352,7 +360,7 @@ function Get-CacheConfig {
         Assembly = "BuildXL.Cache.BuildCacheAdapter";
         Type = "BuildXL.Cache.BuildCacheAdapter.BuildCacheFactory";
         CacheId = "L3Cache";
-        CacheLogPath = "[BuildXLSelectedLogPath].new";
+        CacheLogPath = "[BuildXLSelectedLogPath].Remote.log";
         CacheServiceFingerprintEndpoint = "https://$VsoAccount.artifacts.visualstudio.com/DefaultCollection";
         CacheServiceContentEndpoint = "https://$VsoAccount.vsblob.visualstudio.com/DefaultCollection";
         UseBlobContentHashLists = $true;
@@ -421,6 +429,7 @@ function Run-ProcessWithNormalizedPath {
         $remappedArgs += "/substTarget:$NormalizationDrive\ /substSource:$enlistmentrootTrimmed\"
 
         $remappedArgs += " /logProcessDetouringStatus+ /logProcessData+ /logProcesses+";
+
         Write-Host -ForegroundColor Green $remappedExecutableRunner @remappedArgs;
         $p = Start-Process -FilePath $remappedExecutableRunner -ArgumentList $remappedArgs -WorkingDirectory (pwd).Path -NoNewWindow -PassThru;
         Wait-Process -InputObject $p;
@@ -496,6 +505,10 @@ if (! $DoNotUseDefaultCacheConfigFilePath) {
     Write-CacheConfigJson -ConfigPath $cacheConfigPath -UseSharedCache $useSharedCache -PublishToSharedCache $publishToSharedCache -VsoAccount $VsoAccount -CacheNamespace $CacheNamespace;
 
     $AdditionalBuildXLArguments += "/cacheConfigFilePath:" + $cacheConfigPath;
+}
+
+if ($UseVfs) {
+    $AdditionalBuildXLArguments += "/vfsCasRoot:" + (Join-Path $cacheDirectory vfs);
 }
 
 if ($useDeployment.EnableServerMode) {

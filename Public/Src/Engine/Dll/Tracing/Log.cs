@@ -226,6 +226,15 @@ namespace BuildXL.Engine.Tracing
         public abstract void JournalDetectedInputChanges(LoggingContext context, string specFile, string directory);
 
         [GeneratedEvent(
+            (ushort)LogEventId.JournalDetectedGvfsProjectionChanges,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            EventTask = (ushort)Tasks.Engine,
+            Keywords = (int)(Keywords.UserMessage | Keywords.Progress),
+            Message = EventConstants.PhasePrefix + "USN journal: One or more GVFS_projection files changed: {gvfsProjectionFiles}. All graph inputs will be checked for changes explicitly.")]
+        public abstract void JournalDetectedGvfsProjectionChanges(LoggingContext context, string gvfsProjectionFiles);
+
+        [GeneratedEvent(
             (ushort)LogEventId.JournalProcessingStatisticsForGraphReuseCheck,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
@@ -340,6 +349,14 @@ namespace BuildXL.Engine.Tracing
             EventOpcode = (byte)EventOpcode.Stop,
             Keywords = (int)(Keywords.UserMessage | Keywords.Performance | Keywords.Progress))]
         public abstract void SerializingPipGraphComplete(LoggingContext context, GraphCacheSaveStatistics graphCacheSaveStatistics);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.FailedReloadPipGraph,
+            EventGenerators = EventGenerators.LocalOnly,
+            Message = "Failed to reload pip graph: {message}",
+            EventLevel = Level.Verbose,
+            EventTask = (ushort)Tasks.Engine)]
+        public abstract void FailedReloadPipGraph(LoggingContext context, string message);
 
         [GeneratedEvent(
             (ushort)LogEventId.FailedToDuplicateGraphFile,
@@ -927,13 +944,13 @@ namespace BuildXL.Engine.Tracing
         public abstract void PerformanceSample(LoggingContext context, int machineProcessorTime, int machineAvailableMemoryMegabytes, long ready, long running, int maxRunning, string limitingResource);
 
         [GeneratedEvent(
-            (ushort)LogEventId.WhitelistFileAccess,
+            (ushort)LogEventId.AllowlistFileAccess,
 
             // This is no longer sent to telemetry because it is a relatively large amount of data and was never used.
             // Add | EventGenerators.TelemetryOnly to resume sending it to telemetry
             EventGenerators = Generators.Statistics,
-            Message = "Whitelist usage")]
-        public abstract void WhitelistFileAccess(LoggingContext context, IDictionary<string, int> entryMatches);
+            Message = "Allowlist usage")]
+        public abstract void AllowlistFileAccess(LoggingContext context, IDictionary<string, int> entryMatches);
 
         [GeneratedEvent(
             (ushort)LogEventId.ConfigExportGraphRequiresScheduling,
@@ -1026,6 +1043,15 @@ namespace BuildXL.Engine.Tracing
         public abstract void ConfigIgnoreReparsePoints(LoggingContext context);
 
         [GeneratedEvent(
+            (ushort)LogEventId.ConfigIgnoreFullSymlinkResolving,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "/unsafe_IgnoreFullSymlinkResolving enabled: {ShortProductName} will not fully resolve paths containing any sort of symbolic links (directory + file symbolic links). This might lead to incorrect builds because some file accesses will not be enforced.")]
+        public abstract void ConfigIgnoreFullSymlinkResolving(LoggingContext context);
+        
+        [GeneratedEvent(
             (ushort)LogEventId.ConfigIgnorePreloadedDlls,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Warning,
@@ -1105,15 +1131,6 @@ namespace BuildXL.Engine.Tracing
             EventTask = (int)Tasks.Engine,
             Message = "/unsafe_OptimizedAstConversion enabled: Some analyses during AST conversions are disabled and some AST constructs, like types, are not converted.")]
         public abstract void ConfigUnsafeOptimizedAstConversion(LoggingContext context);
-
-        [GeneratedEvent(
-            (ushort)LogEventId.ConfigUnsafeLazySymlinkCreation,
-            EventGenerators = EventGenerators.LocalOnly,
-            EventLevel = Level.Warning,
-            Keywords = (int)Keywords.UserMessage,
-            EventTask = (int)Tasks.Engine,
-            Message = "/unsafe_LazySymlinkCreation enabled: {ShortProductName} is configured to create symlinks from symlink definition manifest lazily. This might lead to incorrect builds because symlinks may have not been created when a pip consumes (read or probe) it or enumerates its parent.")]
-        public abstract void ConfigUnsafeLazySymlinkCreation(LoggingContext context);
 
         [GeneratedEvent(
             (ushort)LogEventId.ConfigDebuggingAndProfilingCannotBeSpecifiedSimultaneously,
@@ -1388,7 +1405,7 @@ If you can't update and need this feature after July 2018 please reach out to th
             Keywords = (int)Keywords.Diagnostics,
             EventTask = (int)Tasks.Scheduler,
             Message =
-                "File access whitelist provided to scheduler for module {moduleName} has {cacheableEntryCount} cacheable and {unchacheableEntryCount} uncacheable entries.")]
+                "File access allowlist provided to scheduler for module {moduleName} has {cacheableEntryCount} cacheable and {unchacheableEntryCount} uncacheable entries.")]
         public abstract void FileAccessManifestSummary(
             LoggingContext context,
             string moduleName,
@@ -1910,6 +1927,16 @@ If you can't update and need this feature after July 2018 please reach out to th
         public abstract void ScrubbingFinished(LoggingContext context, int directoryCount, int totalFiles, int deletedFiles, int deletedDirectoriesRecursively);
 
         [GeneratedEvent(
+            (int)LogEventId.ScrubbingCancelled,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            EventOpcode = (byte)EventOpcode.Stop,
+            Message = EventConstants.PhasePrefix + "Scrubbing cancelled by cancellation token. Cancellation was triggered after {deletedFiles} out of {totalFiles} files were deleted.")]
+        public abstract void ScrubbingCancelled(LoggingContext context, int totalFiles, int deletedFiles);
+
+        [GeneratedEvent(
             (int)LogEventId.ScrubbingStatus,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Informational,
@@ -2062,44 +2089,44 @@ If you can't update and need this feature after July 2018 please reach out to th
         public abstract void EndRehydratingConfigurationWithNewPathTable(LoggingContext context);
 
         [GeneratedEvent(
-            (int)LogEventId.StartLoadingRunningTimes,
+            (int)LogEventId.StartLoadingHistoricPerfData,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.Engine,
             EventOpcode = (byte)EventOpcode.Start,
-            Message = EventConstants.PhasePrefix + "Loading running times")]
-        public abstract void StartLoadingRunningTimes(LoggingContext context);
+            Message = EventConstants.PhasePrefix + "Loading historic perf data")]
+        public abstract void StartLoadingHistoricPerfData(LoggingContext context);
 
         [GeneratedEvent(
-            (int)LogEventId.EndLoadingRunningTimes,
+            (int)LogEventId.EndLoadingHistoricPerfData,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage | (int)Keywords.Performance,
             EventTask = (int)Tasks.Engine,
             EventOpcode = (byte)EventOpcode.Stop,
-            Message = EventConstants.PhasePrefix + "Done loading running times")]
-        public abstract void EndLoadingRunningTimes(LoggingContext context);
+            Message = EventConstants.PhasePrefix + "Done loading historic perf data")]
+        public abstract void EndLoadingHistoricPerfData(LoggingContext context);
 
         [GeneratedEvent(
-            (int)LogEventId.StartSavingRunningTimes,
+            (int)LogEventId.StartSavingHistoricPerfData,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.Engine,
             EventOpcode = (byte)EventOpcode.Start,
-            Message = EventConstants.PhasePrefix + "Saving updated running times")]
-        public abstract void StartSavingRunningTimes(LoggingContext context);
+            Message = EventConstants.PhasePrefix + "Saving updated historic perf data")]
+        public abstract void StartSavingHistoricPerfData(LoggingContext context);
 
         [GeneratedEvent(
-            (int)LogEventId.EndSavingRunningTimes,
+            (int)LogEventId.EndSavingHistoricPerfData,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage | (int)Keywords.Performance,
             EventTask = (int)Tasks.Engine,
             EventOpcode = (byte)EventOpcode.Stop,
-            Message = EventConstants.PhasePrefix + "Done saving updated running times")]
-        public abstract void EndSavingRunningTimes(LoggingContext context);
+            Message = EventConstants.PhasePrefix + "Done saving updated historic perf data")]
+        public abstract void EndSavingHistoricPerfData(LoggingContext context);
 
         [GeneratedEvent(
             (int)LogEventId.FailedToResolveHistoricDataFileName,
@@ -2107,44 +2134,44 @@ If you can't update and need this feature after July 2018 please reach out to th
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.Diagnostics,
             EventTask = (int)Tasks.Engine,
-            Message = "Unable to resolve historic data filename. Error: {0}")]
+            Message = "Unable to resolve historic perf data filename. Error: {0}")]
         public abstract void FailedToResolveHistoricDataFileName(LoggingContext context, string errorMessage);
 
         [GeneratedEvent(
-            (int)LogEventId.LoadingRunningTimesFailed,
+            (int)LogEventId.LoadingHistoricPerfDataFailed,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.Diagnostics,
             EventTask = (int)Tasks.Engine,
-            Message = "Unable to load historic performance data file {0}: {1}")]
-        public abstract void LoadingRunningTimesFailed(LoggingContext context, string fileName, string errorMessage);
+            Message = "Unable to load historic perf data file {0}: {1}")]
+        public abstract void LoadingHistoricPerfDataFailed(LoggingContext context, string fileName, string errorMessage);
 
         [GeneratedEvent(
-            (int)LogEventId.RunningTimesLoaded,
+            (int)LogEventId.HistoricPerfDataLoaded,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.Engine,
-            Message = "Historic performance data loaded: {0} entries")]
-        public abstract void RunningTimesLoaded(LoggingContext context, int size);
+            Message = "Historic perf data loaded: {0} entries")]
+        public abstract void HistoricPerfDataLoaded(LoggingContext context, int size);
 
         [GeneratedEvent(
-            (int)LogEventId.SavingRunningTimesFailed,
+            (int)LogEventId.SavingHistoricPerfDataFailed,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)Keywords.Diagnostics,
             EventTask = (int)Tasks.Engine,
-            Message = "Unable to save historic performance data file {0}: {1}")]
-        public abstract void SavingRunningTimesFailed(LoggingContext context, string fileName, string errorMessage);
+            Message = "Unable to save historic perf data file {0}: {1}")]
+        public abstract void SavingHistoricPerfDataFailed(LoggingContext context, string fileName, string errorMessage);
 
         [GeneratedEvent(
-            (int)LogEventId.RunningTimesSaved,
+            (int)LogEventId.HistoricPerfDataSaved,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.Engine,
-            Message = "Historic performance data saved: {0} entries")]
-        public abstract void RunningTimesSaved(LoggingContext context, int size);
+            Message = "Historic perf data saved: {0} entries")]
+        public abstract void HistoricPerfDataSaved(LoggingContext context, int size);
 
         [GeneratedEvent(
             (int)LogEventId.FailedToResolveHistoricMetadataCacheFileName,
@@ -2375,15 +2402,15 @@ If you can't update and need this feature after July 2018 please reach out to th
             string environmentVariableName);
 
         [GeneratedEvent(
-            (int)LogEventId.FileAccessWhitelistEntryHasInvalidRegex,
+            (int)LogEventId.FileAccessAllowlistEntryHasInvalidRegex,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (int)Tasks.Engine,
             Message =
                 EventConstants.ProvenancePrefix +
-                "Unable to create file access whitelist entry.  Failed to construct an ECMAScript regex object with error '{3}'.")]
-        public abstract void FileAccessWhitelistEntryHasInvalidRegex(
+                "Unable to create file access allowlist entry.  Failed to construct an ECMAScript regex object with error '{3}'.")]
+        public abstract void FileAccessAllowlistEntryHasInvalidRegex(
             LoggingContext context,
             string file,
             int line,
@@ -2420,15 +2447,15 @@ If you can't update and need this feature after July 2018 please reach out to th
         public abstract void EndEngineRun(LoggingContext context);
 
         [GeneratedEvent(
-            (int)LogEventId.FileAccessWhitelistCouldNotCreateIdentifier,
+            (int)LogEventId.FileAccessAllowlistCouldNotCreateIdentifier,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (int)Tasks.Engine,
             Message =
                 EventConstants.ProvenancePrefix +
-                "Unable to create file access whitelist entry for requested value '{3}'. Value names only allow a-z, 0-9, and '.' separating pars.")]
-        public abstract void FileAccessWhitelistCouldNotCreateIdentifier(
+                "Unable to create file access allowlist entry for requested value '{3}'. Value names only allow a-z, 0-9, and '.' separating pars.")]
+        public abstract void FileAccessAllowlistCouldNotCreateIdentifier(
             LoggingContext context,
             string file,
             int line,
@@ -2568,13 +2595,13 @@ If you can't update and need this feature after July 2018 please reach out to th
 
 
         [GeneratedEvent(
-            (ushort)LogEventId.FailedToInitalizeFileAccessWhitelist,
+            (ushort)LogEventId.FailedToInitalizeFileAccessAllowlist,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Scheduler,
-            Message = "Failed to initialize the FileAccess whitelist: {error}")]
-        internal abstract void FailedToInitializeFileAccessWhitelist(LoggingContext loggingContext, string error);
+            Message = "Failed to initialize the FileAccess allowlist: {error}")]
+        internal abstract void FailedToInitializeFileAccessAllowlist(LoggingContext loggingContext, string error);
 
         [GeneratedEvent(
             (ushort)LogEventId.ForceSkipDependenciesOrDistributedBuildOverrideIncrementalScheduling,

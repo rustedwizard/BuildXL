@@ -124,6 +124,11 @@ namespace Test.DScript.Ast
                 // Ignore DX222 for csc.exe being outside of src directory
                 IgnoreWarnings();
 
+                if (engine == null)
+                {
+                    return null;
+                }
+
                 engine.TestHooks = testHooks;
 
                 var result = engine.RunForFrontEndTests(LoggingContext);
@@ -161,6 +166,13 @@ namespace Test.DScript.Ast
             }
 
             return (FrontEndHostController)engine.FrontEndController;
+        }
+
+        protected static bool IsDependencyAndDependent(global::BuildXL.Pips.Operations.Process dependency, global::BuildXL.Pips.Operations.Process dependent)
+        {
+            // Unfortunately the test pip graph we are using doesn't keep track of dependencies/dependents. So we check there is a directory output of the dependency 
+            // that is a directory input for a dependent
+            return dependency.DirectoryOutputs.Any(directoryOutput => dependent.DirectoryDependencies.Any(directoryDependency => directoryDependency == directoryOutput));
         }
     }
 }

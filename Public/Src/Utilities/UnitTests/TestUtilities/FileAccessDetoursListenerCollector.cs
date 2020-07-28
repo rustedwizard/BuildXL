@@ -37,7 +37,7 @@ namespace Test.BuildXL.TestUtilities
         }
 
         /// <inheritdoc/>
-        public override void HandleFileAccess(long pipId, string pipDescription, ReportedFileOperation operation, RequestedAccess requestedAccess, FileAccessStatus status, bool explicitlyReported, uint processId, uint error, DesiredAccess desiredAccess, ShareMode shareMode, CreationDisposition creationDisposition, FlagsAndAttributes flagsAndAttributes, string path, string processArgs)
+        public override void HandleFileAccess(long pipId, string pipDescription, ReportedFileOperation operation, RequestedAccess requestedAccess, FileAccessStatus status, bool explicitlyReported, uint processId, uint error, DesiredAccess desiredAccess, ShareMode shareMode, CreationDisposition creationDisposition, FlagsAndAttributes flagsAndAttributes, string path, string processArgs, bool isAnAugmentedFileAccess)
         {
             if (AbsolutePath.TryCreate(m_pathTable, path, out AbsolutePath absolutePath))
             {
@@ -58,7 +58,7 @@ namespace Test.BuildXL.TestUtilities
         }
 
         /// <inheritdoc/>
-        public override void HandleProcessDetouringStatus(ulong processId, uint reportStatus, string processName, string startApplicationName, string startCommandLine, bool needsInjection, ulong hJob, bool disableDetours, uint creationFlags, bool detoured, uint error, uint createProcessStatusReturn)
+        public override void HandleProcessDetouringStatus(ProcessDetouringStatusData data)
         {
         }
     }

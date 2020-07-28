@@ -42,7 +42,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             ServiceClientContentSessionTracer tracer,
             IAbsFileSystem fileSystem,
             int grpcPort,
-            string scenario,
+            string? scenario,
             TimeSpan? heartbeatInterval = null,
             Capabilities capabilities = Capabilities.ContentOnly)
             : this(tracer, fileSystem, new ServiceClientRpcConfiguration(grpcPort, heartbeatInterval), scenario, capabilities)
@@ -56,7 +56,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             ServiceClientContentSessionTracer tracer,
             IAbsFileSystem fileSystem,
             ServiceClientRpcConfiguration configuration,
-            string scenario,
+            string? scenario,
             Capabilities capabilities = Capabilities.ContentOnly)
             : base(fileSystem, tracer, configuration, scenario, capabilities)
         {
@@ -94,7 +94,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             {
                 try
                 {
-                    Stream stream = await FileSystem.OpenReadOnlyAsync(tempPath, FileShare.Delete | FileShare.Read);
+                    StreamWithLength? stream = await FileSystem.OpenReadOnlyAsync(tempPath, FileShare.Delete | FileShare.Read);
                     if (stream == null)
                     {
                         throw new ClientCanRetryException(context, $"Failed to open temp file {tempPath}. The service may have restarted");
@@ -362,22 +362,24 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         }
 
         /// <inheritdoc />
-        public Task<PutResult> PutStreamAsync(Context context, ContentHash contentHash, Stream stream)
+        public Task<PutResult> PutStreamAsync(Context context, ContentHash contentHash, Stream stream, bool createDirectory)
         {
             return PutStreamInternalAsync(
                 context,
                 stream,
                 contentHash,
+                createDirectory: createDirectory,
                 (sessionContext, tempFile) => PutFileAsync(sessionContext, contentHash, tempFile, FileRealizationMode.HardLink));
         }
 
         /// <inheritdoc />
-        public Task<PutResult> PutStreamAsync(Context context, HashType hashType, Stream stream)
+        public Task<PutResult> PutStreamAsync(Context context, HashType hashType, Stream stream, bool createDirectory)
         {
             return PutStreamInternalAsync(
                 context,
                 stream,
                 new ContentHash(hashType),
+                createDirectory: createDirectory,
                 (sessionContext, tempFile) => PutFileAsync(sessionContext, hashType, tempFile, FileRealizationMode.HardLink));
         }
 
@@ -395,9 +397,28 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 };
 
                 DeleteContentResponse response = await Client.DeleteAsync(request);
+                if (!deleteLocalOnly)
+                {
+                    var deleteResultsMapping = new Dictionary<string, DeleteResult>();
+                    foreach (var kvp in response.DeleteResults)
+                    {
+                        var header = kvp.Value;
+                        var deleteResult = string.IsNullOrEmpty(header.ErrorMessage)
+                            ? new DeleteResult(
+                                (DeleteResult.ResultCode)header.Result,
+                                hash,
+                                response.ContentSize)
+                            : new DeleteResult((DeleteResult.ResultCode)header.Result, header.ErrorMessage, header.Diagnostics);
+
+                        deleteResultsMapping.Add(kvp.Key, deleteResult);
+                    }
+
+                    return new DistributedDeleteResult(hash, response.ContentSize, deleteResultsMapping);
+                }
+
                 if (response.Header.Succeeded)
                 {
-                    return new DeleteResult((DeleteResult.ResultCode)response.Result, hash, response.EvictedSize, response.PinnedSize);
+                    return new DeleteResult((DeleteResult.ResultCode)response.Result, hash, response.ContentSize);
                 }
                 else
                 {
@@ -417,7 +438,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             }
         }
 
-        private async Task<PutResult> PutStreamInternalAsync(Context context, Stream stream, ContentHash contentHash, Func<SessionContext, AbsolutePath, Task<PutResult>> putFileFunc)
+        private async Task<PutResult> PutStreamInternalAsync(Context context, Stream stream, ContentHash contentHash, bool createDirectory, Func<SessionContext, AbsolutePath, Task<PutResult>> putFileFunc)
         {
             var sessionContextResult = await CreateSessionContextAsync(context);
             if (!sessionContextResult)
@@ -432,6 +453,15 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 if (stream.CanSeek)
                 {
                     stream.Position = 0;
+                }
+
+                if (createDirectory)
+                {
+                    var parentDirectory = tempFile.GetParent();
+                    if (!FileSystem.DirectoryExists(parentDirectory))
+                    {
+                        FileSystem.CreateDirectory(parentDirectory);
+                    }
                 }
 
                 using (var fileStream = await FileSystem.OpenAsync(tempFile, FileAccess.Write, FileMode.Create, FileShare.Delete))
@@ -477,9 +507,9 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         }
 
         /// <inheritdoc />
-        protected override AsyncUnaryCall<HeartbeatResponse> HeartbeatAsync(HeartbeatRequest heartbeatRequest)
+        protected override AsyncUnaryCall<HeartbeatResponse> HeartbeatAsync(HeartbeatRequest heartbeatRequest, CancellationToken token)
         {
-            return Client.HeartbeatAsync(heartbeatRequest);
+            return Client.HeartbeatAsync(heartbeatRequest, cancellationToken: token);
         }
 
         /// <inheritdoc />

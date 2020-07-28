@@ -10,13 +10,21 @@ import {Transformer} from "Sdk.Transformers";
 namespace Test.Rush {
     
     // Install Rush for tests
-    const result = Node.Npm.install({
+    const rush = Node.Npm.install({
         name: "@microsoft/rush", 
-        version: "5.20.0", 
+        version: "5.22.0", 
         destinationFolder: Context.getNewOutputDirectory(a`rush-test`)});
     
+    const rushlib = Node.Npm.install({
+        name: "@microsoft/rush-lib", 
+        version: "5.22.0", 
+        destinationFolder: Context.getNewOutputDirectory(a`rushlib-test`)});
+
+    // TODO: to enable this, we should use an older version of NodeJs for Linux
+    const isRunningOnSupportedSystem = Context.getCurrentHost().cpuArchitecture === "x64" && !BuildXLSdk.isHostOsLinux;
+
     @@public
-    export const dll = BuildXLSdk.test({
+    export const dll = isRunningOnSupportedSystem && BuildXLSdk.test({
         // QTest is not supporting opaque directories as part of the deployment
         testFramework: importFrom("Sdk.Managed.Testing.XUnit").framework,
         runTestArgs: {
@@ -24,9 +32,18 @@ namespace Test.Rush {
                 // These tests require Detours to run itself, so we won't detour the test runner process itself
                 runWithUntrackedDependencies: true,
             },
+            parallelGroups: [
+                 "BxlRushConfigurationTests",
+                 "RushCustomCommandsTests",
+                 "RushExecuteTests",
+                 "RushExportsTests",
+                 "RushIntegrationTests",
+                 "RushLibLocationTests",
+                 "RushSchedulingTests"
+            ]
         },
         assemblyName: "Test.BuildXL.FrontEnd.Rush",
-        sources: globR(d`.`, "*.cs"),
+        sources: globR(d`.`, "*.cs"), 
         references: [
             Script.dll,
             Core.dll,
@@ -37,6 +54,7 @@ namespace Test.Rush {
             importFrom("BuildXL.FrontEnd").Core.dll,
             importFrom("BuildXL.FrontEnd").Script.dll,
             importFrom("BuildXL.FrontEnd").Sdk.dll,
+            importFrom("BuildXL.FrontEnd").JavaScript.dll,
             importFrom("BuildXL.FrontEnd").Rush.dll,
             importFrom("BuildXL.FrontEnd").TypeScript.Net.dll,
             importFrom("BuildXL.FrontEnd").Utilities.dll,
@@ -52,8 +70,17 @@ namespace Test.Rush {
         runtimeContent: [
             // We need Rush and Node to run these tests
             {
-                subfolder: a`rush`,
-                contents: [result.nodeModules]
+                // We don't really have a proper rush installation, since we are preventing npm
+                // to create symlinks by default. So 'simulate' one by placing the expected
+                // rush-lib dependency in a nested location.
+                subfolder: r`rush/node_modules`,
+                contents: [
+                    rush.nodeModules,
+                    {
+                        subfolder: r`@microsoft/rush/node_modules`,
+                        contents: [rushlib.nodeModules]
+                    }
+                ]
             },
             {
                 subfolder: a`node`,
@@ -66,12 +93,11 @@ namespace Test.Rush {
     const nodeOsxDir = "node-v12.16.1-darwin-x64";
 
     function getNodeExeForRushDirectory(): StaticDirectory {
-        const host = Context.getCurrentHost();
-    
-        Contract.assert(host.cpuArchitecture === "x64", "Only 64bit verisons supported.");
-    
+        Contract.assert(isRunningOnSupportedSystem, "Only 64bit versions of Win and OSX supported.");
+
         let pkgContents : StaticDirectory = undefined;
-        
+
+        const host = Context.getCurrentHost();
         switch (host.os) {
             case "win":
                 pkgContents = Transformer.reSealPartialDirectory(importFrom("NodeJs.ForRush.win-x64").extracted, r`${nodeWinDir}`);
@@ -80,9 +106,9 @@ namespace Test.Rush {
                 pkgContents = Transformer.reSealPartialDirectory(importFrom("NodeJs.ForRush.osx-x64").extracted, r`${nodeOsxDir}\bin`);
                 break;
             default:
-                Contract.fail(`The current NodeJs package doesn't support the current OS: ${host.os}. Esure you run on a supported OS -or- update the NodeJs package to have the version embdded.`);
+                Contract.fail(`The current NodeJs package doesn't support the current OS: ${host.os}. Ensure you run on a supported OS -or- update the NodeJs package to have the version embdded.`);
         }
-        
+
         return pkgContents;
     }
 }

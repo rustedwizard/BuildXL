@@ -16,7 +16,7 @@
  * When a process forks, the child process inherits the path from its parent.
  */
 
-class SandboxedProcess
+class SandboxedProcess final
 {
 
 private:
@@ -52,7 +52,7 @@ public:
     inline const char* GetPath() const                           { return path_; }
 
     /*! Copies the 0-terminated string in 'path' to its own path buffer. */
-    inline void SetPath(const char *path, size_t len = PATH_MAX) { strlcpy(path_, path, len); }
+    inline void SetPath(const char *path) { strlcpy(path_, path, PATH_MAX); }
 };
 
 #endif /* SandboxedProcess_hpp */

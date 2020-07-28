@@ -2,10 +2,13 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
+using NLog;
+using ILogger = BuildXL.Cache.ContentStore.Interfaces.Logging.ILogger;
 
 namespace BuildXL.Cache.Logging.External
 {
@@ -26,7 +29,7 @@ namespace BuildXL.Cache.Logging.External
         /// <summary>
         /// Whether to set unobserved task exceptions as observed.
         /// </summary>
-        public bool CatchUnobservedTaskExceptions { get; set; } = false;
+        public bool ObserveUnobservedTaskExceptions { get; set; } = true;
 
         /// <nodoc />
         public NLogAdapter(ILogger logger, NLog.Config.LoggingConfiguration configuration)
@@ -137,7 +140,37 @@ namespace BuildXL.Cache.Logging.External
         public void Log(Severity severity, string correlationId, string message)
         {
             var logLine = new NLog.LogEventInfo(level: Translate(severity), loggerName: null, message: message);
-            logLine.Properties[MetaData.OperationCorrelationId] = correlationId;
+            logLine.Properties[MetaData.CorrelationId] = correlationId;
+
+            _nlog.Log(logLine);
+
+            if (severity == Severity.Error)
+            {
+                Interlocked.Increment(ref _errorCount);
+            }
+        }
+
+        /// <inheritdoc />
+        public void Log(in LogMessage logMessage)
+        {
+            var severity = logMessage.Severity;
+
+            var logLine = CreateLogEventInfo(logMessage);
+
+            _nlog.Log(logLine);
+
+            if (severity == Severity.Error)
+            {
+                Interlocked.Increment(ref _errorCount);
+            }
+        }
+
+        /// <inheritdoc />
+        public void LogOperationStarted(in OperationStarted operation)
+        {
+            var severity = operation.Severity;
+
+            var logLine = CreateLogEventInfo(operation);
 
             _nlog.Log(logLine);
 
@@ -151,23 +184,65 @@ namespace BuildXL.Cache.Logging.External
         public void LogOperationFinished(in OperationResult result)
         {
             var severity = result.Severity;
-
-            var logLine = new NLog.LogEventInfo(level: Translate(severity), loggerName: null, message: result.Message);
-            logLine.Exception = result.Exception;
-            logLine.Properties[MetaData.OperationCorrelationId] = result.OperationId;
-            logLine.Properties[MetaData.OperationName] = result.OperationName;
-            logLine.Properties[MetaData.OperationComponent] = result.TracerName;
-            // Arguments can take arbitrary information. It should be space separated
-            // key values.
-            logLine.Properties[MetaData.OperationArguments] = "Kind=" + result.OperationKind;
-            logLine.Properties[MetaData.OperationResult] = result.Status;
-            logLine.Properties[MetaData.OperationDuration] = result.Duration;
+            var logLine = CreateLogEventInfo(result);
 
             _nlog.Log(logLine);
 
             if (severity == Severity.Error)
             {
                 Interlocked.Increment(ref _errorCount);
+            }
+        }
+
+        /// <summary>
+        /// Helper method that creates <see cref="LogEventInfo"/> from <see cref="OperationStarted"/>
+        /// </summary>
+        internal static LogEventInfo CreateLogEventInfo(in LogMessage operation)
+        {
+            var logLine = new LogEventInfo(level: Translate(operation.Severity), loggerName: null, message: operation.Message);
+            SetCoreProperties(logLine, operation);
+            return logLine;
+        }
+
+        /// <summary>
+        /// Helper method that creates <see cref="LogEventInfo"/> from <see cref="OperationStarted"/>
+        /// </summary>
+        internal static LogEventInfo CreateLogEventInfo(in OperationStarted operation)
+        {
+            var logLine = new NLog.LogEventInfo(level: Translate(operation.Severity), loggerName: null, message: operation.Message);
+            SetCoreProperties(logLine, operation);
+            return logLine;
+        }
+
+        /// <summary>
+        /// Helper method that creates <see cref="LogEventInfo"/> from <see cref="OperationResult"/>
+        /// </summary>
+        internal static LogEventInfo CreateLogEventInfo(in OperationResult result)
+        {
+            var severity = result.Severity;
+            
+            var logLine = new NLog.LogEventInfo(level: Translate(severity), loggerName: null, message: result.Message);
+            SetCoreProperties(logLine, result);
+
+            logLine.Exception = result.Exception;
+            logLine.Properties[MetaData.OperationResult] = result.Status;
+            logLine.Properties[MetaData.OperationDuration] = result.Duration;
+
+            return logLine;
+        }
+
+        private static void SetCoreProperties<T>(NLog.LogEventInfo logLine, T operation)
+            where T : IOperationInfo
+        {
+            logLine.Properties[MetaData.CorrelationId] = operation.OperationId;
+            logLine.Properties[MetaData.OperationName] = operation.OperationName;
+            logLine.Properties[MetaData.OperationComponent] = operation.TracerName;
+
+            // Arguments can take arbitrary information. It should be space separated
+            // key values.
+            if (operation.OperationKind != OperationKind.None)
+            {
+                logLine.Properties[MetaData.OperationArguments] = "Kind=" + operation.OperationKind;
             }
         }
 
@@ -252,19 +327,31 @@ namespace BuildXL.Cache.Logging.External
         private void TaskScheduler_UnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs args)
         {
             var exception = args.Exception;
+            var exceptionObserver = new TaskExceptionObserver();
 
             try
             {
-                _host.Error(exception, "An exception has occurred in an unobserved task. Process will exit");
+                if (!exceptionObserver.IsWellKnownException(exception))
+                {
+                    _nlog.Log(Translate(Severity.Warning), "Exception has occurred in an unobserved task. Process may exit. Exception=[{0}]", exception);
+                }
             }
-            catch (Exception loggerException)
+            catch (Exception nLogException)
             {
-                Console.WriteLine("Logger threw exception: {0} while trying to log an unobserved task exception: {1}",
-                                  loggerException,
-                                  exception);
+                try
+                {
+                    _host.Warning("NLog threw exception: {0} while trying to log an unobserved task exception: {1}", nLogException, exception);
+                }
+                catch (Exception hostException)
+                {
+                    Console.WriteLine("NLog threw exception: {0} Host logger threw exception: {1} while trying to log an unobserved task exception: {2}",
+                        nLogException,
+                        hostException,
+                        exception);
+                }
             }
 
-            if (CatchUnobservedTaskExceptions && !args.Observed)
+            if (ObserveUnobservedTaskExceptions && exceptionObserver.IsWellKnownException(exception) && !args.Observed)
             {
                 args.SetObserved();
             }
@@ -352,7 +439,7 @@ namespace BuildXL.Cache.Logging.External
         public class MetaData
         {
             /// <nodoc />
-            public const string OperationCorrelationId = nameof(OperationCorrelationId);
+            public const string CorrelationId = nameof(CorrelationId);
 
             /// <nodoc />
             public const string OperationComponent = nameof(OperationComponent);
@@ -368,9 +455,6 @@ namespace BuildXL.Cache.Logging.External
 
             /// <nodoc />
             public const string OperationDuration = nameof(OperationDuration);
-
-            /// <nodoc />
-            public const string OperationException = nameof(OperationException);
         }
     }
 }

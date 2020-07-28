@@ -108,11 +108,6 @@ namespace BuildXL.Processes
         public Exception StandardInputException { get; internal set; }
 
         /// <summary>
-        /// Number of retries to execute this pip.
-        /// </summary>
-        public int NumberOfProcessLaunchRetries { get; internal set; }
-
-        /// <summary>
         /// Whether there were ReadWrite access requests changed to Read access requests.
         /// </summary>
         public bool HasReadWriteToReadFileAccessRequest { get; internal set; }
@@ -152,18 +147,18 @@ namespace BuildXL.Processes
         /// <summary>
         /// Serializes this instance to a given <paramref name="stream"/>.
         /// </summary>
-        public void Serialize(Stream stream)
+        public void Serialize(Stream stream, Action<BuildXLWriter, AbsolutePath> writePath = null)
         {
             using (var writer = new BuildXLWriter(false, stream, true, true))
             {
-                Serialize(writer);
+                Serialize(writer, writePath);
             }
         }
 
         /// <summary>
         /// Serializes this instance to a given <paramref name="writer"/>.
         /// </summary>
-        public void Serialize(BuildXLWriter writer)
+        public void Serialize(BuildXLWriter writer, Action<BuildXLWriter, AbsolutePath> writePath = null)
         {
             writer.Write(ExitCode);
             writer.Write(Killed);
@@ -177,15 +172,14 @@ namespace BuildXL.Processes
             writer.Write(JobAccountingInformation, (w, v) => v.Serialize(w));
             writer.Write(StandardOutput, (w, v) => v.Serialize(w));
             writer.Write(StandardError, (w, v) => v.Serialize(w));
-            writer.Write(FileAccesses, (w, v) => w.WriteReadOnlyList(v.ToList(), (w2, v2) => v2.Serialize(writer, processMap, writePath: null)));
-            writer.Write(ExplicitlyReportedFileAccesses, (w, v) => w.WriteReadOnlyList(v.ToList(), (w2, v2) => v2.Serialize(writer, processMap, writePath: null)));
-            writer.Write(AllUnexpectedFileAccesses, (w, v) => w.WriteReadOnlyList(v.ToList(), (w2, v2) => v2.Serialize(writer, processMap, writePath: null)));
+            writer.Write(FileAccesses, (w, v) => w.WriteReadOnlyList(v.ToList(), (w2, v2) => v2.Serialize(writer, processMap, writePath: writePath)));
+            writer.Write(ExplicitlyReportedFileAccesses, (w, v) => w.WriteReadOnlyList(v.ToList(), (w2, v2) => v2.Serialize(writer, processMap, writePath: writePath)));
+            writer.Write(AllUnexpectedFileAccesses, (w, v) => w.WriteReadOnlyList(v.ToList(), (w2, v2) => v2.Serialize(writer, processMap, writePath: writePath)));
             writer.Write(Processes, (w, v) => w.WriteReadOnlyList(v, (w2, v2) => w2.Write(processMap[v2])));
             writer.Write(DetouringStatuses, (w, v) => w.WriteReadOnlyList(v, (w2, v2) => v2.Serialize(w2)));
             writer.WriteNullableString(DumpFileDirectory);
             writer.WriteNullableString(DumpCreationException?.Message);
             writer.WriteNullableString(StandardInputException?.Message);
-            writer.Write(NumberOfProcessLaunchRetries);
             writer.Write(HasReadWriteToReadFileAccessRequest);
             writer.WriteNullableString(MessageProcessingFailure?.Describe());
             writer.Write(ProcessStartTime);
@@ -198,20 +192,18 @@ namespace BuildXL.Processes
         /// <summary>
         /// Deserializes an instance of <see cref="SandboxedProcessResult"/>.
         /// </summary>
-        public static SandboxedProcessResult Deserialize(Stream stream)
+        public static SandboxedProcessResult Deserialize(Stream stream, Func<BuildXLReader, AbsolutePath> readPath = null)
         {
             using (var reader = new BuildXLReader(false, stream, true))
             {
-                return Deserialize(reader);
+                return Deserialize(reader, readPath);
             }
         }
 
         /// <summary>
         /// Deserializes an instance of <see cref="SandboxedProcessResult"/>.
         /// </summary>
-        /// <param name="reader"></param>
-        /// <returns></returns>
-        public static SandboxedProcessResult Deserialize(BuildXLReader reader)
+        public static SandboxedProcessResult Deserialize(BuildXLReader reader, Func<BuildXLReader, AbsolutePath> readPath = null)
         {
             int exitCode = reader.ReadInt32();
             bool killed = reader.ReadBoolean();
@@ -224,15 +216,14 @@ namespace BuildXL.Processes
             JobObject.AccountingInformation? jobAccountingInformation = reader.ReadNullableStruct(r => JobObject.AccountingInformation.Deserialize(r));
             SandboxedProcessOutput standardOutput = reader.ReadNullable(r => SandboxedProcessOutput.Deserialize(r));
             SandboxedProcessOutput standardError = reader.ReadNullable(r => SandboxedProcessOutput.Deserialize(r));
-            IReadOnlyList<ReportedFileAccess> fileAccesses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ReportedFileAccess.Deserialize(r2, allReportedProcesses, readPath: null)));
-            IReadOnlyList<ReportedFileAccess> explicitlyReportedFileAccesses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ReportedFileAccess.Deserialize(r2, allReportedProcesses, readPath: null)));
-            IReadOnlyList<ReportedFileAccess> allUnexpectedFileAccesses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ReportedFileAccess.Deserialize(r2, allReportedProcesses, readPath: null)));
+            IReadOnlyList<ReportedFileAccess> fileAccesses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ReportedFileAccess.Deserialize(r2, allReportedProcesses, readPath: readPath)));
+            IReadOnlyList<ReportedFileAccess> explicitlyReportedFileAccesses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ReportedFileAccess.Deserialize(r2, allReportedProcesses, readPath: readPath)));
+            IReadOnlyList<ReportedFileAccess> allUnexpectedFileAccesses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ReportedFileAccess.Deserialize(r2, allReportedProcesses, readPath: readPath)));
             IReadOnlyList<ReportedProcess> processes = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => allReportedProcesses[r2.ReadInt32()]));
             IReadOnlyList<ProcessDetouringStatusData> detouringStatuses = reader.ReadNullable(r => r.ReadReadOnlyList(r2 => ProcessDetouringStatusData.Deserialize(r2)));
             string dumpFileDirectory = reader.ReadNullableString();
             string dumpCreationExceptionMessage = reader.ReadNullableString();
             string standardInputExceptionMessage = reader.ReadNullableString();
-            int numberOfPRocessLaunchRetries = reader.ReadInt32();
             bool hasReadWriteToReadFileAccessRequest = reader.ReadBoolean();
             string messageProcessingFailureMessage = reader.ReadNullableString();
             long processStartTime = reader.ReadInt64();
@@ -260,7 +251,6 @@ namespace BuildXL.Processes
                 DumpFileDirectory = dumpFileDirectory,
                 DumpCreationException = dumpCreationExceptionMessage != null ? new Exception(dumpCreationExceptionMessage) : null,
                 StandardInputException = standardInputExceptionMessage != null ? new Exception(standardInputExceptionMessage) : null,
-                NumberOfProcessLaunchRetries = numberOfPRocessLaunchRetries,
                 HasReadWriteToReadFileAccessRequest = hasReadWriteToReadFileAccessRequest,
                 MessageProcessingFailure = messageProcessingFailureMessage != null ? new Failure<string>(messageProcessingFailureMessage) : null,
                 ProcessStartTime = processStartTime,

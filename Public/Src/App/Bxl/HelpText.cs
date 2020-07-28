@@ -186,6 +186,10 @@ namespace BuildXL
             #region Logging
 
             hw.WriteOption(
+                "/maxNumPipTelemetryBatches:<int>",
+                Strings.HelpText_DisplayHelp_MaxNumPipTelemetryBatches);
+            
+            hw.WriteOption(
                 "/logsDirectory:<path>",
                 Strings.HelpText_DisplayHelp_LogsDirectory);
 
@@ -339,6 +343,11 @@ namespace BuildXL
             hw.WriteOption(
                 "/trackBuildsInUserFolder[+-]",
                 Strings.HelpText_DisplayHelp_TrackBuildsInUserFolder,
+                HelpLevel.Verbose
+                );
+            hw.WriteOption(
+                "/trackGvfsProjections[+-]",
+                Strings.HelpText_DisplayHelp_TrackGvfsProjections,
                 HelpLevel.Verbose
                 );
             hw.WriteOption(
@@ -625,6 +634,11 @@ namespace BuildXL
                 HelpLevel.Verbose);
 
             hw.WriteOption(
+                "/manageMemoryMode:<memory mode>",
+                Strings.HelpText_DisplayHelp_ManageMemoryMode,
+                HelpLevel.Verbose);
+
+            hw.WriteOption(
                 "/phase:<engine phase>",
                 Strings.HelpText_DisplayHelp_Phase);
 
@@ -795,6 +809,11 @@ namespace BuildXL
                 "/adminRequiredProcessExecutionMode:<mode>",
                 Strings.HelpText_DisplayHelp_AdminRequiredProcessExecutionMode,
                 HelpLevel.Verbose);
+
+            hw.WriteOption(
+                "/vmConcurrencyLimit:<max number of processes executed in VM>",
+                Strings.HelpText_DisplayHelp_VmConcurrencyLimit,
+                HelpLevel.Verbose);
             #endregion
 
             hw.WriteBanner(
@@ -897,6 +916,11 @@ namespace BuildXL
             hw.WriteOption(
                 "/unsafe_IgnoreReparsePoints[+|-]",
                 Strings.HelpText_DisplayHelp_IgnoreReparsePoints,
+                HelpLevel.Verbose);
+
+            hw.WriteOption(
+                "/unsafe_IgnoreFullSymlinkResolving[+|-]",
+                Strings.HelpText_DisplayHelp_IgnoreFullSymlinkResolving,
                 HelpLevel.Verbose);
 
             hw.WriteOption(
@@ -1139,32 +1163,12 @@ namespace BuildXL
                 HelpLevel.Verbose);
 
             hw.WriteOption(
-                "/symlinkDefinitionFile:<file>",
-                Strings.HelpText_DisplayHelp_SymlinkDefinitionFile);
-
-            hw.WriteOption(
                 "/inputChanges:<file>",
                 Strings.HelpText_DisplayHelp_InputChanges);
 
             hw.WriteOption(
                 "/telemetryTagPrefix:<string>",
                 Strings.HelpText_DisplayHelp_TelemetryTagPrefix);
-
-            hw.WriteOption(
-                "/populateSymlinkDirectory:<file>",
-                Strings.HelpText_DisplayHelp_PopulateSymlinkDirectory);
-
-            hw.WriteOption(
-                "/unsafe_LazySymlinkCreation[+|-]",
-                Strings.HelpText_DisplayHelp_LazySymlinkCreation);
-
-            hw.WriteOption(
-                "/unsafe_LazySymlinkCreation[+|-]",
-                Strings.HelpText_DisplayHelp_LazySymlinkCreation);
-
-            hw.WriteOption(
-                "/unexpectedSymlinkAccessReportingMode:<mode>",
-                Strings.HelpText_DisplayHelp_UnexpectedSymlinkAccessReportingMode);
 
             hw.WriteOption(
                 "/unsafe_DisableGraphPostValidation[+|-]",

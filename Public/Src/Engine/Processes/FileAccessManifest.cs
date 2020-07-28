@@ -67,6 +67,7 @@ namespace BuildXL.Processes
             ReportProcessArgs = false;
             ForceReadOnlyForRequestedReadWrite = false;
             IgnoreReparsePoints = false;
+            IgnoreFullSymlinkResolving = true; // TODO: Change this when customers onboard the feature.
             IgnorePreloadedDlls = true; // TODO: Change this when customers onboard the feature.
             DisableDetours = false;
             IgnoreZwRenameFileInformation = false;
@@ -280,6 +281,15 @@ namespace BuildXL.Processes
         {
             get => GetFlag(FileAccessManifestFlag.IgnoreReparsePoints);
             set => SetFlag(FileAccessManifestFlag.IgnoreReparsePoints, value);
+        }
+        
+        /// <summary>
+        /// If true, paths with symbolic links are not fully resolved nor reported.
+        /// </summary>
+        public bool IgnoreFullSymlinkResolving
+        {
+            get => GetFlag(FileAccessManifestFlag.IgnoreFullSymlinkResolving);
+            set => SetFlag(FileAccessManifestFlag.IgnoreFullSymlinkResolving, value);
         }
 
         /// <summary>
@@ -1124,7 +1134,8 @@ namespace BuildXL.Processes
             QBuildIntegrated = 0x4000000,
             IgnorePreloadedDlls = 0x8000000,
             EnforceAccessPoliciesOnDirectoryCreation = 0x10000000,
-            ProbeDirectorySymlinkAsDirectory = 0x20000000
+            ProbeDirectorySymlinkAsDirectory = 0x20000000,
+            IgnoreFullSymlinkResolving = 0x40000000
         }
 
         // CODESYNC: DataTypes.h
@@ -1929,24 +1940,26 @@ namespace BuildXL.Processes
             private static List<Tuple<short, string>> GetNames()
             {
                 var names = new List<Tuple<short, string>>
-                            {
-                                Tuple.Create((short)FileAccessPolicy.Deny, "Deny"),
-                                Tuple.Create((short)FileAccessPolicy.AllowRead, "Read"),
-                                Tuple.Create((short)FileAccessPolicy.AllowWrite, "Write"),
-                                Tuple.Create((short)FileAccessPolicy.AllowSymlinkCreation, "CreateSymlink"),
-                                Tuple.Create((short)FileAccessPolicy.AllowReadIfNonexistent, "ReadIfNonexistent"),
-                                Tuple.Create((short)FileAccessPolicy.AllowCreateDirectory, "CreateDirectory"),
-                                Tuple.Create((short)FileAccessPolicy.ReportAccess, "ReportAccess"),
-
-                                // Note that composite values must appear before their parts.
-                                Tuple.Create((short)FileAccessPolicy.ReportAccessIfExistent, "ReportAccessIfExistent"),
-                                Tuple.Create(
-                                    (short)FileAccessPolicy.ReportAccessIfNonexistent,
-                                    "ReportAccessIfNonExistent"),
-                                Tuple.Create(
-                                    (short)FileAccessPolicy.ReportDirectoryEnumerationAccess,
-                                    "ReportDirectoryEnumerationAccess")
-                            };
+                {
+                    Tuple.Create((short)FileAccessPolicy.Deny, "Deny"),
+                    Tuple.Create((short)FileAccessPolicy.AllowRead, "Read"),
+                    Tuple.Create((short)FileAccessPolicy.AllowWrite, "Write"),
+                    Tuple.Create((short)FileAccessPolicy.AllowReadIfNonexistent, "ReadIfNonexistent"),
+                    Tuple.Create((short)FileAccessPolicy.AllowCreateDirectory, "CreateDirectory"),
+                    Tuple.Create((short)FileAccessPolicy.AllowSymlinkCreation, "CreateSymlink"),
+                    Tuple.Create((short)FileAccessPolicy.AllowRealInputTimestamps, "RealInputTimestamps"),
+                    Tuple.Create((short)FileAccessPolicy.OverrideAllowWriteForExistingFiles, "OverrideAllowWriteForExistingFiles"),
+                    Tuple.Create((short)FileAccessPolicy.TreatDirectorySymlinkAsDirectory, "DirectorySymlinkAsDirectory"),
+                    Tuple.Create((short)FileAccessPolicy.ReportAccess, "ReportAccess"),
+                    // Note that composite values must appear before their parts.
+                    Tuple.Create((short)FileAccessPolicy.ReportAccessIfExistent, "ReportAccessIfExistent"),
+                    Tuple.Create(
+                        (short)FileAccessPolicy.ReportAccessIfNonexistent,
+                        "ReportAccessIfNonExistent"),
+                    Tuple.Create(
+                        (short)FileAccessPolicy.ReportDirectoryEnumerationAccess,
+                        "ReportDirectoryEnumerationAccess")
+                };
 
                 return names;
             }
@@ -1964,7 +1977,8 @@ namespace BuildXL.Processes
                 bool first = true;
                 foreach (Tuple<short, string> pair in s_names)
                 {
-                    if ((i & pair.Item1) == pair.Item1)
+                    if (pair.Item1 != 0 && (i & pair.Item1) == pair.Item1
+                        || pair.Item1 == 0 && i == 0)
                     {
                         if (first)
                         {

@@ -330,6 +330,13 @@ namespace BuildXL.Native.IO
         bool IsReparsePointActionable(ReparsePointType reparsePointType);
 
         /// <summary>
+        /// Returns whether the reparse point type is a symbolic link.
+        /// </summary>
+        /// <param name="reparsePointType">The type of the reparse point.</param>
+        /// <returns>true if this is an reparse point of symbolic link type, otherwise false.</returns>
+        bool IsReparsePointSymbolicLink(ReparsePointType reparsePointType);
+
+        /// <summary>
         /// Returns <see cref="ReparsePointType"/> of a path.
         /// </summary>
         /// <param name="path">Path to check for reparse point.</param>
@@ -612,6 +619,14 @@ namespace BuildXL.Native.IO
         /// then this function falls back to act as if <paramref name="volumeGuidPath"/> was true).
         /// </summary>
         string GetFinalPathNameByHandle(SafeFileHandle handle, bool volumeGuidPath = false);
+
+        /// <summary>
+        /// Attempts to open a handle to the given path and then calls <see cref="GetFinalPathNameByHandle(SafeFileHandle, bool)"/>
+        /// </summary>
+        /// <remarks>
+        /// This function never throws. On failure <paramref name="nativeErrorCode"/> contains the error.
+        /// </remarks>
+        bool TryGetFinalPathNameByPath(string path, out string finalPath, out int nativeErrorCode, bool volumeGuidPath = false);
 
         /// <summary>
         /// Flushes cached pages for a file back to the filesystem. Unlike <c>FlushFileBuffers</c>, this does NOT

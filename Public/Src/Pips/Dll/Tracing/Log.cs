@@ -424,7 +424,7 @@ namespace BuildXL.Pips.Tracing
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (int)Tasks.Scheduler,
-            Message = "The pip '{pipDescription}' could not be added because PreserveOutputWhitelist is set even though AllowPreserveOutputs is false for the pip).")]
+            Message = "The pip '{pipDescription}' could not be added because PreserveOutputAllowlist is set even though AllowPreserveOutputs is false for the pip).")]
         public abstract void ScheduleFailAddPipDueToInvalidAllowPreserveOutputsFlag(
             LoggingContext context,
             string file,
@@ -435,13 +435,13 @@ namespace BuildXL.Pips.Tracing
             string pipValueId);
 
         [GeneratedEvent(
-            (int)LogEventId.ScheduleFailAddPipDueToInvalidPreserveOutputWhitelist,
+            (int)LogEventId.ScheduleFailAddPipDueToInvalidPreserveOutputAllowlist,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (int)Tasks.Scheduler,
-            Message = "The pip '{pipDescription}' could not be added because one of PreserveOutputWhitelist is neither static file output nor directory output).")]
-        public abstract void ScheduleFailAddPipDueToInvalidPreserveOutputWhitelist(
+            Message = "The pip '{pipDescription}' could not be added because one of PreserveOutputAllowlist is neither static file output nor directory output).")]
+        public abstract void ScheduleFailAddPipDueToInvalidPreserveOutputAllowlist(
             LoggingContext context,
             string file,
             int line,
@@ -1115,8 +1115,8 @@ namespace BuildXL.Pips.Tracing
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (ushort)Tasks.Storage,
-            Message = "Duplicate temporary directory at path: {duplicatePath} detected between pip {pipId1} and {pipId2}. If you would like to disable the duplicate temporary directory validation feature, please pass bxl arg /unsafe_AllowDuplicateTemporaryDirectory+")]
-        public abstract void MultiplePipsUsingSameTemporaryDirectory(LoggingContext loggingContext, string duplicatePath, string pipId1, string pipId2);
+            Message = "Duplicate temporary directory at path: {duplicatePath} detected between the following pips: [{pipDescription1}] and [{pipDescription2}]. Please use unique temporary directories for each of these pips or if you would like to disable bxl's duplicate temporary directory validation feature, please pass bxl arg /unsafe_AllowDuplicateTemporaryDirectory+")]
+        public abstract void MultiplePipsUsingSameTemporaryDirectory(LoggingContext loggingContext, string duplicatePath, string pipDescription1, string pipDescription2);
     }
 }
 #pragma warning restore CA1823 // Unused field

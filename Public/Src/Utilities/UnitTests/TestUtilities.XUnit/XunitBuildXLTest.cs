@@ -13,11 +13,11 @@ using BuildXL.Native.Streams.Windows;
 using BuildXL.Processes;
 using BuildXL.Processes.Sideband;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Tracing;
 using Xunit.Abstractions;
-#if PLATFORM_OSX
+
 using static BuildXL.Interop.Unix.Sandbox;
-#endif
 
 namespace Test.BuildXL.TestUtilities.Xunit
 {
@@ -33,36 +33,64 @@ namespace Test.BuildXL.TestUtilities.Xunit
     {
         private static readonly Lazy<ISandboxConnection> s_sandboxConnection =  new Lazy<ISandboxConnection>(() =>
         {
-#if PLATFORM_OSX
-            var useEndpointSecuritySandboxEnv = Environment.GetEnvironmentVariable("BUILDXL_MACOS_ES_SANDBOX");
-            var useEndpointSecuritySandbox = !string.IsNullOrWhiteSpace(useEndpointSecuritySandboxEnv);
-#endif
-            return OperatingSystemHelper.IsUnixOS
-#if PLATFORM_OSX
-                ? useEndpointSecuritySandbox
-                    ? (ISandboxConnection) new SandboxConnectionES(isInTestMode: true, measureCpuTimes: true)
-                    : (ISandboxConnection) new SandboxConnectionKext(
-#else
-                    ? (ISandboxConnection) new SandboxConnectionKext(
-#endif
+            ISandboxConnection sandboxConnection;
+            if (OperatingSystemHelper.IsLinuxOS)
+            {
+                sandboxConnection = new SandboxConnectionLinuxDetours(FailureCallback, isInTestMode: true);
+            }
+            else if (OperatingSystemHelper.IsMacOS)
+            {
+                var kind = ReadSandboxKindFromEnvVars();
+                if (kind == SandboxKind.MacOsKext)
+                {
+                    sandboxConnection =  new SandboxConnectionKext(
                         skipDisposingForTests: true,
                         config: new SandboxConnectionKext.Config
                         {
                             MeasureCpuTimes = true,
-                            FailureCallback = (status, description) =>
-                            {
-                                XAssert.Fail($"Kernel extension failed.  Status: {status}.  Description: {description}");
-                            },
-    #if PLATFORM_OSX
+                            FailureCallback = FailureCallback,
                             KextConfig = new KextConfig
                             {
                                 EnableCatalinaDataPartitionFiltering = OperatingSystemHelper.IsMacOSCatalinaOrHigher
                             }
-    #endif
-                        }
-                    )
-                    : null;
+                        });
+                }
+                else
+                {
+                    sandboxConnection = new SandboxConnection(kind, isInTestMode: true, measureCpuTimes: true);
+                }
+            }
+            else
+            {
+                sandboxConnection = null;
+            }
+
+            return sandboxConnection; 
         });
+
+        private static void FailureCallback(int status, string description)
+        {
+            XAssert.Fail($"Kernel extension failed.  Status: {status}.  Description: {description}");
+        }
+
+        private static SandboxKind ReadSandboxKindFromEnvVars()
+        {
+            var kind = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BUILDXL_MACOS_ES_SANDBOX"))
+                ? SandboxKind.MacOsEndpointSecurity
+                : !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BUILDXL_MACOS_DETOURS_SANDBOX"))
+                    ? SandboxKind.MacOsDetours
+                    : !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BUILDXL_MACOS_HYBRID_SANDBOX"))
+                        ? SandboxKind.MacOsHybrid
+                        : SandboxKind.MacOsKext;
+
+            if (!OperatingSystemHelper.IsMacOSCatalinaOrHigher && 
+                (kind == SandboxKind.MacOsEndpointSecurity || kind == SandboxKind.MacOsHybrid))
+            {
+                throw new NotSupportedException("EndpointSecurity and Hybrid sandbox types can't be run on system older than macOS Catalina (10.15+).");
+            }
+
+            return kind;
+        }
 
         /// <summary>
         /// Returns a static kernel connection object. Unit tests would spam the kernel extension if they need sandboxing, so we
@@ -77,7 +105,12 @@ namespace Test.BuildXL.TestUtilities.Xunit
         /// <summary>
         /// Whether all diagnostic level messages should be captured to the console. Defaults to true.
         /// </summary>
-        protected bool CaptureAllDiagnosticMessages = true;
+        protected virtual bool CaptureAllDiagnosticMessages => true;
+
+        /// <summary>
+        /// Event mask for filtering listener events
+        /// </summary>
+        protected virtual EventMask ListenerEventMask => null;
 
         /// <summary>
         /// Please use the overload that takes a <see cref="ITestOutputHelper"/>
@@ -99,11 +132,13 @@ namespace Test.BuildXL.TestUtilities.Xunit
                     Events.Log,
                     fullyQualifiedTestName,
                     captureAllDiagnosticMessages: CaptureAllDiagnosticMessages,
-                    logAction: (s) => output.WriteLine(s));
+                    logAction: (s) => output.WriteLine(s),
+                    eventMask: ListenerEventMask);
             }
             else
             {
-                m_eventListener = new TestEventListener(Events.Log, fullyQualifiedTestName, captureAllDiagnosticMessages: true);
+                m_eventListener = new TestEventListener(Events.Log, fullyQualifiedTestName, captureAllDiagnosticMessages: CaptureAllDiagnosticMessages,
+                  eventMask: ListenerEventMask);
             }
 
             RegisterEventSource(global::BuildXL.Tracing.ETWLogger.Log);

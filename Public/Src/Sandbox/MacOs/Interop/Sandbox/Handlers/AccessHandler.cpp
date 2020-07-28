@@ -26,11 +26,7 @@ PolicySearchCursor AccessHandler::FindManifestRecord(const char *absolutePath, s
 
 void AccessHandler::SetProcessPath(AccessReport *report)
 {
-    const char *procName = process_->HasPath()
-        ? process_->GetPath()
-        : "/unknown-process"; // should never happen
-    
-    strlcpy(report->path, procName, sizeof(report->path));
+    strlcpy(report->path, process_->GetPath(), sizeof(report->path));
 }
 
 ReportResult AccessHandler::ReportFileOpAccess(FileOperation operation,
@@ -43,15 +39,16 @@ ReportResult AccessHandler::ReportFileOpAccess(FileOperation operation,
         .operation          = operation,
         .pid                = processID,
         .rootPid            = GetProcessId(),
-        .requestedAccess    = (DWORD)checkResult.RequestedAccess,
+        .requestedAccess    = (DWORD)checkResult.Access,
         .status             = checkResult.GetFileAccessStatus(),
-        .reportExplicitly   = checkResult.ReportLevel == ReportLevel::ReportExplicit,
+        .reportExplicitly   = checkResult.Level == ReportLevel::ReportExplicit,
         .error              = 0,
         .pipId              = GetPipId(),
         .path               = {0},
         .stats              = {0}
     };
 
+    assert(strlen(policyResult.Path()) > 0);
     strlcpy(report.path, policyResult.Path(), sizeof(report.path));
     sandbox_->SendAccessReport(report, GetPip());
 
@@ -62,15 +59,22 @@ bool AccessHandler::ReportProcessTreeCompleted(pid_t processId)
 {
     AccessReport report =
     {
-        .operation = kOpProcessTreeCompleted,
-        .pid       = processId,
-        .rootPid   = GetProcessId(),
-        .pipId     = GetPipId(),
-        .stats     = {0}
+        .operation        = kOpProcessTreeCompleted,
+        .pid              = processId,
+        .rootPid          = GetProcessId(),
+        .requestedAccess  = 0,
+        .status           = FileAccessStatus::FileAccessStatus_Allowed,
+        .reportExplicitly = 0,
+        .error            = 0,
+        .pipId            = GetPipId(),
+        .path             = {0},
+        .stats            = {0}
     };
 
+    SetProcessPath(&report);
     sandbox_->SendAccessReport(report, GetPip());
-    return true;
+
+    return kReported;
 }
 
 bool AccessHandler::ReportProcessExited(pid_t childPid)
@@ -80,16 +84,19 @@ bool AccessHandler::ReportProcessExited(pid_t childPid)
         .operation        = kOpProcessExit,
         .pid              = childPid,
         .rootPid          = GetProcessId(),
-        .pipId            = GetPipId(),
+        .requestedAccess  = 0,
         .status           = FileAccessStatus::FileAccessStatus_Allowed,
         .reportExplicitly = 0,
         .error            = 0,
+        .pipId            = GetPipId(),
+        .path             = {0},
         .stats            = {0}
     };
 
     SetProcessPath(&report);
     sandbox_->SendAccessReport(report, GetPip());
-    return true;
+    
+    return kReported;
 }
 
 bool AccessHandler::ReportChildProcessSpawned(pid_t childPid)
@@ -109,9 +116,10 @@ bool AccessHandler::ReportChildProcessSpawned(pid_t childPid)
     };
 
     SetProcessPath(&report);
+    assert(strlen(report.path) > 0);
     sandbox_->SendAccessReport(report, GetPip());
     
-    return true;
+    return kReported;
 }
 
 PolicyResult AccessHandler::PolicyForPath(const char *absolutePath)
@@ -153,20 +161,19 @@ const char* AccessHandler::IgnoreDataPartitionPrefix(const char* path)
 AccessCheckResult AccessHandler::CheckAndReportInternal(FileOperation operation,
                                                         const char *path,
                                                         CheckFunc checker,
-                                                        const es_message_t *msg,
+                                                        const pid_t pid,
                                                         bool isDir)
-{    
-    // 1: check operation against given policy
+{
     PolicyResult policy = PolicyForPath(IgnoreDataPartitionPrefix(path));
     AccessCheckResult result = AccessCheckResult::Invalid();
     checker(policy, isDir, &result);
         
-    // 2: skip if this access should not be reported
     if (!result.ShouldReport())
     {
         return result;
     }
-
-    ReportFileOpAccess(operation, policy, result, audit_token_to_pid(msg->process->audit_token));
+    
+    ReportFileOpAccess(operation, policy, result, pid);
+    
     return result;
 }

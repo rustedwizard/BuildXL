@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Extensions;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Sessions;
 using BuildXL.Cache.ContentStore.Interfaces.Stores;
@@ -56,7 +57,7 @@ namespace BuildXL.Cache.ContentStore.Sessions
             var statsResult = await Store.GetStatsAsync(operationContext);
             if (statsResult.Succeeded)
             {
-                statsResult.CounterSet.LogOrderedNameValuePairs(s => Tracer.Debug(operationContext, s));
+                Tracer.TraceStatisticsAtShutdown(operationContext, statsResult.CounterSet, prefix: "FileSystemContentSessionStats");
             }
 
             return BoolResult.Success;
@@ -138,6 +139,12 @@ namespace BuildXL.Cache.ContentStore.Sessions
             {
                 Tracer.Warning(context, $"Failed to pin contentHash=[{contentHashList[result.Index]}]");
             }
+        }
+
+        /// <inheritdoc />
+        Task<BoolResult> IHibernateContentSession.ShutdownEvictionAsync(Context context)
+        {
+            return Store.ShutdownEvictionAsync(context);
         }
 
         /// <summary>

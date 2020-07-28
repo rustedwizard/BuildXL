@@ -27,7 +27,7 @@ namespace Core {
         f`UnicodeConverter.h`,
         f`stdafx.h`,
         f`stdafx-win.h`,
-        f`stdafx-mac-common.h`,
+        f`stdafx-unix-common.h`,
         f`stdafx-mac-interop.h`,
         f`stdafx-mac-kext.h`,
         f`targetver.h`,
@@ -39,6 +39,7 @@ namespace Core {
         f`UniqueHandle.h`,
         f`SubstituteProcessExecution.h`,
         f`FilesCheckedForAccess.h`,
+        f`ResolvedPathCache.h`
     ];
 
     export const pathToDeviceMapLib: PathAtom = a`${qualifier.platform.replace("x", qualifier.configuration)}`;
@@ -129,7 +130,7 @@ namespace Core {
                 f`DeviceMap.cpp`,
                 f`DetouredProcessInjector.cpp`,
                 f`SubstituteProcessExecution.cpp`,
-                f`FilesCheckedForAccess.cpp`,
+                f`FilesCheckedForAccess.cpp`
             ],
 
             exports: [
