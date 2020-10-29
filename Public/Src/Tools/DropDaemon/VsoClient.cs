@@ -172,8 +172,17 @@ namespace Tool.DropDaemon
         public async Task<DropItem> CreateAsync(CancellationToken token)
         {
             var startTime = DateTime.UtcNow;
+            if (!m_config.DomainId.HasValue)
+            {
+                m_logger.Verbose("Domain ID is not specified. Creating drop using a default domain id.");
+            }
+
+            IDomainId domainId = m_config.DomainId.HasValue
+                ? new ByteDomainId(m_config.DomainId.Value)
+                : WellKnownDomainIds.DefaultDomainId;
 
             var result = await m_dropClient.CreateAsync(
+                domainId,
                 DropName,
                 isAppendOnly: true,
                 expirationDate: DateTime.UtcNow.Add(m_config.Retention),
@@ -290,14 +299,13 @@ namespace Tool.DropDaemon
         {
             Interlocked.Exchange(ref m_lastTimeProcessAddFileRanInTicks, DateTime.UtcNow.Ticks);
 
-            int batchLength = batch.Length;
-            if (batchLength == 0)
+            if (batch.Length == 0)
             {
                 return;
             }
 
             Interlocked.Increment(ref Stats.NumBatches);
-            if (batchLength == m_config.BatchSize)
+            if (batch.Length == m_config.BatchSize)
             {
                 Interlocked.Increment(ref Stats.NumCompleteBatches);
             }
@@ -306,18 +314,21 @@ namespace Tool.DropDaemon
                 Interlocked.Increment(ref Stats.NumIncompleteBatches);
             }
 
-
-            m_logger.Info("Processing a batch of {0} drop files.", batchLength);
+            FileBlobDescriptor[] blobsForAssociate = new FileBlobDescriptor[0];
             try
             {
+                var dedupedBatch = SkipFilesWithTheSameDropPathAndContent(batch);
+                var numSkipped = batch.Length - dedupedBatch.Length;
+                m_logger.Info("Processing a batch of {0} drop files after skipping {1} files.", dedupedBatch.Length, numSkipped);
+
                 // compute blobs for associate
                 var startTime = DateTime.UtcNow;
-                FileBlobDescriptor[] blobsForAssociate = await Task.WhenAll(batch.Select(item => item.FileBlobDescriptorForAssociateAsync(m_config.EnableChunkDedup, Token)));
+                blobsForAssociate = await Task.WhenAll(dedupedBatch.Select(item => item.FileBlobDescriptorForAssociateAsync(m_config.EnableChunkDedup, Token)));
                 Interlocked.Add(ref Stats.TotalComputeFileBlobDescriptorForAssociateMs, ElapsedMillis(startTime));
 
                 // run 'Associate' on all items from the batch; the result will indicate which files were associated and which need to be uploaded
                 AssociationsStatus associateStatus = await AssociateAsync(blobsForAssociate);
-                IReadOnlyList<AddFileItem> itemsLeftToUpload = await SetResultForAssociatedNonMissingItemsAsync(batch, associateStatus, m_config.EnableChunkDedup, Token);
+                IReadOnlyList<AddFileItem> itemsLeftToUpload = await SetResultForAssociatedNonMissingItemsAsync(dedupedBatch, associateStatus, m_config.EnableChunkDedup, Token);
 
                 // compute blobs for upload
                 startTime = DateTime.UtcNow;
@@ -333,6 +344,11 @@ namespace Tool.DropDaemon
             }
             catch (Exception e)
             {
+                m_logger.Verbose($"Failed ProcessAddFilesAsync (batch size:{batch.Length}, blobsForAssociate size:{blobsForAssociate.Length}){Environment.NewLine}"
+                    + string.Join(
+                        Environment.NewLine,
+                        batch.Select(item => $"'{item.FullFilePath}', '{item.RelativeDropFilePath}', BlobId:'{item.BlobIdentifier?.ToString() ?? ""}', Task.IsCompleted:{item.TaskSource.Task.IsCompleted}")));
+
                 foreach (AddFileItem item in batch)
                 {
                     if (!item.TaskSource.Task.IsCompleted)
@@ -341,6 +357,42 @@ namespace Tool.DropDaemon
                     }
                 }
             }
+        }
+
+        private AddFileItem[] SkipFilesWithTheSameDropPathAndContent(AddFileItem[] batch)
+        {
+            var dedupedItems = new Dictionary<string, AddFileItem>(capacity: batch.Length, comparer: StringComparer.OrdinalIgnoreCase);
+            var numSkipped = 0;
+            var numFailed = 0;
+            foreach (var item in batch)
+            {
+                if (dedupedItems.TryGetValue(item.RelativeDropFilePath, out var existingItem))
+                {
+                    // Only skip an item if the content is known, it's the same content, and it's being uploaded to the same place
+                    if (existingItem.BlobIdentifier != null && existingItem.BlobIdentifier == item.BlobIdentifier)
+                    {
+                        // the item won't be returned for further processing, so we need to mark its task complete
+                        item.TaskSource.SetResult(AddFileResult.SkippedAsDuplicate);
+                        ++numSkipped;
+                    }
+                    else
+                    {
+                        item.TaskSource.SetException(new Exception($"An item with a drop path '{item.RelativeDropFilePath}' is already present -- existing content: '{existingItem?.BlobIdentifier?.ToContentHash()}', new content: '{item?.BlobIdentifier?.ToContentHash()}'"));
+                        ++numFailed;
+                    }
+                }
+                else
+                {
+                    dedupedItems.Add(item.RelativeDropFilePath, item);
+                }
+            }
+
+            if (batch.Length != numSkipped + numFailed + dedupedItems.Count)
+            {
+                Contract.Assert(false, $"batch_count ({batch.Length}) != num_skipped ({numSkipped}) + num_failed({numFailed}) + num_returned ({dedupedItems.Count})");
+            }
+
+            return dedupedItems.Values.ToArray();
         }
 
         private async Task<AssociationsStatus> AssociateAsync(FileBlobDescriptor[] blobsForAssociate)
@@ -472,6 +524,10 @@ namespace Tool.DropDaemon
             internal TaskSourceSlim<AddFileResult> TaskSource { get; }
 
             internal string FullFilePath => m_dropItem.FullFilePath;
+
+            internal string RelativeDropFilePath => m_dropItem.RelativeDropPath;
+
+            internal BlobIdentifier BlobIdentifier => m_dropItem.BlobIdentifier;
 
             internal AddFileItem(IDropItem item)
             {

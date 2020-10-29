@@ -23,7 +23,7 @@ using EngineLogEventId=BuildXL.Engine.Tracing.LogEventId;
 namespace IntegrationTest.BuildXL.Scheduler
 {
     [Feature(Features.Symlink)]
-    [Trait("Category", "SymlinkTests")]
+    [Trait("Category", "ReparsePointTests")]
     public class DirectorySymlinkTests : SchedulerIntegrationTestBase
     {
         public readonly struct LookupSpec
@@ -49,7 +49,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             }
 
             internal enum TransalteAction
-            { 
+            {
                 ShouldContain,
                 ShouldNotContain,
                 ShouldNotExistInAnyPath
@@ -98,8 +98,8 @@ namespace IntegrationTest.BuildXL.Scheduler
 
         public DirectorySymlinkTests(ITestOutputHelper output) : base(output)
         {
-            // Enable full symbolic link resolving for testing 
-            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullSymlinkResolving = false;
+            // Enable full symbolic link resolving for testing
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
         }
 
         protected override void Dispose(bool disposing)
@@ -121,7 +121,7 @@ namespace IntegrationTest.BuildXL.Scheduler
                 ├── sym-A -> A
                 └── sym-sym-A -> sym-A
         */
-     
+
         private const string GeneralDirectoryLayout = @"
 sym-Versions_A_file -> Versions/A/file
 sym-Versions_sym-A_file -> Versions/sym-A/file
@@ -223,7 +223,7 @@ Versions/sym-sym-A -> sym-A/
                     "- Versions/sym-sym-A/file"
                 }
             ),
-            
+
             new LookupSpec(
                 "readViaSymLoop",
                 lookup: "Versions/A/sym-loop/file",
@@ -712,8 +712,8 @@ Versions/sym-sym-A -> sym-A/
             CreateSourceFile(targetDirectory, "file3");
             RunScheduler().AssertCacheMiss(processWithOutputs.Process.PipId);
         }
-        
-        [Fact(Skip = "Skip until new LKG with correct symlink loop enumeration / deletion is deployed")]
+
+        [FactIfSupported(requiresSymlinkPermission: true)]
         public void EnumeratingAndDeletingDirectoriesWithDirectorySymlinks()
         {
             AbsolutePath rootDirAbsPath = CreateUniqueObjPath("layout");
@@ -726,7 +726,7 @@ Versions/sym-sym-A -> sym-A/
                 sym_dir -> target/
                 target/sym_dir_loop -> ../target/
             ";
-            
+
             var files = CreateLayoutOnDisk(rootDir, testDirectoryLayout);
             var filePaths = files.Select(fa => fa.Path.ToString(Context.PathTable)).ToList();
 
@@ -798,6 +798,8 @@ Versions/sym-sym-A -> sym-A/
             AbsolutePath rootDirectory = CreateUniqueDirectory(prefix: "root");
             FileUtilities.CreateJunction(junctionDirectory.ToString(Context.PathTable), rootDirectory.ToString(Context.PathTable));
             string rootDir = junctionDirectory.ToString(Context.PathTable);
+
+            DirectoryTranslator.AddTranslation(rootDirectory.ToString(Context.PathTable), rootDir);
 
             string testDirectoryLayout = string.Format(@"
                 base/
@@ -1002,7 +1004,7 @@ Versions/sym-sym-A -> sym-A/
             XAssert.AreEqual(expected, maybePathExistence.Result, $"Wrong file existence for file '{file}'");
             if (isSymlink.HasValue)
             {
-                XAssert.AreEqual(isSymlink.Value, SymlinkTests.IsSymlink(file, isDirectorySymlink), $"Wrong symlink attribute for file '{file}'");
+                XAssert.AreEqual(isSymlink.Value, ReparsePointTests.IsSymlink(file, isDirectorySymlink), $"Wrong symlink attribute for file '{file}'");
             }
         }
     }

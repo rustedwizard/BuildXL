@@ -120,7 +120,7 @@ namespace BuildXL.Pips.Graph
             m_expandedPathFileArtifactWithAttributesComparer = Comparer<FileArtifactWithAttributes>.Create((f1, f2) => m_pathTable.ExpandedPathComparer.Compare(f1.Path, f2.Path));
             m_sourceChangeAffectedInputsLookup = sourceChangeAffectedInputsLookup ?? new SourceChangeAffectedInputsLookup(process => ReadOnlyArray<AbsolutePath>.Empty);
             m_pipFragmentRenderer = new PipFragmentRenderer(
-                pathExpander: path => PathExpander.ExpandPath(pathTable, path).ToUpperInvariant(),
+                pathExpander: path => PathExpander.ExpandPath(pathTable, path).ToCanonicalizedPath(),
                 pathTable.StringTable,
                 // Do not resolve monikers because their values will be different every build.
                 monikerRenderer: m => m,
@@ -295,6 +295,7 @@ namespace BuildXL.Pips.Graph
             fingerprinter.Add(nameof(Process.TrustStaticallyDeclaredAccesses), process.TrustStaticallyDeclaredAccesses? 1 : 0);
             fingerprinter.Add(nameof(Process.PreservePathSetCasing), process.PreservePathSetCasing ? 1 : 0);
             fingerprinter.Add(nameof(Process.WritingToStandardErrorFailsExecution), process.WritingToStandardErrorFailsExecution ? 1 : 0);
+            fingerprinter.Add(nameof(Process.RetryAttemptEnvironmentVariable), process.RetryAttemptEnvironmentVariable.Value);
 
             // When DisableCacheLookup is set, the pip is marked as perpetually dirty for incremental scheduling.
             // It must also go to the weak fingerprint so IS will get a miss when you change from the DisableCacheLookup = false
@@ -304,7 +305,7 @@ namespace BuildXL.Pips.Graph
                 fingerprinter.Add(nameof(Process.DisableCacheLookup), ContentHashingUtilities.CreateRandom());
             }
 
-            fingerprinter.Add(nameof(Process.DoubleWritePolicy), (byte)process.DoubleWritePolicy);
+            fingerprinter.Add(nameof(Process.RewritePolicy), (byte)process.RewritePolicy);
 
             if (process.RequiresAdmin)
             {

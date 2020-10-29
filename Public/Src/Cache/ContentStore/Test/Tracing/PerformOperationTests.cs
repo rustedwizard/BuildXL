@@ -26,8 +26,93 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
         {
         }
 
+        public enum AsyncOperationKind
+        {
+            Initialization,
+            AsyncOperation,
+            AsyncOperationWithTimeout,
+        }
+
+        [Theory]
+        [InlineData(AsyncOperationKind.Initialization)]
+        [InlineData(AsyncOperationKind.AsyncOperation)]
+        [InlineData(AsyncOperationKind.AsyncOperationWithTimeout)]
+        public async Task AsyncOperationShouldNotBeExecutedIfCancellationTokenIsSet(AsyncOperationKind kind)
+        {
+            var tracer = new Tracer("MyTracer");
+            var cts = new CancellationTokenSource();
+            var context = new OperationContext(new Context(TestGlobal.Logger), cts.Token);
+
+            cts.Cancel();
+            bool callbackIsCalled = false;
+
+            Func<Task<BoolResult>> operation = async () =>
+                                               {
+                                                   callbackIsCalled = true;
+                                                   await Task.Delay(TimeSpan.FromSeconds(1));
+                                                   return BoolResult.Success;
+                                               };
+
+            Task<BoolResult> resultTask = kind switch
+            {
+                AsyncOperationKind.AsyncOperation => context.PerformOperationAsync(tracer, operation),
+                AsyncOperationKind.AsyncOperationWithTimeout => context.PerformOperationWithTimeoutAsync(tracer, _ => operation()),
+                AsyncOperationKind.Initialization => context.PerformInitializationAsync(tracer, operation),
+                _ => throw new InvalidOperationException(),
+            };
+
+            var r = await resultTask;
+
+            callbackIsCalled.Should().BeFalse();
+            r.ShouldBeError();
+            r.IsCancelled.Should().BeTrue();
+        }
+
         [Fact]
-        public async Task TestPerformOperationAsyncTimeout()
+        public async Task NonResultOperationShouldNotBeExecutedIfCancellationTokenIsSet()
+        {
+            var tracer = new Tracer("MyTracer");
+            var cts = new CancellationTokenSource();
+            var context = new OperationContext(new Context(TestGlobal.Logger), cts.Token);
+
+            cts.Cancel();
+            bool callbackIsCalled = false;
+            var r = context.PerformNonResultOperationAsync(
+                tracer,
+                async () =>
+                {
+                    callbackIsCalled = true;
+                    await Task.Yield();
+                    return BoolResult.Success;
+                });
+            await Assert.ThrowsAsync<OperationCanceledException>(() => r);
+            callbackIsCalled.Should().BeFalse();
+        }
+
+        [Fact]
+        public void OperationShouldNotBeExecutedIfCancellationTokenIsSet()
+        {
+            var tracer = new Tracer("MyTracer");
+            var cts = new CancellationTokenSource();
+            var context = new OperationContext(new Context(TestGlobal.Logger), cts.Token);
+
+            cts.Cancel();
+            bool callbackIsCalled = false;
+            var r = context.PerformOperation(
+                tracer,
+                () =>
+                {
+                    callbackIsCalled = true;
+                    return BoolResult.Success;
+                });
+
+            callbackIsCalled.Should().BeFalse();
+            r.ShouldBeError();
+            r.IsCancelled.Should().BeTrue();
+        }
+
+        [Fact]
+        public async Task TraceLongRunningOperationPeriodically()
         {
             var tracer = new Tracer("MyTracer");
             var context = new OperationContext(new Context(TestGlobal.Logger));
@@ -35,6 +120,55 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
             var r = await context.PerformOperationAsync(
                 tracer,
                 async () =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1));
+                    return BoolResult.Success;
+                },
+                pendingOperationTracingInterval: TimeSpan.FromMilliseconds(100),
+                extraStartMessage: "Start message");
+            r.ShouldBeSuccess();
+
+            var fullOutput = GetFullOutput();
+            fullOutput.Should().Contain("The operation 'MyTracer.TraceLongRunningOperationPeriodically' is not finished yet. Start message: Start message");
+        }
+
+        [Fact]
+        public async Task TraceLongRunningOperationPeriodicallyUsingDefaultSettings()
+        {
+            var oldInterval = DefaultTracingConfiguration.DefaultPendingOperationTracingInterval;
+            DefaultTracingConfiguration.DefaultPendingOperationTracingInterval = TimeSpan.FromMilliseconds(100);
+            try
+            {
+                var tracer = new Tracer("MyTracer");
+                var context = new OperationContext(new Context(TestGlobal.Logger));
+
+                var r = await context.PerformOperationAsync(
+                    tracer,
+                    async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1));
+                        return BoolResult.Success;
+                    });
+                r.ShouldBeSuccess();
+
+                var fullOutput = GetFullOutput();
+                fullOutput.Should().Contain("The operation 'MyTracer.TraceLongRunningOperationPeriodicallyUsingDefaultSettings' is not finished yet");
+            }
+            finally
+            {
+                DefaultTracingConfiguration.DefaultPendingOperationTracingInterval = oldInterval;
+            }
+        }
+
+        [Fact]
+        public async Task TestPerformOperationAsyncTimeout()
+        {
+            var tracer = new Tracer("MyTracer");
+            var context = new OperationContext(new Context(TestGlobal.Logger));
+
+            var r = await context.PerformOperationWithTimeoutAsync(
+                tracer,
+                async nestedContext =>
                 {
                     await Task.Delay(TimeSpan.FromMinutes(1));
                     return BoolResult.Success;
@@ -51,9 +185,9 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
             var tracer = new Tracer("MyTracer");
             var context = new OperationContext(new Context(TestGlobal.Logger));
 
-            var r = await context.PerformOperationAsync(
+            var r = await context.PerformOperationWithTimeoutAsync(
                 tracer,
-                async () =>
+                async nestedContext =>
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(1));
                     return BoolResult.Success;
@@ -61,28 +195,6 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
                 timeout: TimeSpan.FromMinutes(10));
 
             r.ShouldBeSuccess();
-        }
-
-        [Fact]
-        public async Task TestPerformNonResultOperationAsyncTimeout()
-        {
-            var tracer = new Tracer("MyTracer");
-            var context = new OperationContext(new Context(TestGlobal.Logger));
-
-            try
-            {
-                await context.PerformNonResultOperationAsync(
-                    tracer,
-                    async () =>
-                    {
-                        await Task.Delay(TimeSpan.FromMinutes(1));
-                        return 42;
-                    },
-                    timeout: TimeSpan.FromMilliseconds(100));
-                Assert.False(true, "The operation should fail");
-            }
-            catch (TimeoutException)
-            {}
         }
 
         [Fact]
@@ -179,7 +291,7 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
                     () =>
                     {
                         return new CustomResult();
-                        
+
                     })
                 .WithOptions(traceErrorsOnly: true)
                 .Run(caller: "FastOperation");
@@ -189,17 +301,17 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
             fullOutput.Should().NotContain("FastOperation");
 
             // Running a slow operation now
-             result = context.CreateOperation(
-                    tracer,
-                    () =>
-                    {
+            result = context.CreateOperation(
+                   tracer,
+                   () =>
+                   {
                         // Making the operation intentionally slow.
                         Thread.Sleep(10);
-                        return new CustomResult();
-                        
-                    })
-                .WithOptions(traceErrorsOnly: true, silentOperationDurationThreshold: TimeSpan.FromMilliseconds(0))
-                .Run(caller: "SlowOperation");
+                       return new CustomResult();
+
+                   })
+               .WithOptions(traceErrorsOnly: true, silentOperationDurationThreshold: TimeSpan.FromMilliseconds(0))
+               .Run(caller: "SlowOperation");
 
             // Check that the exception's stack trace appears in the final output only ones.
             fullOutput = GetFullOutput();
@@ -225,7 +337,7 @@ namespace BuildXL.Cache.ContentStore.Test.Tracing
 
             // Running an operation that fails.
             string error = "My Error";
-            
+
             result = context.CreateOperation(
                     tracer,
                     () => new CustomResult(new BoolResult(error), error))

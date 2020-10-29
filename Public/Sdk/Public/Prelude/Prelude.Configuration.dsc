@@ -115,7 +115,7 @@ interface DependencyViolationErrors {
 interface FrontEndConfiguration {
     /**If false, then the front-end will process every spec in the build regardless of a previous invocation state. */
     incrementalFrontEnd?: boolean;
-    
+
     /** If true, then such literals like p``, d``, f`` etc would be converted to internal BuildXL representation at parse time. */
     convertPathLikeLiteralsAtParseTime?: boolean;
 
@@ -163,7 +163,7 @@ interface FrontEndConfiguration {
 
     /**
      * Set of "linter" rule names that should be applied during the build.
-     * DScript has two set of rules: 
+     * DScript has two set of rules:
      * - predefined rules that restricts TypeScript language (like no `eval`) and
      * - custom set of rules that could be applied only on specific code bases (like no `glob`).
      * This list is a second one and contains a set of configurable rules that could be enabled.
@@ -218,7 +218,7 @@ interface FrontEndConfiguration {
      * If specified all method invocations will be tracked and top N most frequently methods will be captured in the log.
      */
     trackMethodInvocations?: boolean;
-    
+
      /**
      * Suggested waiting time before starting the cycle detection in seconds.
      */
@@ -238,7 +238,7 @@ interface FrontEndConfiguration {
     failIfFrontendMemoryIsNotCollected?: boolean;
 
      /**
-     * Attempt to reload previous graph and use "PatchableGraphBuilder" which allows 
+     * Attempt to reload previous graph and use "PatchableGraphBuilder" which allows
      * the front end to patch the graph based on changed spec files.
      */
     useGraphPatching?: boolean;
@@ -263,7 +263,7 @@ interface FrontEndConfiguration {
 
      /**
      * Whether to cancel any pending evaluation after first error.
-     * Currently, there is no separate command-line option for this; instead, the existing /stopOnFirstError switch 
+     * Currently, there is no separate command-line option for this; instead, the existing /stopOnFirstError switch
      * is used to control both IScheduleConfiguration and this option.
      */
     cancelEvaluationOnFirstFailure?: boolean;
@@ -278,6 +278,11 @@ interface FrontEndConfiguration {
      * Escaping is the TypeScript behavior, but due to a bug we need to incrementally fix this, and therefore we need this flag.
      */
     escapeIdentifiers?: boolean;
+
+    /**
+     * If true the check that a member is obsolete is disabled during Ast Conversion.
+     */
+     disableIsObsoleteCheckDuringConversion?: boolean;
 }
 
 interface EngineConfiguration {
@@ -306,7 +311,7 @@ interface SandboxContainerConfiguration {
     runInContainer?: boolean,
 
     /**
-     * The isolation level for pips running in a container. 
+     * The isolation level for pips running in a container.
      * Defaults to isolate all outputs.
      * This field can be overriden by individual pips.
      */
@@ -316,11 +321,11 @@ interface SandboxContainerConfiguration {
 interface UnsafeSandboxConfiguration {
     /**
      * What to do when a double write occurs.
-     * By default double writes are blocked. Other options may result in making the corresponding pips unsafe, 
+     * By default double writes are blocked. Other options may result in making the corresponding pips unsafe,
      * by introducing non-deterministic behavior.
      */
     doubleWritePolicy?: DoubleWritePolicy;
-    
+
     /**
      * Makes sure any access that contains a directory symlink gets properly processed
      * This is an experimental flag, and hopefully will eventually become the norm.
@@ -328,16 +333,33 @@ interface UnsafeSandboxConfiguration {
      * Only has an effect on Windows-based OS. Mac sandbox already processes symlinks correctly.
      */
     processSymlinkedAccesses? : boolean;
+
+    /**
+     * If enabled, resolves every observed path in the process sandbox before reporting it. The
+     * resolving process refers to removing and replacing reparse points with their final targets. By
+     * default this is disabled. Only has an effect on Windows-based OS. Mac sandbox already
+     * processes reparse points correctly.
+     */
+    enableFullReparsePointResolving? : boolean;
+
+    /**
+     * When true, outputs produced under shared opaques won't be flagged as such.
+     * This means subsequent builds won't be able to recognize those as outputs and they won't be deleted before pips run.
+     * Defaults to false.
+     */
+    skipFlaggingSharedOpaqueOutputs?: boolean;
 }
 
-type DoubleWritePolicy =  
+type DoubleWritePolicy =
         // double writes are blocked
-        "doubleWritesAreErrors" | 
+        "doubleWritesAreErrors" |
         // double writes are allowed as long as the file content is the same
         "allowSameContentDoubleWrites" |
         // double writes are allowed, and the first process writing the output will (non-deterministically)
         // win the race. Consider this will result in a non-deterministic deployment for a given build, and is therefore unsafe.
         "unsafeFirstDoubleWriteWins";
+
+type SourceRewritePolicy = "sourceRewritesAreErrors" | "safeSourceRewritesAreAllowed";
 
 /**
  * The different isolation level options when a process runs in a container
@@ -391,7 +413,7 @@ interface Configuration {
     /** Set of projects in the build cone. */
     projects?: File[];
 
-    /** Set of source packages for current build cone. 
+    /** Set of source packages for current build cone.
      * Obsolete. Use 'modules' instead.
     */
     //@@obsolete
@@ -435,7 +457,7 @@ interface Configuration {
 
     /** Configuration for front end. */
     frontEnd?: FrontEndConfiguration;
-    
+
     /** BuildXL engine configuration. */
     engine?: EngineConfiguration;
 
@@ -443,10 +465,10 @@ interface Configuration {
     sandbox?: SandboxConfiguration;
 
     searchPathEnumerationTools?: RelativePath[];
-    
+
     /** List of incremental tools for special observed file access handling */
     incrementalTools?: RelativePath[];
-    
+
     /** Configuration for VsDomino */
     ide?: IdeConfiguration;
     vsDomino?: IdeConfiguration;
@@ -499,7 +521,7 @@ declare let qualifier : any;
 //---------------
 
 /**
-* Base interface for custom qualifier types. 
+* Base interface for custom qualifier types.
 * Any extensions to this type used to define the type of a current qualifier must *directly* inherit from it.
 */
 interface Qualifier {}

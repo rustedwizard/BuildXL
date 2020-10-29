@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -28,6 +29,7 @@ using BuildXL.Utilities.Tracing;
 using Microsoft.VisualStudio.Services.BlobStore.Common;
 using Microsoft.VisualStudio.Services.BlobStore.WebApi;
 using Microsoft.VisualStudio.Services.Content.Common;
+using Microsoft.VisualStudio.Services.WebApi;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using BlobIdentifier = BuildXL.Cache.ContentStore.Hashing.BlobIdentifier;
@@ -43,7 +45,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
     ///     IReadOnlyContentSession for BlobBuildXL.ContentStore.
     /// </summary>
     [SuppressMessage("ReSharper", "MemberCanBePrivate.Global")]
-    public class BlobReadOnlyContentSession : ContentSessionBase
+    public class BlobReadOnlyContentSession : ContentSessionBase, IReadOnlyBackingContentSession
     {
         private enum Counters
         {
@@ -82,10 +84,13 @@ namespace BuildXL.Cache.ContentStore.Vsts
         /// </summary>
         protected readonly ImplicitPin ImplicitPin;
 
+        /// <nodoc />
+        protected readonly BackingContentStoreConfiguration Configuration;
+
         /// <summary>
         ///     How long to keep content after referencing it.
         /// </summary>
-        protected readonly TimeSpan TimeToKeepContent;
+        protected TimeSpan TimeToKeepContent => Configuration.TimeToKeepContent;
 
         /// <summary>
         /// A tracer for tracking blob content calls.
@@ -96,8 +101,6 @@ namespace BuildXL.Cache.ContentStore.Vsts
         ///     Staging ground for parallel upload/downloads.
         /// </summary>
         protected readonly DisposableDirectory TempDirectory;
-
-        private readonly bool _downloadBlobsThroughBlobStore;
 
         /// <summary>
         ///     Backing BlobStore http client
@@ -111,39 +114,41 @@ namespace BuildXL.Cache.ContentStore.Vsts
 
         private const int DefaultReadSizeInBytes = 64 * 1024;
 
-        private readonly ParallelHttpDownload.Configuration _parallelSegmentDownloadConfig;
+        private readonly ParallelHttpDownload.DownloadConfiguration _parallelSegmentDownloadConfig;
+
+        /// <summary>
+        /// Reused http client for http downloads
+        /// </summary>
+        private readonly HttpClient _httpClient = new HttpClient();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="BlobReadOnlyContentSession"/> class.
         /// </summary>
-        /// <param name="fileSystem">Filesystem used to read/write files.</param>
+        /// <param name="configuration">Configuration.</param>
         /// <param name="name">Session name.</param>
         /// <param name="implicitPin">Policy determining whether or not content should be automatically pinned on adds or gets.</param>
         /// <param name="blobStoreHttpClient">Backing BlobStore http client.</param>
-        /// <param name="timeToKeepContent">Minimum time-to-live for accessed content.</param>
-        /// <param name="downloadBlobsThroughBlobStore">If true, gets blobs through BlobStore. If false, gets blobs from the Azure Uri.</param>
         /// <param name="counterTracker">Parent counters to track the session.</param>
         public BlobReadOnlyContentSession(
-            IAbsFileSystem fileSystem,
+            BackingContentStoreConfiguration configuration,
             string name,
             ImplicitPin implicitPin,
             IBlobStoreHttpClient blobStoreHttpClient,
-            TimeSpan timeToKeepContent,
-            bool downloadBlobsThroughBlobStore,
             CounterTracker? counterTracker = null)
             : base(name, counterTracker)
         {
-            Contract.Requires(fileSystem != null);
+            Contract.Requires(configuration != null);
+            Contract.Requires(configuration.FileSystem != null);
             Contract.Requires(name != null);
             Contract.Requires(blobStoreHttpClient != null);
 
+            Configuration = configuration;
+
             ImplicitPin = implicitPin;
             BlobStoreHttpClient = blobStoreHttpClient;
-            TimeToKeepContent = timeToKeepContent;
-            _downloadBlobsThroughBlobStore = downloadBlobsThroughBlobStore;
-            _parallelSegmentDownloadConfig = ParallelHttpDownload.Configuration.GetParallelSegmentDownloadConfig(EnvironmentVariablePrefix);
+            _parallelSegmentDownloadConfig = ParallelHttpDownload.DownloadConfiguration.ReadFromEnvironment(EnvironmentVariablePrefix);
 
-            TempDirectory = new DisposableDirectory(fileSystem);
+            TempDirectory = new DisposableDirectory(configuration.FileSystem);
 
             _counters = CounterTracker.CreateCounterCollection<BackingContentStore.SessionCounters>(counterTracker);
             _blobCounters = CounterTracker.CreateCounterCollection<Counters>(counterTracker);
@@ -281,21 +286,25 @@ namespace BuildXL.Cache.ContentStore.Vsts
 
         /// <inheritdoc />
         [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes")]
-        protected override async Task<IEnumerable<Task<Indexed<PinResult>>>> PinCoreAsync(OperationContext context, IReadOnlyList<ContentHash> contentHashes, UrgencyHint urgencyHint, Counter retryCounter, Counter fileCounter)
+        protected override Task<IEnumerable<Task<Indexed<PinResult>>>> PinCoreAsync(OperationContext context, IReadOnlyList<ContentHash> contentHashes, UrgencyHint urgencyHint, Counter retryCounter, Counter fileCounter)
+        {
+            var endDateTime = DateTime.UtcNow + TimeToKeepContent;
+            return PinCoreImplAsync(context, contentHashes, endDateTime);
+        }
+
+        private async Task<IEnumerable<Task<Indexed<PinResult>>>> PinCoreImplAsync(OperationContext context, IReadOnlyList<ContentHash> contentHashes, DateTime keepUntil)
         {
             try
             {
-                var endDateTime = DateTime.UtcNow + TimeToKeepContent;
-
                 return await Workflows.RunWithFallback(
                     contentHashes,
-                    hashes => CheckInMemoryCaches(hashes, endDateTime),
-                    hashes => UpdateBlobStoreAsync(context, hashes, endDateTime),
+                    hashes => CheckInMemoryCaches(hashes, keepUntil),
+                    hashes => UpdateBlobStoreAsync(context, hashes, keepUntil),
                     result => result.Succeeded);
             }
             catch (Exception ex)
             {
-                context.TracingContext.Warning($"Exception when querying pins against the VSTS services {ex}");
+                Tracer.Warning(context, $"Exception when querying pins against the VSTS services {ex}");
                 return contentHashes.Select((_, index) => Task.FromResult(new PinResult(ex).WithIndex(index)));
             }
         }
@@ -376,14 +385,28 @@ namespace BuildXL.Cache.ContentStore.Vsts
         private Task<long?> PlaceFileInternalAsync(
             OperationContext context, ContentHash contentHash, string path, FileMode fileMode)
         {
-            return AsyncHttpRetryHelper<long?>.InvokeAsync(
+#if PLATFORM_WIN
+            if (Configuration.DownloadBlobsUsingHttpClient)
+            {
+                return DownloadUsingHttpDownloaderAsync(context, contentHash, path);
+            }
+#endif
+
+            return DownloadUsingAzureBlobsAsync(context, contentHash, path, fileMode);
+        }
+
+        private async Task<long?> DownloadUsingAzureBlobsAsync(
+            OperationContext context, ContentHash contentHash, string path, FileMode fileMode)
+        {
+
+            return await AsyncHttpRetryHelper<long?>.InvokeAsync(
                 async () =>
                 {
-                    Stream? httpStream = null;
+                    StreamWithRange? httpStream = null;
                     Uri? uri = null;
                     try
                     {
-                        httpStream = await GetStreamInternalAsync(context, contentHash, null).ConfigureAwait(false);
+                        httpStream = await GetStreamInternalAsync(context, contentHash, 0, null).ConfigureAwait(false);
                         if (httpStream == null)
                         {
                             return null;
@@ -400,30 +423,24 @@ namespace BuildXL.Cache.ContentStore.Vsts
                             await ParallelHttpDownload.Download(
                                 _parallelSegmentDownloadConfig,
                                 uri,
-                                httpStream,
-                                null,
-                                path,
-                                fileMode,
-                                context.Token,
+                                httpStream.Value,
+                                destinationPath: path,
+                                mode: fileMode,
+                                cancellationToken: context.Token,
                                 logSegmentStart: (destinationPath, offset, endOffset) => { },
                                 logSegmentStop: (destinationPath, offset, endOffset) => { },
-                                (destinationPath, offset, endOffset, message) =>
+                                logSegmentFailed: (destinationPath, offset, endOffset, message) =>
                                     Tracer.Debug(context, $"Download {destinationPath} [{offset}, {endOffset}) failed. (message: {message})"),
-                                async (offset, token) =>
+                                segmentFactory: async (offset, length, token) =>
                                 {
                                     var offsetStream = await GetStreamInternalAsync(
                                         context,
                                         contentHash,
+                                        offset,
                                         (int?)_parallelSegmentDownloadConfig.SegmentSizeInBytes).ConfigureAwait(false);
 
-                                    if (offsetStream != null)
-                                    {
-                                        offsetStream.Position = offset;
-                                    }
-
-                                    return offsetStream;
-                                },
-                                () => BufferPool.Get()).ConfigureAwait(false);
+                                    return offsetStream.Value;
+                                }).ConfigureAwait(false);
                         }
                         catch (Exception e) when (fileMode == FileMode.CreateNew && !IsErrorFileExists(e))
                         {
@@ -442,7 +459,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                             throw;
                         }
 
-                        return httpStream.Length;
+                        return httpStream.Value.Range.WholeLength;
                     }
                     catch (StorageException storageEx) when (storageEx.InnerException is WebException webEx)
                     {
@@ -486,56 +503,85 @@ namespace BuildXL.Cache.ContentStore.Vsts
                 context: context.TracingContext.Id.ToString());
         }
 
+#if PLATFORM_WIN
+        private async Task<long?> DownloadUsingHttpDownloaderAsync(OperationContext context, ContentHash contentHash, string path)
+        {
+            var downloader = new ManagedParallelBlobDownloader(
+                _parallelSegmentDownloadConfig,
+                new AppTraceSourceContextAdapter(context, Tracer.Name, SourceLevels.All),
+                VssClientHttpRequestSettings.Default.SessionId,
+                _httpClient);
+            var uri = await GetUriAsync(context, contentHash);
+            if (uri == null)
+            {
+                return null;
+            }
+
+            DownloadResult result = await downloader.DownloadAsync(path, uri.ToString(), knownSize: null, cancellationToken: context.Token);
+
+            if (result.HttpStatusCode == HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+            else if (result.HttpStatusCode != HttpStatusCode.OK)
+            {
+                throw new ResultPropagationException(new ErrorResult($"Error in DownloadAsync({uri}) => [{path}]: HttpStatusCode={result.HttpStatusCode}. ErrorCode={result.ErrorCode}"));
+            }
+
+            return result.BytesDownloaded;
+        }
+#endif
+
         private bool IsErrorFileExists(Exception e) => (Marshal.GetHRForException(e) & ((1 << 16) - 1)) == ErrorFileExists;
 
-        private async Task<Stream?> GetStreamInternalAsync(OperationContext context, ContentHash contentHash, int? overrideStreamMinimumReadSizeInBytes)
+        private async Task<Uri?> GetUriAsync(OperationContext context, ContentHash contentHash)
+        {
+            if (!DownloadUriCache.Instance.TryGetDownloadUri(contentHash, out var uri))
+            {
+                _blobCounters[Counters.VstsDownloadUriFetchedFromRemote].Increment();
+                var blobId = contentHash.ToBlobIdentifier();
+
+                var mappings = await ArtifactHttpClientErrorDetectionStrategy.ExecuteWithTimeoutAsync(
+                    context,
+                    "GetStreamInternal",
+                    innerCts => BlobStoreHttpClient.GetDownloadUrisAsync(
+                        new[] { ToVstsBlobIdentifier(blobId) },
+                        EdgeCache.NotAllowed,
+                        cancellationToken: innerCts),
+                    context.Token).ConfigureAwait(false);
+
+                if (mappings == null || !mappings.TryGetValue(ToVstsBlobIdentifier(blobId), out uri))
+                {
+                    return null;
+                }
+
+                DownloadUriCache.Instance.AddDownloadUri(contentHash, uri);
+            }
+            else
+            {
+                _blobCounters[Counters.VstsDownloadUriFetchedInMemory].Increment();
+            }
+
+            return uri.NotNullUri;
+        }
+
+        private async Task<StreamWithRange?> GetStreamInternalAsync(OperationContext context, ContentHash contentHash, long offset, int? overrideStreamMinimumReadSizeInBytes)
         {
             Uri? azureBlobUri = default;
             try
             {
-                if (_downloadBlobsThroughBlobStore)
+                azureBlobUri = await GetUriAsync(context, contentHash);
+                if (azureBlobUri == null)
                 {
-                    return await ArtifactHttpClientErrorDetectionStrategy.ExecuteWithTimeoutAsync(
-                        context,
-                        "GetStreamInternalThroughBlobStore",
-                        innerCts => BlobStoreHttpClient.GetBlobAsync(ToVstsBlobIdentifier(contentHash.ToBlobIdentifier()), cancellationToken: innerCts),
-                            context.Token).ConfigureAwait(false);
+                    return null;
                 }
-                else
-                {
-                    if (!DownloadUriCache.Instance.TryGetDownloadUri(contentHash, out var uri))
-                    {
-                        _blobCounters[Counters.VstsDownloadUriFetchedFromRemote].Increment();
-                        var blobId = contentHash.ToBlobIdentifier();
 
-                        var mappings = await ArtifactHttpClientErrorDetectionStrategy.ExecuteWithTimeoutAsync(
-                            context,
-                            "GetStreamInternal",
-                            innerCts => BlobStoreHttpClient.GetDownloadUrisAsync(
-                                new[] {ToVstsBlobIdentifier(blobId)},
-                                EdgeCache.NotAllowed,
-                                cancellationToken: innerCts),
-                            context.Token).ConfigureAwait(false);
-
-                        if (mappings == null || !mappings.TryGetValue(ToVstsBlobIdentifier(blobId), out uri))
-                        {
-                            return null;
-                        }
-
-                        DownloadUriCache.Instance.AddDownloadUri(contentHash, uri);
-                    }
-                    else
-                    {
-                        _blobCounters[Counters.VstsDownloadUriFetchedInMemory].Increment();
-                    }
-
-                    azureBlobUri = uri.NotNullUri;
-                    return await GetStreamThroughAzureBlobs(
-                        uri.NotNullUri,
-                        overrideStreamMinimumReadSizeInBytes,
-                        _parallelSegmentDownloadConfig.SegmentDownloadTimeout,
-                        context.Token).ConfigureAwait(false);
-                }
+                return await GetStreamThroughAzureBlobsAsync(
+                    azureBlobUri,
+                    offset,
+                    overrideStreamMinimumReadSizeInBytes,
+                    _parallelSegmentDownloadConfig.SegmentDownloadTimeout,
+                    context.Token).ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -546,7 +592,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
 
         private void TraceException(OperationContext context, ContentHash hash, Uri? azureBlobUri, Exception e, [CallerMemberName] string? operation = null)
         {
-            string errorMessage = $"{operation} failed. ContentHash=[{hash.ToShortString()}], DownloadThroughBlobStore=[{_downloadBlobsThroughBlobStore}], BaseAddress=[{BlobStoreHttpClient.BaseAddress}], BlobUri=[{getBlobUri(azureBlobUri)}]";
+            string errorMessage = $"{operation} failed. ContentHash=[{hash.ToShortString()}], BaseAddress=[{BlobStoreHttpClient.BaseAddress}], BlobUri=[{getBlobUri(azureBlobUri)}]";
 
             // Explicitly trace all the failures here to simplify errors analysis.
             context.TraceDebug($"{errorMessage}. Error=[{e}]");
@@ -565,7 +611,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
             }
         }
 
-        private Task<Stream> GetStreamThroughAzureBlobs(Uri azureUri, int? overrideStreamMinimumReadSizeInBytes, TimeSpan? requestTimeout, CancellationToken cancellationToken)
+        private async Task<StreamWithRange> GetStreamThroughAzureBlobsAsync(Uri azureUri, long offset, int? overrideStreamMinimumReadSizeInBytes, TimeSpan? requestTimeout, CancellationToken cancellationToken)
         {
             var blob = new CloudBlockBlob(azureUri);
             if (overrideStreamMinimumReadSizeInBytes.HasValue)
@@ -573,7 +619,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                 blob.StreamMinimumReadSizeInBytes = overrideStreamMinimumReadSizeInBytes.Value;
             }
 
-            return blob.OpenReadAsync(
+            var stream = await blob.OpenReadAsync(
                 null,
                 new BlobRequestOptions()
                 {
@@ -584,7 +630,13 @@ namespace BuildXL.Cache.ContentStore.Vsts
                     // RetryPolicy
                     // ServerTimeout
                 },
-                null, cancellationToken);
+                null, cancellationToken).ConfigureAwait(false);
+
+            stream.Position = offset;
+
+            var range = new ContentRangeHeaderValue(offset, stream.Length - 1, stream.Length);
+
+            return new StreamWithRange(stream, new StreamRange(range));
         }
 
         /// <inheritdoc />
@@ -593,7 +645,35 @@ namespace BuildXL.Cache.ContentStore.Vsts
             return base.GetCounters()
                 .Merge(_counters.ToCounterSet())
                 .Merge(_blobCounters.ToCounterSet());
-            
+
+        }
+
+        /// <inheritdoc />
+        public async Task<IEnumerable<Task<PinResult>>> PinAsync(OperationContext context, IReadOnlyList<ContentHash> contentHashes, DateTime keepUntil)
+        {
+            var results = await context.PerformNonResultOperationAsync(
+                Tracer,
+                () => PinCoreImplAsync(context, contentHashes, keepUntil),
+                counter: BaseCounters[ContentSessionBaseCounters.PinBulk],
+                traceOperationStarted: TraceOperationStarted,
+                traceErrorsOnly: TraceErrorsOnly,
+                extraEndMessage: results =>
+                {
+                    var resultString = string.Join(",", results.Select(task =>
+                    {
+                        // Since all bulk operations are constructed with Task.FromResult, it is safe to just access the result;
+                        var result = task.Result;
+                        return $"{contentHashes[result.Index].ToShortString()}:{result.Item}";
+                    }));
+
+                    return $"Count={contentHashes.Count}, KeepUntil=[{keepUntil}] Hashes=[{resultString}]";
+                });
+
+            return results.Select(task =>
+            {
+                var indexedResult = task.Result;
+                return Task.FromResult(indexedResult.Item);
+            });
         }
     }
 }

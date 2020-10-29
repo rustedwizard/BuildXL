@@ -441,6 +441,7 @@ namespace BuildXL.Engine
             {
                 mutableInitialConfig.Startup.EnsurePropertiesWhenRunInCloudBuild();
                 ApplyTemporaryHackWhenRunInCloudBuild(pathTable, mutableInitialConfig);
+                InjectDirectoryTranslationValuesIntoEnvironment(pathTable, mutableInitialConfig);
             }
 
             if (mutableInitialConfig.Layout.RedirectedUserProfileJunctionRoot.IsValid && !OperatingSystemHelper.IsUnixOS)
@@ -504,7 +505,7 @@ namespace BuildXL.Engine
                     || string.Equals(key, "windir", StringComparison.OrdinalIgnoreCase))
                 {
                     // Normalize %SystemRoot% and %WinDir%.
-                    commandLineConfiguration.Startup.Properties.Add(key.ToUpperInvariant(), value.ToUpperInvariant());
+                    commandLineConfiguration.Startup.Properties.Add(key.ToCanonicalizedEnvVar(), value.ToCanonicalizedPath());
                     continue;
                 }
 
@@ -544,6 +545,20 @@ namespace BuildXL.Engine
                     commandLineConfiguration.Startup.Properties.Add(key, replacedValue);
                 }
             }
+        }
+
+        /// <summary>
+        /// The CloudBuild CI setup runs with several directory translations in place to enable transparent caching over the use of junctions. When full reparse point
+        /// resolving is enabled, the junction target values would cause DFAs in some of our test suites. We inject the directory translations into the environment here,
+        /// so tests can use that data and detours behaves properly / does not resolve reparse points that are affected by directory translations.
+        /// </summary>
+        private static void InjectDirectoryTranslationValuesIntoEnvironment(PathTable pathTable, CommandLineConfiguration commandLineConfiguration)
+        {
+            var environmentVariable = DirectoryTranslator.GetEnvironmentVaribleRepresentationForTranslations(
+                commandLineConfiguration.Engine.DirectoriesToTranslate.Select(d => new DirectoryTranslator.Translation(d.FromPath.ToString(pathTable), d.ToPath.ToString(pathTable)) ).ToList());
+
+            Environment.SetEnvironmentVariable(environmentVariable.variable, environmentVariable.value);
+            commandLineConfiguration.Sandbox.GlobalUnsafePassthroughEnvironmentVariables.Add(environmentVariable.variable);
         }
 
         private static AbsolutePath AppendNoIndexSuffixToLayoutDirectoryIfNeeded(PathTable pathTable, AbsolutePath directory, ILayoutConfiguration layout, bool inTestMode)
@@ -720,7 +735,7 @@ namespace BuildXL.Engine
             }
 
             if (logging.LogTracer)
-            { 
+            {
                 logging.TraceLog = logging.LogsDirectory.Combine(pathTable, logging.LogPrefix + LogFileExtensions.Trace);
             }
 
@@ -779,6 +794,11 @@ namespace BuildXL.Engine
             {
                 logging.HistoricMetadataCacheLogDirectory = logging.EngineCacheLogDirectory.Combine(pathTable, EngineSerializer.HistoricMetadataCacheLocation);
             }
+
+            if (!logging.PluginLog.IsValid)
+            {
+                logging.PluginLog = logging.LogsDirectory.Combine(pathTable, logging.LogPrefix + LogFileExtensions.PluginLog);
+            }
         }
 
         /// <summary>
@@ -831,6 +851,11 @@ namespace BuildXL.Engine
             {
                 EngineEnvironmentSettings.SetVariable(property.Key, property.Value);
             }
+
+            // Customer builds may involve a lot of large strings that can fill up the string table.
+            // Large string buffer is a secondary table used when the strings are large. By adjusting the threshold for
+            // the string size, some of the large strings that used to go to the string table can go to the large string buffer.
+            StringTable.OverrideLargeStringBufferThreshold(EngineEnvironmentSettings.LargeStringBufferThresholdBytes);
 
             if (mutableConfig.Export.SnapshotFile.IsValid && mutableConfig.Export.SnapshotMode != SnapshotMode.None)
             {
@@ -1146,16 +1171,32 @@ namespace BuildXL.Engine
                 mutableConfig.Logging.StoreFingerprints = initialCommandLineConfiguration.Logging.StoreFingerprints ?? false;
                 mutableConfig.Sandbox.RetryOnAzureWatsonExitCode = true;
 
-                // Spec cache is disabled as most builds are happening on SSDs. 
+                // Spec cache is disabled as most builds are happening on SSDs.
                 mutableConfig.Cache.CacheSpecs = SpecCachingOption.Disabled;
 
-                if (mutableConfig.Logging.Environment == ExecutionEnvironment.OsgLab &&
-                    mutableConfig.Schedule.DelayedCacheLookupMaxMultiplier == null &&
-                    mutableConfig.Schedule.DelayedCacheLookupMinMultiplier == null)
+                if (mutableConfig.Logging.Environment == ExecutionEnvironment.OsgLab)
                 {
                     // For Cosine builds in CloudBuild, enable delayedCacheLookup by default.
-                    mutableConfig.Schedule.DelayedCacheLookupMaxMultiplier = 2;
-                    mutableConfig.Schedule.DelayedCacheLookupMinMultiplier = 1;
+                    if (mutableConfig.Schedule.DelayedCacheLookupMaxMultiplier == null &&
+                        mutableConfig.Schedule.DelayedCacheLookupMinMultiplier == null)
+                    {
+                        mutableConfig.Schedule.DelayedCacheLookupMaxMultiplier = 2;
+                        mutableConfig.Schedule.DelayedCacheLookupMinMultiplier = 1;
+                    }
+
+                    // For Cosine builds, IsObsoleteCheck is very expensive, so we disable it.
+                    // Cosine specs are automatically generated, so that check was not necessary.
+                    mutableConfig.FrontEnd.DisableIsObsoleteCheckDuringConversion = true;
+
+                    // Early worker release gives very small benefit (1-2%) to Cosine builds, 
+                    // so it is disabled.
+                    mutableConfig.Distribution.EarlyWorkerRelease = false;
+                }
+
+                if (mutableConfig.Schedule.ManageMemoryMode == null)
+                {
+                    // If ManageMemoryMode is unset for CB builds, we use EmptyWorkingSet option due to the large page file size in CB machines.
+                    mutableConfig.Schedule.ManageMemoryMode = ManageMemoryMode.EmptyWorkingSet;
                 }
             }
             else
@@ -1543,7 +1584,7 @@ namespace BuildXL.Engine
         [SuppressMessage("Microsoft.Maintainability", "CA1505:AvoidUnmaintainableCode")]
         public BuildXLEngineResult Run(LoggingContext loggingContext, EngineState engineState = null)
         {
-            return DoRun(loggingContext, engineState, disposeFrontEnd: true);
+            return DoRunAndVerifyEngineState(loggingContext, engineState, disposeFrontEnd: true);
         }
 
         /// <summary>
@@ -1555,7 +1596,7 @@ namespace BuildXL.Engine
         /// </remarks>
         public BuildXLEngineResult RunForFrontEndTests(LoggingContext loggingContext, EngineState engineState = null)
         {
-            return DoRun(loggingContext, engineState, disposeFrontEnd: false);
+            return DoRunAndVerifyEngineState(loggingContext, engineState, disposeFrontEnd: false);
         }
 
         private VolumeMap TryGetVolumeMapOfAllLocalVolumes(PerformanceMeasurement pm, MountsTable mountsTable, LoggingContext loggingContext)
@@ -1622,18 +1663,29 @@ namespace BuildXL.Engine
             return result.ToList();
         }
 
+        private BuildXLEngineResult DoRunAndVerifyEngineState(LoggingContext loggingContext, EngineState engineState = null, bool disposeFrontEnd = true)
+        {
+            Contract.Requires(engineState == null || Configuration.Engine.ReuseEngineState);
+            Contract.Ensures(
+                Contract.Result<BuildXLEngineResult>().IsSuccess != loggingContext.ErrorWasLogged,
+                I($"Mismatched {nameof(DoRun)} and logged error(s): Success: '{Contract.Result<BuildXLEngineResult>().IsSuccess}' | Logged error(s): {loggingContext.ErrorWasLogged}"));
+            Contract.Ensures(EngineState.CorrectEngineStateTransition(engineState, Contract.Result<BuildXLEngineResult>().EngineState, out var message), message);
+
+            BuildXLEngineResult result = DoRun(loggingContext, engineState, disposeFrontEnd);
+
+            // When failed, we cannot dispose the engine state in the DoRun method because its finally clause still need
+            // the engine state (i.e., the pip table) to complete the stats logging.
+            result.DisposePreviousEngineStateIfRequestedAndVerifyEngineStateTransition();
+
+            return result;
+        }
+
+
         [SuppressMessage("Microsoft.Maintainability", "CA1505:AvoidUnmaintainableCode")]
         private BuildXLEngineResult DoRun(LoggingContext loggingContext, EngineState engineState = null, bool disposeFrontEnd = true)
         {
             Contract.Requires(engineState == null || Configuration.Engine.ReuseEngineState);
-            Contract.Ensures(
-                !(Contract.Result<BuildXLEngineResult>().IsSuccess == false && loggingContext.ErrorWasLogged == false),
-                "Engine.Run() returns a failure but no error was logged.");
-            Contract.Ensures(
-                !(Contract.Result<BuildXLEngineResult>().IsSuccess == true && loggingContext.ErrorWasLogged == true),
-                "Engine.Run() returns a success even though an error was logged.");
-            Contract.Ensures(EngineState.CorrectEngineStateTransition(engineState, Contract.Result<BuildXLEngineResult>().EngineState, out var message), message);
-
+            
             if (m_distributionService != null && !m_distributionService.Initialize())
             {
                 return BuildXLEngineResult.Failed(engineState);
@@ -1655,16 +1707,9 @@ namespace BuildXL.Engine
             {
                 if (Configuration.Layout.EmitSpotlightIndexingWarning)
                 {
-                    void CheckArtifactFolersAndEmitNoIndexWarning(params AbsolutePath[] paths)
-                    {
-                        var directories = paths.Select(p => p.ToString(Context.PathTable)).Where(p => !p.EndsWith(Strings.Layout_DefaultNoIndexSuffix));
-                        if (directories.Count() > 0)
-                        {
-                            Logger.Log.EmitSpotlightIndexingWarningForArtifactDirectory(loggingContext, string.Join(", ", directories));
-                        }
-                    }
-
                     CheckArtifactFolersAndEmitNoIndexWarning(
+                        Context.PathTable,
+                        loggingContext,
                         Configuration.Layout.ObjectDirectory,
                         Configuration.Layout.CacheDirectory,
                         Configuration.Layout.FrontEndDirectory,
@@ -1815,11 +1860,10 @@ namespace BuildXL.Engine
                                     if (!m_workerService.WaitForMasterAttach())
                                     {
                                         // Worker timeout logs a warning but no error. It is not considered a failure wrt the worker
-                                        engineState?.Dispose();
                                         Contract.Assert(
                                             engineLoggingContext.ErrorWasLogged,
                                             "An error should have been logged during waiting for attaching to the master.");
-                                        return BuildXLEngineResult.Create(success: false, perfInfo: null, previousState: engineState, newState: null);
+                                        return BuildXLEngineResult.Failed(engineState);
                                     }
                                 }
 
@@ -1996,6 +2040,11 @@ namespace BuildXL.Engine
                                         phase);
                                 }
 
+                                if (TestHooks == null && !string.IsNullOrEmpty(PipEnvironment.RestrictedTemp))
+                                {
+                                    m_tempCleaner.RegisterDirectoryToDelete(PipEnvironment.RestrictedTemp, false);
+                                }
+
                                 // The file content table should now contain all of the hashes needed for this build.
                                 // At this point we may have failed (but have not exploded), so it is safe to write it out. Note that we might want to write it
                                 // out even if we did not run the execution phase at all, due to file content table usage before then (e.g. cached graph reloading).
@@ -2005,9 +2054,11 @@ namespace BuildXL.Engine
 
                                 // Saving file content table and post execution tasks are happening in parallel.
                                 success &= postExecutionTasks.GetAwaiter().GetResult();
+                                success &= savingFileContentTableTask.GetAwaiter().GetResult();
+
                                 ValidateSuccessMatches(success, engineLoggingContext);
 
-                                if (!savingFileContentTableTask.GetAwaiter().GetResult())
+                                if (!savingFileContentTableTask.Result)
                                 {
                                     Contract.Assert(
                                         engineLoggingContext.ErrorWasLogged,
@@ -2126,9 +2177,22 @@ namespace BuildXL.Engine
 
             ValidateSuccessMatches(success, loggingContext);
 
-            return BuildXLEngineResult.Create(success, m_enginePerformanceInfo, previousState: engineState, newState: newEngineState);
+            return BuildXLEngineResult.Create(
+                success,
+                m_enginePerformanceInfo,
+                previousState: engineState,
+                newState: newEngineState,
+                shouldDisposePreviousEngineState: false /* Engine state can still be usable. */);
         }
 
+        internal static void CheckArtifactFolersAndEmitNoIndexWarning(PathTable pathTable, LoggingContext loggingContext, params AbsolutePath[] paths)
+        {
+            var directories = paths.Select(p => p.ToString(pathTable).ToUpperInvariant()).Where(p => !p.EndsWith(Strings.Layout_DefaultNoIndexSuffix.ToUpperInvariant()) && !p.Contains(Strings.Layout_DefaultNoIndexSuffix.ToUpperInvariant() + Path.DirectorySeparatorChar));
+            if (directories.Count() > 0)
+            {
+                Logger.Log.EmitSpotlightIndexingWarningForArtifactDirectory(loggingContext, string.Join(", ", directories));
+            }
+        }
 
         private static void LaunchBuildExplorer(LoggingContext loggingContext, string engineBinDirectory)
         {
@@ -2315,7 +2379,7 @@ namespace BuildXL.Engine
                 { "unsafe_IgnoreNonCreateFileReparsePoints", Logger.Log.ConfigIgnoreNonCreateFileReparsePoints },
                 { "unsafe_IgnoreNtCreateFile", Logger.Log.ConfigUnsafeMonitorNtCreateFileOff },
                 { "unsafe_IgnoreReparsePoints", Logger.Log.ConfigIgnoreReparsePoints },
-                { "unsafe_IgnoreFullSymlinkResolving", Logger.Log.ConfigIgnoreFullSymlinkResolving },
+                { "unsafe_IgnoreFullReparsePointResolving", Logger.Log.ConfigIgnoreFullReparsePointResolving },
                 { "unsafe_IgnorePreloadedDlls", Logger.Log.ConfigIgnorePreloadedDlls },
                 { "unsafe_IgnoreDynamicWritesOnAbsentProbes", Logger.Log.ConfigIgnoreDynamicWritesOnAbsentProbes },
                 { "unsafe_IgnoreSetFileInformationByHandle", Logger.Log.ConfigIgnoreSetFileInformationByHandle },
@@ -2332,6 +2396,7 @@ namespace BuildXL.Engine
                 { "unsafe_IgnoreUndeclaredAccessesUnderSharedOpaques", Logger.Log.ConfigUnsafeIgnoreUndeclaredAccessesUnderSharedOpaques },
                 { "unsafe_OptimizedAstConversion", Logger.Log.ConfigUnsafeOptimizedAstConversion },
                 { "unsafe_AllowDuplicateTemporaryDirectory", Logger.Log.ConfigUnsafeAllowDuplicateTemporaryDirectory },
+                { "unsafe_SkipFlaggingSharedOpaqueOutputs", Logger.Log.ConfigUnsafeSkipFlaggingSharedOpaqueOutputs },
             };
         }
 
@@ -3011,6 +3076,9 @@ namespace BuildXL.Engine
             // valid for server mode builds.
             engineSchedule.Scheduler.SetProcessStartTime(m_processStartTimeUtc);
 
+            // We are done scheduling. Log configuration statistics used for scheduling.
+            Logger.Log.ScheduleConstructedWithConfiguration(loggingContext, Configuration.GetStatistics().ResolverKinds);
+
             return reusedGraph ? ConstructScheduleResult.ReusedExistingGraph : ConstructScheduleResult.ConstructedNewGraph;
         }
 
@@ -3402,11 +3470,28 @@ namespace BuildXL.Engine
         /// </summary>
         public readonly EngineState EngineState;
 
-        private BuildXLEngineResult(bool success, EngineState engineState, EnginePerformanceInfo enginePerformanceInfo)
+        /// <summary>
+        /// The state that represents the previous engine context. This state can refer to the same instancee as <see cref="EngineState"/>.
+        /// </summary>
+        public readonly EngineState PreviousEngineState;
+
+        /// <summary>
+        /// If true and <see cref="PreviousEngineState"/> is non-null, then <see cref="PreviousEngineState"/> should be disposed.
+        /// </summary>
+        private readonly bool m_shouldDisposePreviousEngineState;
+
+        private BuildXLEngineResult(
+            bool success,
+            EngineState engineState,
+            EngineState previousEngineState,
+            EnginePerformanceInfo enginePerformanceInfo,
+            bool shouldDisposePreviousEngineState)
         {
             IsSuccess = success;
             EngineState = engineState;
+            PreviousEngineState = previousEngineState;
             EnginePerformanceInfo = enginePerformanceInfo;
+            m_shouldDisposePreviousEngineState = shouldDisposePreviousEngineState;
         }
 
         /// <summary>
@@ -3419,22 +3504,35 @@ namespace BuildXL.Engine
         /// </remarks>
         public static BuildXLEngineResult Failed(EngineState engineState)
         {
-            // Dispose engine state so no one can use it.
-            engineState?.Dispose();
-            return Create(false, null, previousState: engineState, newState: null);
+            return Create(false, null, previousState: engineState, newState: null, shouldDisposePreviousEngineState: true);
         }
 
         /// <summary>
         /// Create a EngineResult with a given <see cref="EngineState" /> and success,
         /// </summary>
-        public static BuildXLEngineResult Create(bool success, EnginePerformanceInfo perfInfo, EngineState previousState, EngineState newState)
+        public static BuildXLEngineResult Create(
+            bool success,
+            EnginePerformanceInfo perfInfo,
+            EngineState previousState,
+            EngineState newState,
+            bool shouldDisposePreviousEngineState)
         {
-#pragma warning disable SA1114 // Parameter list must follow declaration
-            // There are three safe cases:
-            Contract.Assert(EngineState.CorrectEngineStateTransition(previousState, newState, out var message), message);
+            return new BuildXLEngineResult(success, newState, previousState, perfInfo, shouldDisposePreviousEngineState);
+        }
 
-            return new BuildXLEngineResult(success, newState, perfInfo);
-#pragma warning restore SA1114 // Parameter list must follow declaration
+        /// <summary>
+        /// Disposes <see cref="PreviousEngineState"/> if requested, and verify that engine state has the correct transition.
+        /// </summary>
+        public void DisposePreviousEngineStateIfRequestedAndVerifyEngineStateTransition()
+        {
+            if (m_shouldDisposePreviousEngineState)
+            {
+                // This ensures that previous engine state becomes unusable.
+                PreviousEngineState?.Dispose();
+            }
+
+            // Veerify that engine state has transitioned to a correct state.
+            Contract.Assert(EngineState.CorrectEngineStateTransition(PreviousEngineState, EngineState, out var message), message);
         }
     }
 

@@ -5,7 +5,7 @@ import * as XUnit from "Sdk.Managed.Testing.XUnit";
 
 namespace DistributedTest {
     @@public
-    export const dll = BuildXLSdk.isDotNetCoreBuild ? undefined : BuildXLSdk.cacheTest({
+    export const dll = BuildXLSdk.cacheTest({
         assemblyName: "BuildXL.Cache.MemoizationStore.Distributed.Test",
         sources: globR(d`.`, "*.cs"),
         runTestArgs: {
@@ -13,6 +13,7 @@ namespace DistributedTest {
                 untrackTestDirectory: true,
                 parallelBucketCount: 8,
             },
+        assemblyBindingRedirects: BuildXLSdk.cacheBindingRedirects(),
         skipTestRun: BuildXLSdk.restrictTestRunToSomeQualifiers,
         references: [
             ...addIf(BuildXLSdk.isFullFramework,

@@ -6,6 +6,14 @@ import {Artifact, Cmd, Transformer, Tool} from "Sdk.Transformers";
 const root = d`.`;
 const dynamicCodeCovString = "DynamicCodeCov";
 
+// QTest have its own logic to enfore the timeout. 
+// The internal QTest timeout = qTestTimeoutSec * qTestAttemptCount
+// The maximum value of qTestTimeoutSec is 600(10 mins) and qTestAttemptCount is 100. 
+// So the maxium runtime of QTest is 1000 mins.
+// BuildXL, therefore setting the timeout to 1005 mins, so QTest could have 5 mins for cleaning up.
+@@public
+export const qtestDefaultTimeoutInMilliseconds = 60300000; // 1005 mins
+
 @@public
 export const qTestTool: Transformer.ToolDefinition = {
     exe: f`${root}/bin/DBS.QTest.exe`,
@@ -16,11 +24,15 @@ export const qTestTool: Transformer.ToolDefinition = {
         d`${Context.getMount("ProgramFilesX86").path}`,
         d`${Context.getMount("ProgramFiles").path}`,
         d`${Context.getMount("AppData").path}`,
-        d`${Context.getMount("LocalAppData").path}`
+        d`${Context.getMount("LocalAppData").path}`,
+        // To ensure that dmps are generated during crashes, QTest now includes procdmp.exe
+        // However, this tool reads dbghelp.dll located in the following directory in CloudBuild machines
+        d`C:/Debuggers`
     ]),
     dependsOnWindowsDirectories: true,
     dependsOnAppDataDirectory: true,
     prepareTempDirectory: true,
+    timeoutInMilliseconds: qtestDefaultTimeoutInMilliseconds,
 };
 const defaultArgs: QTestArguments = {
     testAssembly: undefined,
@@ -265,10 +277,18 @@ export function runQTest(args: QTestArguments): Result {
             qTestPlatformToString(args.qTestPlatform)
         ),
         Cmd.option(
+            "--buildPlatform ",
+            qTestPlatformToString(args.qTestPlatform)
+        ),
+        Cmd.option(
             "--qtestDotNetFramework ",
             qTestDotNetFrameworkToString(args.qTestDotNetFramework)
         ),
-        Cmd.flag("--qTestRetryOnFailure", args.qTestRetryOnFailure),
+        Cmd.option(
+            "--qTestRetryOnFailureMode ",
+            args.qTestRetryOnFailureMode !== undefined
+            ? args.qTestRetryOnFailureMode
+            : args.qTestRetryOnFailure ? "Full" : undefined),
         Cmd.option("--qTestAttemptCount ", args.qTestAttemptCount),
         Cmd.option("--qTestTimeoutSec ", args.qTestTimeoutSec),
         Cmd.option(
@@ -300,12 +320,14 @@ export function runQTest(args: QTestArguments): Result {
         hasUntrackedChildProcesses: args.qTestUnsafeArguments && args.qTestUnsafeArguments.doNotTrackDependencies,
         untrackedPaths: [
             ...addIf(qTestContextInfoFile !== undefined, qTestContextInfoFile),
-            ...addIf(flakyFile !== undefined, flakyFile)
+            ...addIf(flakyFile !== undefined, flakyFile),
+            ...addIfLazy(args.qTestUntrackedPaths !== undefined, () => args.qTestUntrackedPaths)
         ],
         untrackedScopes: [
             // Untracking Recyclebin here to primarily unblock user scenarios that
             // deal with soft-delete and restoration of files from recycle bin.
             d`${sandboxDir.pathRoot}/$Recycle.Bin`,
+            ...(args.qTestUntrackedScopes || [])
         ],
         requireGlobalDependencies: true
     };
@@ -361,7 +383,8 @@ export function runQTest(args: QTestArguments): Result {
             Cmd.option("--qTestContextInfo ", Artifact.none(qTestContextInfoFile)),
             Cmd.option("--coverageDirectory ", Artifact.input(qTestLogsDir)),
             Cmd.option("--qTestBuildType ", args.qTestBuildType || "Unset"),
-            Cmd.option("--qtestPlatform ", qTestPlatformToString(args.qTestPlatform))
+            Cmd.flag("--logging", true),
+            Cmd.option("--buildPlatform ", qTestPlatformToString(args.qTestPlatform))
         ];
 
         Transformer.execute({
@@ -469,6 +492,12 @@ export interface QTestArguments extends Transformer.RunnerArguments {
     qTestLogs?: Directory;
     /** Specifies to automatically retry failing tests */
     qTestRetryOnFailure?: boolean;
+    /** Specifies to the mode under which to automatically retry failing tests:
+     *      'Full': Retry full test target.
+     *      'Failed': Retry only the failed test cases from the test target.
+     *      'None': Do not retry.
+    */
+    qTestRetryOnFailureMode?: "Full" | "Failed" | "None";
     /** Executes tests for specified number of times. A test is considered as passed So t
      * only when all attempts pass. Maximum allowed value is 100.*/
     qTestAttemptCount?: number;
@@ -506,7 +535,11 @@ export interface QTestArguments extends Transformer.RunnerArguments {
     qTestAcquireSemaphores?: Transformer.SemaphoreInfo[];
     /** Overrides global setting to disable code coverage collection on this test binary */
     qTestDisableCodeCoverage?: boolean;
-    
+    /** Paths out of scope of the build or test project where unsafe file access needs to be permitted */
+    qTestUntrackedPaths?: (File | Directory)[];
+    /** Directories and their recursive content that are out of scope of the build or test project where unsafe file access needs to be permitted */
+    qTestUntrackedScopes?: Directory[];
+
     /** Nested tool options */
     tools?: {
         /** 

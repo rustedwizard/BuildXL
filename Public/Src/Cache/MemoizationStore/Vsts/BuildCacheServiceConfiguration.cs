@@ -90,11 +90,6 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         public const int DefaultHttpSendTimeoutMinutes = 5;
 
         /// <summary>
-        /// Default value indicating whether blobs are downloaded through BlobStore.
-        /// </summary>
-        public const bool DefaultDownloadBlobsThroughBlobStore = false;
-
-        /// <summary>
         /// Default value indicating whether Dedup is enabled.
         /// </summary>
         public const bool DefaultUseDedupStore = false;
@@ -125,6 +120,9 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
 
         /// <nodoc />
         public static TimeSpan DefaultInlineFingerprintIncorporationExpiry = TimeSpan.FromHours(8);
+
+        /// <nodoc />
+        public const byte DefaultDomainId = 0;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="BuildCacheServiceConfiguration"/> class.
@@ -169,7 +167,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         public int PinInlineThresholdMinutes { get; set; } = DefaultPinInlineThresholdMinutes;
 
         /// <summary>
-        /// Gets or sets the number of days to keep content before it is referenced by metadata.
+        /// Gets or sets the number of hours to keep content before it is referenced by metadata.
         /// </summary>
         [DataMember]
         public int IgnorePinThresholdHours { get; set; } = DefaultIgnorePinThresholdHours;
@@ -256,12 +254,6 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         public int HttpSendTimeoutMinutes { get; set; } = DefaultHttpSendTimeoutMinutes;
 
         /// <summary>
-        /// Gets or sets whether blobs are downloaded through BlobStore.
-        /// </summary>
-        [DataMember]
-        public bool DownloadBlobsThroughBlobStore { get; set; } = DefaultDownloadBlobsThroughBlobStore;
-
-        /// <summary>
         /// Gets or sets whether Dedup is enabled.
         /// </summary>
         [DataMember]
@@ -309,5 +301,22 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         /// <nodoc />
         [DataMember]
         public int EagerFingerprintIncorporationNagleBatchSize { get; set; } = DefaultEagerFingerprintIncorporationNagleBatchSize;
+
+        /// <nodoc />
+        [DataMember]
+        public byte DomainId { get; set; } = DefaultDomainId;
+
+        /// <summary>
+        /// Gets whether basic HttpClient is used with downloading blobs from Azure blob store
+        /// as opposed to using Azure Storage SDK.
+        /// </summary>
+        /// <remarks>
+        /// There are known issues with timeouts, hangs, unobserved exceptions in the Azure
+        /// Storage SDK, so this is provided as potentially permanent workaround by performing
+        /// downloads using basic http requests.
+        /// </remarks>
+        [DataMember]
+        public bool DownloadBlobsUsingHttpClient { get; set; } = Environment.GetEnvironmentVariable("BUILD_CACHE_BLOB_USE_HTTPCLIENT") != "0";
+
     }
 }

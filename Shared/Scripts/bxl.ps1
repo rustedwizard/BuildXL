@@ -59,6 +59,9 @@ param(
     [ValidateSet("LKG", "Dev", "RunCheckinTests", "RunCheckinTestSamples", "ChangeJournalService")]
     [string]$Use = "LKG",
 
+    [Parameter(Mandatory=$false)]
+    [string]$DevRoot,
+
     [ValidateSet("Release", "Debug")]
     [string]$DeployConfig = "Debug", # must match defaultQualifier.configuration in config.dsc 
 
@@ -478,7 +481,7 @@ function Get-Deployment {
 # server keeping the binaries locked (new versions will get a new directory).
 $deployments = @{
     LKG = New-Deployment -Root $enlistmentRoot -Name "LKG" -Description "LKG (published NuGet package)" -TelemetryEnvironment "SelfhostLKG" -Dir $lkgDir -EnableServerMode $true -DeploymentRoot $DominoDeploymentRoot;
-    Dev = New-Deployment -Root $enlistmentRoot -Name "Dev" -Description "dev (locally-built)" -TelemetryEnvironment "SelfHostPrivateBuild" -EnableServerMode $true -DeploymentRoot $DominoDeploymentRoot;
+    Dev = New-Deployment -Root $enlistmentRoot -Name "Dev" -Description "dev (locally-built)" -TelemetryEnvironment "SelfHostPrivateBuild" -Dir $DevRoot -EnableServerMode $false -DeploymentRoot $DominoDeploymentRoot;
     RunCheckinTests = New-Deployment -Root $enlistmentRoot -Name "RunCheckinTests" -Description "checkin-validation"  -TelemetryEnvironment "SelfHostPrivateBuild" -EnableServerMode $true -DeploymentRoot $DominoDeploymentRoot;
     RunCheckinTestSamples = New-Deployment -Root $enlistmentRoot -Name "RunCheckinTestSamples" -Description "checkin-validation-samples"  -TelemetryEnvironment "SelfHostPrivateBuild" -DeploymentRoot $DominoDeploymentRoot;
     ChangeJournalService = New-Deployment -Root $enlistmentRoot -Name "ChangeJournalService" -Description "change journal service"  -TelemetryEnvironment "SelfHostPrivateBuild" -DeploymentRoot $DominoDeploymentRoot;
@@ -580,7 +583,7 @@ for($i = 0; $i -lt $DominoArguments.Count; $i++){
 
 if (!$skipFilter){
 
-    $AllCacheProjectsFilter = "(spec='Public\Src\Cache\ContentStore\*')or(spec='Public\Src\Cache\MemoizationStore\*')or(spec='Public\Src\Cache\DistributedCache.Host\*')or(spec='Public\Src\Cache\Monitor\*')or(spec='Public\Src\Cache\Logging\*')or(spec='Public\Src\Deployment\cache.dsc')";
+    $AllCacheProjectsFilter = "(spec='Public\Src\Cache\ContentStore\*')or(spec='Public\Src\Cache\MemoizationStore\*')or(spec='Public\Src\Cache\DistributedCache.Host\*')or(spec='Public\Src\Cache\Monitor\*')or(spec='Public\Src\Cache\Roxis\*')or(spec='Public\Src\Cache\Logging\*')or(spec='Public\Src\Deployment\cache.dsc')";
     $CacheNugetFilter = "spec='Public\Src\Deployment\cache.nugetpackages.dsc'";
     $CacheOutputFilter = "output='out\bin\$DeployConfig\cache\*'";
     $CacheLongRunningFilter = "tag='LongRunningTest'";

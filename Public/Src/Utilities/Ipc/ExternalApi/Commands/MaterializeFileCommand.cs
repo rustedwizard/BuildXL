@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System.Diagnostics.ContractsLight;
 using System.IO;
 using BuildXL.Utilities;
 
@@ -21,8 +20,6 @@ namespace BuildXL.Ipc.ExternalApi.Commands
         /// <nodoc />
         public MaterializeFileCommand(FileArtifact fileId, string fullFilePath)
         {
-            Contract.Requires(fileId.IsValid);
-
             File = fileId;
             FullFilePath = fullFilePath;
         }

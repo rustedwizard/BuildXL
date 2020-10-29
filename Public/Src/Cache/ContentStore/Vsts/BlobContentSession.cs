@@ -23,30 +23,23 @@ namespace BuildXL.Cache.ContentStore.Vsts
     /// <summary>
     /// IContentSession for BlobContentStore.
     /// </summary>
-    public class BlobContentSession : BlobReadOnlyContentSession, IContentSession
+    public class BlobContentSession : BlobReadOnlyContentSession, IBackingContentSession
     {
         /// <summary>
         /// Initializes a new instance of the <see cref="BlobContentSession" /> class.
         /// </summary>
-        /// <param name="fileSystem">Filesystem used to read/write files.</param>
+        /// <param name="configuration">Configuration.</param>
         /// <param name="name">Session name.</param>
         /// <param name="implicitPin">Policy determining whether or not content should be automatically pinned on adds or gets.</param>
         /// <param name="blobStoreHttpClient">Backing BlobStore http client.</param>
-        /// <param name="timeToKeepContent">Minimum time-to-live for accessed content.</param>
-        /// <param name="downloadBlobsThroughBlobStore">
-        /// If true, gets blobs through BlobStore. If false, gets blobs from the Azure
-        /// Uri.
-        /// </param>
         /// <param name="counterTracker">Parent counters to track the session.</param>
         public BlobContentSession(
-            IAbsFileSystem fileSystem,
+            BackingContentStoreConfiguration configuration,
             string name,
             ImplicitPin implicitPin,
             IBlobStoreHttpClient blobStoreHttpClient,
-            TimeSpan timeToKeepContent,
-            bool downloadBlobsThroughBlobStore,
             CounterTracker counterTracker)
-            : base(fileSystem, name, implicitPin, blobStoreHttpClient, timeToKeepContent, downloadBlobsThroughBlobStore, counterTracker)
+            : base(configuration, name, implicitPin, blobStoreHttpClient, counterTracker)
         {
         }
 
@@ -275,7 +268,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                 }
                 catch (Exception deleteEx)
                 {
-                    context.Error($"Failed to delete temp file {tempFile} on error with failure {deleteEx}");
+                    Tracer.Error(context, $"Failed to delete temp file {tempFile} on error with failure {deleteEx}");
                 }
 
                 throw;

@@ -114,7 +114,14 @@ namespace BuildXL.Cache.Host.Service
                 fileSystem,
                 SystemClock.Instance,
                 DeploymentUtilities.GetCasRootPath(deploymentRoot),
-                new ConfigurationModel(new ContentStoreConfiguration(new MaxSizeQuota($"{retentionSizeGb}GB"))));
+                new ConfigurationModel(new ContentStoreConfiguration(new MaxSizeQuota($"{retentionSizeGb}GB"))),
+                settings: new ContentStoreSettings()
+                {
+                    TraceFileSystemContentStoreDiagnosticMessages = true,
+
+                    // Disable empty file shortcuts to ensure all content is always placed on disk
+                    UseEmptyContentShortcut = false
+                });
             FileSystem = fileSystem;
             DropExeFilePath = dropExeFilePath;
             DropToken = dropToken;
@@ -198,12 +205,14 @@ namespace BuildXL.Cache.Host.Service
                 var document = JsonDocument.Parse(text, DeploymentUtilities.ConfigurationDocumentOptions);
 
                 var urls = document.RootElement
-                    .GetProperty(nameof(DeploymentConfiguration.Drops))
-                    .EnumerateArray()
-                    .SelectMany(e =>
-                        e.EnumerateObject()
-                         .Where(e => e.Name.StartsWith(nameof(DropDeploymentConfiguration.Url))))
-                    .Select(e => e.Value.GetString());
+                    .EnumerateObject()
+                    .Where(e => e.Name.StartsWith(nameof(DeploymentConfiguration.Drops)))
+                    .SelectMany(d => d.Value
+                        .EnumerateArray()
+                        .SelectMany(e =>
+                            e.EnumerateObject()
+                             .Where(e => e.Name.StartsWith(nameof(DropDeploymentConfiguration.Url))))
+                        .Select(e => e.Value.GetString()));
 
                 foreach (var url in new[] { DeploymentUtilities.ConfigDropUri.ToString() }.Concat(urls))
                 {
@@ -229,7 +238,7 @@ namespace BuildXL.Cache.Host.Service
         /// </summary>
         private void WriteDeploymentManifest()
         {
-            Context.PerformOperation(Tracer, () =>
+            Context.PerformOperation<BoolResult>(Tracer, () =>
             {
                 var deploymentManifest = new DeploymentManifest();
                 foreach (var drop in Drops.Values)
@@ -252,14 +261,24 @@ namespace BuildXL.Cache.Host.Service
                     WriteIndented = true
                 });
 
+                var path = DeploymentManifestPath;
+
                 // Write deployment manifest under deployment root for access by deployment service
                 // NOTE: This is done as two step process to ensure file is replaced atomically.
-                var tempDeploymentManifestPath = new AbsolutePath(DeploymentManifestPath.Path + ".tmp");
-                FileSystem.WriteAllText(tempDeploymentManifestPath, manifestText);
-                FileSystem.MoveFile(tempDeploymentManifestPath, DeploymentManifestPath, replaceExisting: true);
+                AtomicWriteFileText(path, manifestText);
+
+                // Write the deployment manifest id file used for up to date check by deployment service
+                AtomicWriteFileText(DeploymentUtilities.GetDeploymentManifestIdPath(DeploymentRoot), DeploymentUtilities.ComputeContentId(manifestText));
                 return BoolResult.Success;
             },
-            extraStartMessage: $"DropCount={Drops.Count}").ThrowIfFailure();
+            extraStartMessage: $"DropCount={Drops.Count}").ThrowIfFailure<BoolResult>();
+        }
+
+        private void AtomicWriteFileText(AbsolutePath path, string manifestText)
+        {
+            var tempDeploymentManifestPath = new AbsolutePath(path.Path + ".tmp");
+            FileSystem.WriteAllText(tempDeploymentManifestPath, manifestText);
+            FileSystem.MoveFile(tempDeploymentManifestPath, path, replaceExisting: true);
         }
 
         /// <summary>
@@ -343,10 +362,10 @@ namespace BuildXL.Cache.Host.Service
         private Task DownloadAndStoreDropAsync(DropLayout drop)
         {
             var context = Context.CreateNested(Tracer.Name);
-            return context.PerformOperationAsync(Tracer, async () =>
+            return context.PerformOperationAsync<BoolResult>(Tracer, async () =>
             {
-                // Can't skip local file drops since file system is mutable
-                if (!drop.ParsedUrl.IsFile)
+                // Can't skip local file drops (including config drop) since file system is mutable
+                if (!drop.ParsedUrl.IsFile && drop.ParsedUrl != DeploymentUtilities.ConfigDropUri)
                 {
                     if (drop.Files.Count != 0 && drop.Files.All(f => PinHashes.Contains(f.Hash)))
                     {
@@ -373,21 +392,39 @@ namespace BuildXL.Cache.Host.Service
                 // Stores files into CAS and populate file specs with hash and size info
                 await ActionQueue.ForEachAsync(files, async (file, index) =>
                 {
-                    var result = await Store.PutFileAsync(context, file.fullPath, FileRealizationMode.Copy, HashType.MD5, PinRequest).ThrowIfFailure();
-
-                    var spec = drop.Files[index];
-                    spec.Hash = result.ContentHash;
-                    spec.Size = result.ContentSize;
-
-                    var targetPath = DeploymentRoot / DeploymentUtilities.GetContentRelativePath(result.ContentHash);
-
-                    Contract.Check(FileSystem.FileExists(targetPath))?.Assert($"Could not find content for hash {result.ContentHash} at '{targetPath}'");
+                    await DeployFileAsync(drop, file, index, context);
                 });
 
                 return BoolResult.Success;
             },
             extraStartMessage: drop.ToString(),
             extraEndMessage: r => drop.ToString()).ThrowIfFailure<BoolResult>();
+        }
+
+        private Task DeployFileAsync(DropLayout drop, (RelativePath path, AbsolutePath fullPath) file, int index, OperationContext context)
+        {
+            return context.PerformOperationAsync(Tracer, async () =>
+            {
+                // Hash file before put to prevent copying file in common case where it is already in the cache
+                var hashResult = await Store.TryHashFileAsync(context, file.fullPath, HashType.MD5);
+                Contract.Check(hashResult != null)?.Assert($"Missing file '{file.fullPath}'");
+
+                var result = await Store.PutFileAsync(context, file.fullPath, FileRealizationMode.Copy, hashResult.Value.Hash, PinRequest).ThrowIfFailure();
+
+                var spec = drop.Files[index];
+                spec.Hash = result.ContentHash;
+                spec.Size = result.ContentSize;
+
+                var targetPath = DeploymentRoot / DeploymentUtilities.GetContentRelativePath(result.ContentHash);
+
+                Contract.Check(FileSystem.FileExists(targetPath))?.Assert($"Could not find content for hash {result.ContentHash} at '{targetPath}'");
+
+                return result;
+            },
+            traceOperationStarted: true,
+            extraStartMessage: $"Path={file.fullPath}",
+            extraEndMessage: r => $"Path={file.fullPath}"
+            ).ThrowIfFailureAsync();
         }
 
         private RelativePath GetRelativePath(AbsolutePath path, AbsolutePath parent)
@@ -414,7 +451,7 @@ namespace BuildXL.Cache.Host.Service
                 }
                 else if (drop.ParsedUrl.IsFile)
                 {
-                    var path = SourceRoot / drop.ParsedUrl.LocalPath.TrimStart('\\');
+                    var path = SourceRoot / drop.ParsedUrl.LocalPath.TrimStart('\\', '/');
                     if (FileSystem.DirectoryExists(path))
                     {
                         foreach (var file in FileSystem.EnumerateFiles(path, EnumerateOptions.Recurse))
@@ -447,18 +484,37 @@ namespace BuildXL.Cache.Host.Service
                         if (OverrideLaunchDropProcess != null)
                         {
                             OverrideLaunchDropProcess((
-                                exePath: DropExeFilePath.Path, 
-                                args: args, 
+                                exePath: DropExeFilePath.Path,
+                                args: args,
                                 dropUrl: drop.Url,
-                                targetDirectory: tempDirectory.Path, 
+                                targetDirectory: tempDirectory.Path,
                                 relativeRoot: relativeRoot)).ThrowIfFailure();
                         }
                         else
                         {
-                            var process = Process.Start(new ProcessStartInfo(DropExeFilePath.Path, args)
+                            var process = new Process()
                             {
-                                UseShellExecute = false
-                            });
+                                StartInfo = new ProcessStartInfo(DropExeFilePath.Path, args)
+                                {
+                                    UseShellExecute = false,
+                                    RedirectStandardOutput = true,
+                                    RedirectStandardError = true,
+                                },
+                            };
+
+                            process.OutputDataReceived += (s, e) =>
+                            {
+                                Tracer.Debug(context, "Drop Output: " + e.Data);
+                            };
+
+                            process.ErrorDataReceived += (s, e) =>
+                            {
+                                Tracer.Error(context, "Drop Error: " + e.Data);
+                            };
+
+                            process.Start();
+                            process.BeginOutputReadLine();
+                            process.BeginErrorReadLine();
 
                             process.WaitForExit();
 

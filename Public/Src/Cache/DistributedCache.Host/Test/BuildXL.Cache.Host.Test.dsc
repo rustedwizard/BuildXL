@@ -22,7 +22,23 @@ namespace Test {
             importFrom("BuildXL.Cache.ContentStore").Library.dll,
             importFrom("BuildXL.Cache.ContentStore").Test.dll,
             importFrom("BuildXL.Cache.ContentStore").InterfacesTest.dll,
+            importFrom("BuildXL.Cache.ContentStore").Grpc.dll,
             ...BuildXLSdk.fluentAssertionsWorkaround,
+
+            // Used by Launcher integration test
+            importFrom("BuildXL.Utilities").dll,
+            importFrom("BuildXL.Cache.ContentStore").App.exe,
+            ...addIf(!BuildXLSdk.isFullFramework,
+                LauncherServer.withQualifier({targetFramework: "netcoreapp3.1"}).exe
+            )
         ],
+        tools: {
+            csc: {
+                noWarnings: [
+                    8002, // References ContentStoreApp.exe which is not signed because it uses CLAP
+                ]
+            },
+
+        },
     });
 }

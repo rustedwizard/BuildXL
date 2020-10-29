@@ -3,6 +3,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Diagnostics.ContractsLight;
 
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
 #pragma warning disable SA1000
@@ -62,8 +64,6 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
         // Polynomial values
         const int PolynomialsLength = 256;
-        static readonly HashValueT[] g_arrPolynomialsTD = Rabin64Table.g_arrPolynomialsTD;
-        static readonly HashValueT[] g_arrPolynomialsTU = Rabin64Table.g_arrPolynomialsTU;
 
         // Parameters
         private readonly size_t m_nMinChunkSize;
@@ -72,8 +72,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
         private DWORD m_dwInitialChunkingHashMatchValue => g_dwChunkingHashMatchValue;
 
-        private readonly DWORD m_dwSmallestChunkingTruncateMask;
-        private readonly DWORD m_dwSmallestChunkingHashMatchValue;
+        private readonly HashMaskMatch _smallestMask;
 
         // State maintained across multiple FindRabinChunkBoundariesInternal() calls
         private HashValueT m_hash;               // Last hash value
@@ -82,12 +81,11 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
         private readonly OffsetT[] m_regressChunkLen;
         private OffsetT m_lastNonZeroChunkLen;
         private OffsetT m_numZeroRun;                       // Size of continuous zeros after last chunk. 
-                                                    // >= 0, a run is counted (# of consecutive zeros)
-                                                    // <  0, a run has been interrupted, i.e., encounter at least one none zero values. 
+                                                            // >= 0, a run is counted (# of consecutive zeros)
+                                                            // <  0, a run has been interrupted, i.e., encounter at least one none zero values. 
 
         // Regress hash values
-        private readonly DWORD[] m_arrRegressChunkingTruncateMask;             // Array of hash masks for the regression match
-        private readonly DWORD[] m_arrRegressChunkingHashMatchValue;           // Array of hash values for the regression matche
+        private readonly HashMaskMatch[] _regressionMasks;
 
         private size_t previouslyProcessedBytesAcrossCalls;
         private size_t lastChunkAbsoluteOffsetAcrossCalls;
@@ -95,7 +93,20 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
         private readonly List<DedupBasicChunkInfo> outOffsetsVector = new List<DedupBasicChunkInfo>();
         private readonly Action<DedupBasicChunkInfo> chunkCallback;
 
+        private bool m_pushBufferCalled = false;
+
         public IReadOnlyList<DedupBasicChunkInfo> Chunks => outOffsetsVector;
+
+        /// <summary>A mask + match value to compare a current hash value to. Colocating mask and match yields better cache locality.</summary>
+        private readonly struct HashMaskMatch
+        {
+            public HashMaskMatch(uint truncateMask, uint matchValue) => (_truncateMask, _matchValue) = (truncateMask, matchValue);
+
+            private readonly uint _truncateMask; // 0b0000...1111, where number of trailing 1's is the mask length.
+            private readonly uint _matchValue;   // 0b0000...xxxx, where x is a bit in the hash match value.
+
+            public bool IsMatch(ulong hash) => _matchValue == (hash & _truncateMask);
+        }
 
         public RegressionChunking(ChunkerConfiguration configuration, Action<DedupBasicChunkInfo> chunkCallback)
         {
@@ -107,11 +118,8 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
             m_history = new BYTE[m_nWindowSize];
             m_regressChunkLen = new OffsetT[m_nRegressSize];
-            m_arrRegressChunkingTruncateMask = new DWORD[m_nRegressSize];
-            m_arrRegressChunkingHashMatchValue = new DWORD[m_nRegressSize];
+            _regressionMasks = new HashMaskMatch[m_nRegressSize];
 
-            m_dwSmallestChunkingTruncateMask = 0;
-            m_dwSmallestChunkingHashMatchValue = 0;
             previouslyProcessedBytesAcrossCalls = 0;
             lastChunkAbsoluteOffsetAcrossCalls = 0;
 
@@ -134,16 +142,13 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
             // Initialize a set of mask & match value, each has one bit less than previous mask. 
             for (size_t regressIndex = 0; regressIndex < m_nRegressSize; regressIndex++)
             {
-                m_arrRegressChunkingTruncateMask[regressIndex] = dwChunkingTruncateMask;
-
-                m_arrRegressChunkingHashMatchValue[regressIndex] = dwChunkingHashMatchValue;
+                _regressionMasks[regressIndex] = new HashMaskMatch(dwChunkingTruncateMask, dwChunkingHashMatchValue);
 
                 dwChunkingTruncateMask >>= 1;
                 dwChunkingHashMatchValue &= dwChunkingTruncateMask;
             }
 
-            m_dwSmallestChunkingTruncateMask = dwChunkingTruncateMask;
-            m_dwSmallestChunkingHashMatchValue = dwChunkingHashMatchValue;
+            _smallestMask = new HashMaskMatch(dwChunkingTruncateMask, dwChunkingHashMatchValue);
         }
 
         public void PushBuffer(
@@ -157,8 +162,12 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
             ArraySegment<BYTE> buffer
         )
         {
+            // we do not trust successive calls, so ensure we only call it once
+            Contract.Assert(!m_pushBufferCalled);
+            m_pushBufferCalled = true;
+
             size_t size = (size_t)buffer.Count;
-            bool bNoMoreData = false;
+            bool bNoMoreData = true;
 
             if (size == 0)
             {
@@ -193,9 +202,17 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                     DedupChunkCutType.DDP_CCT_EndReached));
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void NT_ASSERT(bool expression)
         {
-            if(!expression)
+            // Making this method inline friendly by moving the 'throw' statement
+            // into a separate method. That's because JIT won't inline a method with 'throw' instruction in it.
+            if (!expression)
+            {
+                throwInvalidOperation();
+            }
+
+            static void throwInvalidOperation()
             {
                 throw new InvalidOperationException();
             }
@@ -211,27 +228,32 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
             NT_ASSERT(pTestedPointer < pEndBuffer);
         }
 
-        private static unsafe size_t ARRAYSIZE<T>(T[] array)
-        {
-            return (size_t)array.Length;
-        }
-
         private static unsafe void DDP_ASSERT_VALID_ARRAY_INDEX(long nArrayIndex, byte[] arrValues)
         {
-            NT_ASSERT((OffsetT)(nArrayIndex) < (OffsetT)(ARRAYSIZE(arrValues)));
-            NT_ASSERT((OffsetT)(nArrayIndex) >= 0);
+            NT_ASSERT(nArrayIndex < arrValues.Length);
+            NT_ASSERT(nArrayIndex >= 0);
         }
 
         private static unsafe void DDP_ASSERT_VALID_ARRAY_INDEX(ulong nArrayIndex, long[] arrValues)
         {
-            NT_ASSERT((OffsetT)(nArrayIndex) < (OffsetT)(ARRAYSIZE(arrValues)));
+            NT_ASSERT((OffsetT)(nArrayIndex) < arrValues.Length);
             NT_ASSERT((OffsetT)(nArrayIndex) >= 0);
+        }
+
+        // This method is called a lot in a hot paths, making it static speeds up the overall throughput.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static unsafe bool DDP_IS_VALID_POINTER(byte* pTestedPointer, byte* pStartBuffer, byte* pEndBuffer)
+        {
+            return pTestedPointer >= pStartBuffer && pTestedPointer < pEndBuffer;
         }
 
         private void AddChunkInfo(DedupBasicChunkInfo chunkInfo)
         {
-            outOffsetsVector.Add(chunkInfo);
-            chunkCallback(chunkInfo);
+            if (chunkInfo.m_nChunkLength != 0)
+            {
+                outOffsetsVector.Add(chunkInfo);
+                chunkCallback(chunkInfo);
+            }
         }
 
         private unsafe void FindRabinChunkBoundariesInternal(
@@ -242,6 +264,9 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
             ref size_t lastChunkAbsoluteOffsetParam                       // Temporary state between calls FindRabinChunkBoundariesInternal(). Offset of the last inserted chunk, relative to the overall buffer in FindRabinChunkBoundaries()
         )
         {
+            HashValueT[] g_arrPolynomialsTD = Rabin64Table.g_arrPolynomialsTD;
+            HashValueT[] g_arrPolynomialsTU = Rabin64Table.g_arrPolynomialsTU;
+
             unchecked
             {
                 NT_ASSERT(cbLen > 0);
@@ -257,29 +282,42 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                 byte* pEndBuffer = pStartBuffer + cbLen;
                 NT_ASSERT(pStartBuffer < pEndBuffer);        // Ensure that we don't have arithmetic overrun
 
-                Action<IntPtr> DDP_ASSERT_VALID_BUFFER_POINTER = (IntPtr pTestedPointer) =>
+                // Using local functions instead of delegates, because the local functions are slightly more efficient
+                // because they can avoid creating a closure at runtime.
+                void DDP_ASSERT_VALID_BUFFER_POINTER(byte* pTestedPointer)
                 {
-                    DDP_BUFFER_RANGE_ASSERT((byte*)pTestedPointer, pStartBuffer, pEndBuffer);
-                };
+                    unchecked
+                    {
+                        DDP_BUFFER_RANGE_ASSERT(pTestedPointer, pStartBuffer, pEndBuffer);
+                    }
+                }
 
-                Action<IntPtr> DDP_ASSERT_VALID_BUFFER_END = (IntPtr pTestedPointer) =>
+                void DDP_ASSERT_VALID_BUFFER_END(byte* pTestedPointer)
                 {
-                    DDP_BUFFER_RANGE_ASSERT((byte*)pTestedPointer, pStartBuffer + 1, pEndBuffer + 1);
-                };
+                    unchecked
+                    {
+                        DDP_BUFFER_RANGE_ASSERT((byte*)pTestedPointer, pStartBuffer + 1, pEndBuffer + 1);
+                    }
+                }
 
-                Action<IntPtr> DDP_ASSERT_VALID_START_POINTER = (IntPtr pTestedPointer) =>
+                void DDP_ASSERT_VALID_START_POINTER(byte* pTestedPointer)
                 {
-                    DDP_BUFFER_RANGE_ASSERT((byte*)pTestedPointer + m_nWindowSize, pStartBuffer, pEndBuffer + 1);
-                };
+                    unchecked
+                    {
+                        DDP_BUFFER_RANGE_ASSERT((byte*)pTestedPointer + m_nWindowSize, pStartBuffer, pEndBuffer + 1);
+                    }
+                }
 
-                Action<IntPtr> DDP_ASSERT_VALID_END_POINTER = (IntPtr pTestedPointer) =>
+                void DDP_ASSERT_VALID_END_POINTER(byte* pTestedPointer)
                 {
-                    DDP_BUFFER_RANGE_ASSERT((byte*)pTestedPointer, pStartBuffer, pEndBuffer + 1);
-                };
+                    unchecked
+                    {
+                        DDP_BUFFER_RANGE_ASSERT((byte*)pTestedPointer, pStartBuffer, pEndBuffer + 1);
+                    }
+                }
 
-                Func<IntPtr, bool> DDP_IS_VALID_POINTER = (IntPtr pTestedPointer) =>
-                    (((byte*)pTestedPointer >= pStartBuffer) && ((byte*)pTestedPointer < pEndBuffer));
-
+                //bool DDP_IS_VALID_POINTER(IntPtr pTestedPointer) =>
+                //    unchecked((((byte*)pTestedPointer >= pStartBuffer) && ((byte*)pTestedPointer < pEndBuffer)));
 
                 //
                 // Local state variables (for this call)
@@ -319,12 +357,9 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
                 */
 
-                // smallest hash mask and match value
-                DWORD dwSmallestChunkingTruncateMask = m_dwSmallestChunkingTruncateMask;      // The smallest mask (default = 16-6 = 10 bits ) 
-                DWORD dwSmallestChunkingHashMatchValue = m_dwSmallestChunkingHashMatchValue;  // Used for chunking: if the least significant N bytes from the Rabin hash are equal to this value, we declare a "cut" (where N depends on the context)
 
-                DWORD[] arrRegressChunkingTruncateMask = m_arrRegressChunkingTruncateMask;
-                DWORD[] arrRegressChunkingHashMatchValue = m_arrRegressChunkingHashMatchValue;
+                HashMaskMatch smallestMask = _smallestMask;         // If the least significant N bytes from the Rabin hash are equal to this value, we declare a "cut" (N depends on the context)
+                HashMaskMatch[] regressionMasks = _regressionMasks; // Same as above, but for each regression step.
 
                 //
                 // Chunking loop
@@ -351,14 +386,14 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                             NT_ASSERT(m_numZeroRun == (OffsetT)(previouslyProcessedBytes));
 
                             byte* pStartZeroTest = pStartBuffer + startOffset;
-                            DDP_ASSERT_VALID_BUFFER_POINTER((IntPtr)pStartZeroTest);
+                            DDP_ASSERT_VALID_BUFFER_POINTER(pStartZeroTest);
 
                             // Check how many subsequent consecutive bytes are zeros
                             OffsetT remainingNonZero = remainingBytes;
 
                             // TODO:365262 - move this in a C++ utility routine
                             // Note: we used DDP_IS_VALID_POINTER to "hide" OACR failures as Prefast can't keep up with the large list of asumptions (known bug)
-                            while (DDP_IS_VALID_POINTER((IntPtr)pStartZeroTest) && (remainingNonZero > 0) && ((*pStartZeroTest) == 0))
+                            while (DDP_IS_VALID_POINTER(pStartZeroTest, pStartBuffer, pEndBuffer) && (remainingNonZero > 0) && ((*pStartZeroTest) == 0))
                             {
                                 remainingNonZero--;
 
@@ -453,13 +488,13 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                         {
                             // Scan till end window, is it all zeros?
                             byte* pStartZeroTest = pStartBuffer + startOffset;
-                            DDP_ASSERT_VALID_BUFFER_POINTER((IntPtr)pStartZeroTest);
+                            DDP_ASSERT_VALID_BUFFER_POINTER(pStartZeroTest);
 
                             byte* pEndPosZeroTest = pStartBuffer + initialEndWindow;
-                            DDP_ASSERT_VALID_BUFFER_END((IntPtr)pEndPosZeroTest);
+                            DDP_ASSERT_VALID_BUFFER_END(pEndPosZeroTest);
 
                             // Note: we used DDP_IS_VALID_POINTER to "hide" OACR failures as Prefast can't keep up with the large list of asumptions (known bug)
-                            while (DDP_IS_VALID_POINTER((IntPtr)pStartZeroTest) && (pStartZeroTest != pEndPosZeroTest) && ((*pStartZeroTest) == 0))
+                            while (DDP_IS_VALID_POINTER(pStartZeroTest, pStartBuffer, pEndBuffer) && (pStartZeroTest != pEndPosZeroTest) && ((*pStartZeroTest) == 0))
                             {
                                 pStartZeroTest++;
                             }
@@ -467,7 +502,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                             // Note: here m_numZeroRun can go beyond previouslyProcessedBytes
                             if (pStartZeroTest != pEndPosZeroTest)
                             {
-                                DDP_ASSERT_VALID_BUFFER_POINTER((IntPtr)pStartZeroTest);
+                                DDP_ASSERT_VALID_BUFFER_POINTER(pStartZeroTest);
                                 m_numZeroRun = -1;
                             }
                             else
@@ -497,10 +532,10 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                         // Perform the Rabin hash calculation on the remaining bytes in the window
                         NT_ASSERT(currentStartIndex >= 0);
                         byte* pbMark = pStartBuffer + currentStartIndex;
-                        DDP_ASSERT_VALID_BUFFER_POINTER((IntPtr)pbMark);
+                        DDP_ASSERT_VALID_BUFFER_POINTER(pbMark);
 
                         // Compute the hash for the remaining bytes (within the window) in the actual buffer
-                        for (; DDP_IS_VALID_POINTER((IntPtr)pbMark) && (currentStartIndex < initialEndWindow) && (pbMark < pEndBuffer); currentStartIndex++)
+                        for (; DDP_IS_VALID_POINTER(pbMark, pStartBuffer, pEndBuffer) && (currentStartIndex < initialEndWindow) && (pbMark < pEndBuffer); currentStartIndex++)
                         {
                             HashValueT origHash = hash;
                             hash <<= 8;
@@ -532,17 +567,17 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
                     // Pointer to the start of the window
                     byte* pStartWindow = pStartBuffer + initialStartWindow;
-                    DDP_ASSERT_VALID_START_POINTER((IntPtr)pStartWindow);
+                    DDP_ASSERT_VALID_START_POINTER(pStartWindow);
 
                     // Pointer to the end of the window 
                     byte* pEndWindow = pStartWindow + m_nWindowSize;
-                    DDP_ASSERT_VALID_END_POINTER((IntPtr)pEndWindow);
+                    DDP_ASSERT_VALID_END_POINTER(pEndWindow);
 
                     // Pointer to the byte where the maximum chunk size is hit (or to the end of the current buffer, if the max is beyond reach)
                     NT_ASSERT(m_nMaxChunkSize > previouslyProcessedBytes);
                     OffsetT bytesUntilMax = (OffsetT)(m_nMaxChunkSize) - (OffsetT)(previouslyProcessedBytes);
                     byte* pEndPosUntilMax = pStartBuffer + Math.Min((OffsetT)cbLen, startOffset + bytesUntilMax);
-                    DDP_ASSERT_VALID_BUFFER_END((IntPtr)pEndPosUntilMax);
+                    DDP_ASSERT_VALID_BUFFER_END(pEndPosUntilMax);
 
                     // Continue the zero run detection until pEndPosUntilMax
                     if (m_numZeroRun >= 0)
@@ -556,12 +591,12 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                         // TODO:365262 consider use utility routine
                         // Note: we used DDP_IS_VALID_POINTER to "hide" OACR failures as Prefast can't keep up with the large list of asumptions (known bug)
                         byte* pPreviousEndWindow = pEndWindow;
-                        while (DDP_IS_VALID_POINTER((IntPtr)pEndWindow) && (pEndWindow != pEndPosUntilMax) && ((*pEndWindow) == 0))
+                        while (DDP_IS_VALID_POINTER(pEndWindow, pStartBuffer, pEndBuffer) && (pEndWindow != pEndPosUntilMax) && ((*pEndWindow) == 0))
                         {
                             pEndWindow++;
                         }
 
-                        DDP_ASSERT_VALID_END_POINTER((IntPtr)pEndWindow);
+                        DDP_ASSERT_VALID_END_POINTER(pEndWindow);
 
                         // Get the amount of zero bytes just discovered, and update m_numZeroRun
                         NT_ASSERT(pEndWindow >= pPreviousEndWindow);
@@ -601,7 +636,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                         }
                         else
                         {
-                            DDP_ASSERT_VALID_END_POINTER((IntPtr)pEndWindow);
+                            DDP_ASSERT_VALID_END_POINTER(pEndWindow);
 
                             NT_ASSERT(m_numZeroRun >= (OffsetT)(m_nMinChunkSize));
                             bDeclareChunk = true;
@@ -655,8 +690,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
                         // Advance hash calculation when the start is from the previous buffer, and the end is in the current buffer
                         // TODO:365262 potential perf improvement
-                        while (DDP_IS_VALID_POINTER((IntPtr)pEndWindow) &&
-                            (dwSmallestChunkingHashMatchValue != (hash & dwSmallestChunkingTruncateMask)) &&
+                        while (!smallestMask.IsMatch(hash) &&
                             pEndWindow < pEndPosUntilMax &&
                             initialStartWindow < 0)
                         {
@@ -675,30 +709,27 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                             initialStartWindow++;
                         }
 
-                        DDP_ASSERT_VALID_START_POINTER((IntPtr)pStartWindow);
-                        DDP_ASSERT_VALID_END_POINTER((IntPtr)pEndWindow);
+                        DDP_ASSERT_VALID_START_POINTER(pStartWindow);
+                        DDP_ASSERT_VALID_END_POINTER(pEndWindow);
 
                         // Advance calculation while both window ends are in the same buffer
                         // TODO:365262 potential perf improvement
-                        while (DDP_IS_VALID_POINTER((IntPtr)pStartWindow) &&
-                               DDP_IS_VALID_POINTER((IntPtr)pEndWindow) &&
-                              (dwSmallestChunkingHashMatchValue != (hash & dwSmallestChunkingTruncateMask)) &&
-                                pEndWindow < pEndPosUntilMax)
+                        while (pEndWindow < pEndPosUntilMax && !smallestMask.IsMatch(hash))
                         {
                             // the main critical loop
                             hash ^= g_arrPolynomialsTU[*pStartWindow];
                             HashValueT origHash = hash;
                             hash <<= 8;
                             hash ^= *pEndWindow;
-                            hash ^= g_arrPolynomialsTD[(origHash >> 56) & 0xff];
+                            hash ^= g_arrPolynomialsTD[origHash >> 56];
 
                             pStartWindow++;
                             pEndWindow++;
                             // Note: we do need not to increment initialStartWindow anymore here (as this was related with the initial setup)
                         }
 
-                        DDP_ASSERT_VALID_START_POINTER((IntPtr)pStartWindow);
-                        DDP_ASSERT_VALID_END_POINTER((IntPtr)pEndWindow);
+                        DDP_ASSERT_VALID_START_POINTER(pStartWindow);
+                        DDP_ASSERT_VALID_END_POINTER(pEndWindow);
 
                         // Processed bytes starting from the current startOffset. Equal or smaller than the size of the buffer
                         NT_ASSERT(pEndWindow >= pStartBuffer + startOffset);
@@ -710,7 +741,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                         NT_ASSERT(chunkLen >= m_nMinChunkSize);
 
                         // Check if a hash-driven chunk cut was made (using the smallest hash/mask)
-                        if (dwSmallestChunkingHashMatchValue == (hash & dwSmallestChunkingTruncateMask))
+                        if (smallestMask.IsMatch(hash))
                         {
                             // TODO:365262 use a utility routine
                             OffsetT regressHashMismatchIndex = (OffsetT)m_nRegressSize - 1;
@@ -720,7 +751,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                                 // TODO:365262 array index check
                                 // TODO:365262 Refactor to eliminate the confusing "offset by 1" difference between the two arrays
                                 m_regressChunkLen[regressHashMismatchIndex] = (OffsetT)chunkLen;
-                                if (arrRegressChunkingHashMatchValue[regressHashMismatchIndex] != (hash & arrRegressChunkingTruncateMask[regressHashMismatchIndex]))
+                                if (!regressionMasks[regressHashMismatchIndex].IsMatch(hash))
                                     break;
                             }
 
@@ -755,7 +786,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
                                         hash ^= g_arrPolynomialsTU[m_history[initialStartWindow + (OffsetT)m_nWindowSize]];
                                     }
-                                    else if (DDP_IS_VALID_POINTER((IntPtr)pStartWindow))
+                                    else if (DDP_IS_VALID_POINTER(pStartWindow, pStartBuffer, pEndBuffer))
                                     {
                                         hash ^= g_arrPolynomialsTU[*pStartWindow];
                                     }
@@ -764,7 +795,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                                         NT_ASSERT(false);
                                     }
 
-                                    if (DDP_IS_VALID_POINTER((IntPtr)pEndWindow))
+                                    if (DDP_IS_VALID_POINTER(pEndWindow, pStartBuffer, pEndBuffer))
                                     {
                                         HashValueT origHash = hash;
                                         hash <<= 8;
@@ -777,10 +808,10 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                                     }
 
                                     pStartWindow++;
-                                    DDP_ASSERT_VALID_START_POINTER((IntPtr)pStartWindow);
+                                    DDP_ASSERT_VALID_START_POINTER(pStartWindow);
 
                                     pEndWindow++;
-                                    DDP_ASSERT_VALID_END_POINTER((IntPtr)pEndWindow);
+                                    DDP_ASSERT_VALID_END_POINTER(pEndWindow);
 
                                     initialStartWindow++;
                                     continue; // To loop for next hash value
@@ -895,7 +926,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                                 {
                                     if (nExaminePos >= 0)
                                     {
-                                        DDP_ASSERT_VALID_BUFFER_POINTER((IntPtr)(pStartBuffer + nExaminePos));
+                                        DDP_ASSERT_VALID_BUFFER_POINTER((pStartBuffer + nExaminePos));
 
                                         if (pStartBuffer[nExaminePos] != 0)
                                             break;
@@ -923,7 +954,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                                 // Update pEndPosUntilMax
                                 // TODO:365262 - cleanup algorithm
                                 pEndPosUntilMax = pStartBuffer + Math.Min((OffsetT)cbLen, startOffset + (OffsetT)(m_nMaxChunkSize) - (OffsetT)(previouslyProcessedBytes));
-                                DDP_ASSERT_VALID_BUFFER_END((IntPtr)pEndPosUntilMax);
+                                DDP_ASSERT_VALID_BUFFER_END(pEndPosUntilMax);
                             }
                             else
                             {
@@ -955,17 +986,17 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
                         {
                             // Find first non zero position, make sure we don't run before pStartBuffer
                             byte* pReverseScan = pEndWindow;
-                            DDP_ASSERT_VALID_END_POINTER((IntPtr)pReverseScan);
+                            DDP_ASSERT_VALID_END_POINTER(pReverseScan);
 
                             byte* pReverseScanStop = pEndPosUntilMax - Math.Min((OffsetT)(chunkLen) - (OffsetT)(m_nMinChunkSize) + 1, pEndPosUntilMax - pStartBuffer);
-                            DDP_ASSERT_VALID_END_POINTER((IntPtr)pReverseScanStop);
+                            DDP_ASSERT_VALID_END_POINTER(pReverseScanStop);
 
                             do
                             {
                                 pReverseScan--;
                                 // DDP_ASSERT_VALID_BUFFER_POINTER((IntPtr)pReverseScan);
                             }
-                            while (DDP_IS_VALID_POINTER((IntPtr)pReverseScan) && ((*pReverseScan) == 0) && (pReverseScan >= pReverseScanStop));
+                            while (DDP_IS_VALID_POINTER(pReverseScan, pStartBuffer, pEndBuffer) && ((*pReverseScan) == 0) && (pReverseScan >= pReverseScanStop));
                             // Note: we used DDP_IS_VALID_POINTER to "hide" OACR failures as Prefast can't keep up with the large list of asumptions (known bug)
 
                             if (pReverseScan >= pReverseScanStop)
@@ -1016,7 +1047,7 @@ namespace BuildXL.Cache.ContentStore.Hashing.Chunking
 
                 for (; bytesIndex < (OffsetT)m_nWindowSize; bytesIndex++)
                 {
-                    DDP_ASSERT_VALID_BUFFER_POINTER((IntPtr)(pStartBuffer + cbLen - m_nWindowSize + bytesIndex));
+                    DDP_ASSERT_VALID_BUFFER_POINTER((pStartBuffer + cbLen - m_nWindowSize + bytesIndex));
                     DDP_ASSERT_VALID_ARRAY_INDEX(bytesIndex, m_history);
                     m_history[bytesIndex] = pStartBuffer[(OffsetT)(cbLen) - (OffsetT)(m_nWindowSize) + bytesIndex];
                 }

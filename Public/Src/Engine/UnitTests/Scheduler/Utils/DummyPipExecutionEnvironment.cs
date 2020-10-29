@@ -19,6 +19,7 @@ using BuildXL.Native.IO;
 using BuildXL.Pips;
 using BuildXL.Pips.Graph;
 using BuildXL.Pips.Operations;
+using BuildXL.Plugin;
 using BuildXL.Processes;
 using BuildXL.Processes.Containers;
 using BuildXL.Scheduler;
@@ -202,6 +203,19 @@ namespace Test.BuildXL.Scheduler.Utils
             State.FileContentManager = GetFileContentManager();
         }
 
+        /// <summary>
+        /// Between builds, we sometimes change the existence of source paths.
+        /// Using a pathexistencecache can cause issues in the builds using  
+        /// a shared execution environment.
+        /// That's why, we reset the filesystemview.
+        /// In the actual builds, pathexistencecache is always cleaned even for 
+        /// dev builds using server mode.
+        /// </summary>
+        internal void ResetFileSystemView()
+        {
+            State.FileSystemView = GetFileSystemView();
+        }
+
         private FileContentManager GetFileContentManager()
         {
             return new FileContentManager(this, m_operationTracker)
@@ -211,6 +225,11 @@ namespace Test.BuildXL.Scheduler.Utils
                 // instead they are just hashed normally
                 TrackFilesUnderInvalidMountsForTests = true
             };
+        }
+
+        private FileSystemView GetFileSystemView()
+        {
+            return new FileSystemView(Context.PathTable, PipGraphView, LocalDiskContentStore);
         }
 
         /// <nodoc />
@@ -385,8 +404,8 @@ namespace Test.BuildXL.Scheduler.Utils
                     string.Join(
                         "|",
                         Directory.EnumerateFileSystemEntries(directoryPath.ToString(Context.PathTable))
-                            .Select(fullPath => Path.GetFileName(fullPath).ToUpperInvariant())
-                            .OrderBy(fileName => fileName, StringComparer.Ordinal));
+                            .Select(fullPath => Path.GetFileName(fullPath).ToCanonicalizedPath())
+                            .OrderBy(fileName => fileName, OperatingSystemHelper.PathComparer));
                 ContentHash listingHash = ContentHashingUtilities.HashBytes(Encoding.Unicode.GetBytes(canonicalizedDirectoryListing));
                 return new DirectoryFingerprint(listingHash);
             }
@@ -504,7 +523,7 @@ namespace Test.BuildXL.Scheduler.Utils
         }
 
         /// <inheritdoc />
-        public void ReportFileArtifactPlaced(in FileArtifact artifact)
+        public void ReportFileArtifactPlaced(in FileArtifact artifact, bool isAllowedSourceRewrite)
         {
             // Do nothing.
         }
@@ -611,6 +630,8 @@ namespace Test.BuildXL.Scheduler.Utils
         public ITempCleaner TempCleaner => new TestMoveDeleteCleaner(Path.Combine(Environment.GetEnvironmentVariable("TEMP"), "moveDeletionTemp"));
 
         public SymlinkedAccessResolver SymlinkedAccessResolver => null;
+
+        public PluginManager PluginManager { get; }
 
         public SealDirectoryKind GetSealDirectoryKind(DirectoryArtifact directory)
         {
@@ -726,7 +747,7 @@ namespace Test.BuildXL.Scheduler.Utils
 
     internal sealed class DummyServiceManager : ServiceManager
     {
-        public override Task<bool> TryRunServiceDependenciesAsync(IPipExecutionEnvironment environment, IEnumerable<PipId> servicePipDependencies, LoggingContext loggingContext)
+        public override Task<bool> TryRunServiceDependenciesAsync(IPipExecutionEnvironment environment, PipId pipId, IEnumerable<PipId> servicePipDependencies, LoggingContext loggingContext)
         {
             return BoolTask.True;
         }

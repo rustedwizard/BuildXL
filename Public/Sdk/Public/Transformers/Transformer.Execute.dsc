@@ -117,6 +117,21 @@ namespace Transformer {
         /** A custom set of exit codes that causes pip to be retried by BuildXL. If an exit code is also in the successExitCode, then the pip is not retried on exiting with that exit code. */
         retryExitCodes?: number[];
 
+        /**
+         * Maximum number of times BuildXL will retry the pip when it returns an exit code in 'retryExitCodes'
+         * If not specified, the global configuration for it takes effect.
+         * If no retry exit codes are specified, this argument is ignored.
+         */
+        processRetries?: number;
+
+        /**
+         * The name of the environment variable BuildXL will use to communicate the number of times the pip has been retried so far.
+         * When defined, the first time the pip is executed the value of this environment variable will be 0. If a retry happens by virtue of 'retryExitCodes',
+         * the variable will have value 1, and so on for subsequent retries.
+         * This variable will automatically become a passthrough one and will have no effects on caching.
+         */
+        retryAttemptEnvironmentVariable?: string;
+
         /** Temporary directory for the tool to use (use Context.getTempDirectory() to obtain one), and set TEMP and TMP. */
         tempDirectory?: Directory;
 
@@ -154,6 +169,12 @@ namespace Transformer {
          * Default is globally controlled by the sandbox configuration
          */
         doubleWritePolicy?: DoubleWritePolicy;
+
+        /**
+         * The policy to apply when a source is rewritten.
+         * Default is globally controlled by the sandbox configuration
+         */
+        sourceRewritePolicy?: SourceRewritePolicy;
 
         /** Whether this process should allow undeclared reads from source files. A source 
          * file is considered to be a file that is not written during the build.
@@ -228,7 +249,16 @@ namespace Transformer {
          * of the exit code.
          * Defaults to false.
          */
-        writingToStandardErrorFailsExecution?: boolean
+        writingToStandardErrorFailsExecution?: boolean;
+
+         /**
+         * When set, the serialized path set of this process is not normalized wrt casing
+         * This is already the behavior when running in a non-Windows OS, therefore this option only has a effect on Windows systems.
+         * Setting this option increases the chance BuildXL will preserve path casing on Windows, at the cost of less efficient
+         * caching, where the same weak fingerprint may have different path sets that only differ in casing.
+         * Defaults to false.
+         */
+        preservePathSetCasing?: boolean;
     }
 
     @@public

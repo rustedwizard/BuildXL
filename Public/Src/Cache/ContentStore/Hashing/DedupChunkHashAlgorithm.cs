@@ -14,17 +14,13 @@ namespace BuildXL.Cache.ContentStore.Hashing
     {
         private static readonly byte[] EmptyArray = new byte[0];
 
-#if NET_FRAMEWORK
-        private readonly SHA512 _hasher = new SHA512Cng();
-#else
-        private readonly SHA512 _hasher = new SHA512Managed();
-#endif
+        private readonly SHA512 _hasher = new SHA512CryptoServiceProvider();
 
         /// <inheritdoc />
         public override byte[] Hash => TruncateTo256Bits(base.Hash);
 
         /// <inheritdoc />
-        public override int HashSize => 8 * DedupChunkHashInfo.Length;
+        public override int HashSize => 8 * DedupSingleChunkHashInfo.Length;
 
         /// <inheritdoc />
         public override void Initialize()
@@ -57,7 +53,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
         private static byte[] TruncateTo256Bits(byte[] bytes)
         {
-            return bytes.Take(DedupChunkHashInfo.Length).ToArray();
+            return bytes.Take(DedupSingleChunkHashInfo.Length).ToArray();
         }
     }
 }

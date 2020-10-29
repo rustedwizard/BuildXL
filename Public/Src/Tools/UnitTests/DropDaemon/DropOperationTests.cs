@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -18,6 +19,7 @@ using BuildXL.Storage.Fingerprints;
 using BuildXL.Tracing.CloudBuild;
 using BuildXL.Utilities;
 using BuildXL.Utilities.CLI;
+using JetBrains.Annotations;
 using Microsoft.VisualStudio.Services.Common;
 using Microsoft.VisualStudio.Services.Drop.WebApi;
 using Test.BuildXL.TestUtilities.Xunit;
@@ -160,8 +162,6 @@ namespace Test.Tool.DropDaemon
             });
         }
 
-        private const bool TestChunkDedup = false;
-
         [Fact]
         public void TestAddFile_AssociateDoesntNeedServer()
         {
@@ -179,7 +179,7 @@ namespace Test.Tool.DropDaemon
                 var contentInfo = new FileContentInfo(new ContentHash(HashType.Vso0), length: 123456);
 
                 var client = new Client(provider.GetClient(connStr, new ClientConfig()));
-                var addFileItem = new DropItemForBuildXLFile(client, filePath: "file-which-doesnt-exist.txt", fileId: "23423423:1", chunkDedup: TestChunkDedup, fileContentInfo: contentInfo);
+                var addFileItem = new DropItemForBuildXLFile(client, filePath: "file-which-doesnt-exist.txt", fileId: "23423423:1", fileContentInfo: contentInfo);
 
                 // addfile succeeds without needing BuildXL server nor the file on disk
                 IIpcResult result = daemon.AddFileAsync(addFileItem).GetAwaiter().GetResult();
@@ -238,7 +238,7 @@ namespace Test.Tool.DropDaemon
                     (moniker, mockServer) =>
                     {
                         var client = new Client(ipcProvider.GetClient(ipcProvider.RenderConnectionString(moniker), new ClientConfig()));
-                        var addFileItem = new DropItemForBuildXLFile(client, filePath, fileId, TestChunkDedup, fileContentInfo: TestFileContentInfo);
+                        var addFileItem = new DropItemForBuildXLFile(client, filePath, fileId, fileContentInfo: TestFileContentInfo);
 
                         // addfile succeeds
                         IIpcResult result = daemon.AddFileAsync(addFileItem).GetAwaiter().GetResult();
@@ -289,7 +289,6 @@ namespace Test.Tool.DropDaemon
                             client: client,
                             filePath: filePath,
                             fileId: fileId,
-                            chunkDedup: TestChunkDedup,
                             fileContentInfo: TestFileContentInfo);
 
                         // addfile files
@@ -379,7 +378,7 @@ namespace Test.Tool.DropDaemon
                 new ServerConfig(),
                 (moniker, mockServer) =>
                 {
-                    var bxlApiClient = new Client(ipcProvider.GetClient(ipcProvider.RenderConnectionString(moniker), new ClientConfig()));
+                    var bxlApiClient = CreateDummyBxlApiClient(ipcProvider, moniker);
                     WithSetup(
                         dropClient,
                         (daemon, etwListener) =>
@@ -447,7 +446,7 @@ namespace Test.Tool.DropDaemon
                 new ServerConfig(),
                 (moniker, mockServer) =>
                 {
-                    var bxlApiClient = new Client(ipcProvider.GetClient(ipcProvider.RenderConnectionString(moniker), new ClientConfig()));
+                    var bxlApiClient = CreateDummyBxlApiClient(ipcProvider, moniker);
                     WithSetup(
                         dropClient,
                         (daemon, etwListener) =>
@@ -479,7 +478,7 @@ namespace Test.Tool.DropDaemon
             });
            
             var ipcProvider = IpcFactory.GetProvider();
-            var bxlApiClient = new Client(ipcProvider.GetClient(ipcProvider.CreateNewConnectionString(), new ClientConfig()));
+            var bxlApiClient = CreateDummyBxlApiClient(ipcProvider);
 
             WithSetup(
                 dropClient, 
@@ -542,7 +541,7 @@ namespace Test.Tool.DropDaemon
                 new ServerConfig(),
                 (moniker, mockServer) =>
                 {
-                    var bxlApiClient = new Client(ipcProvider.GetClient(ipcProvider.RenderConnectionString(moniker), new ClientConfig()));
+                    var bxlApiClient = CreateDummyBxlApiClient(ipcProvider, moniker);
                     WithSetup(
                         dropClient,
                         (daemon, etwListener) =>
@@ -566,6 +565,16 @@ namespace Test.Tool.DropDaemon
         private static SealedDirectoryFile CreateFakeSealedDirectoryFile(string fileName)
         {
             return new SealedDirectoryFile(fileName, new FileArtifact(new AbsolutePath(1), 1), FileContentInfo.CreateWithUnknownLength(ContentHash.Random()));
+        }
+
+        private static Client CreateDummyBxlApiClient(IIpcProvider ipcProvider, IIpcMoniker moniker)
+        {
+            return new Client(new MockClient(ipcProvider.GetClient(ipcProvider.RenderConnectionString(moniker), new ClientConfig())));
+        }
+
+        private static Client CreateDummyBxlApiClient(IIpcProvider ipcProvider)
+        {
+            return new Client(new MockClient(ipcProvider.GetClient(ipcProvider.CreateNewConnectionString(), new ClientConfig())));
         }
 
         private MaterializeFileCommand ReceiveMaterializeFileCmdAndCheckItMatchesFileId(string operationPayload, string expectedFileId)
@@ -608,12 +617,20 @@ namespace Test.Tool.DropDaemon
             Assert.Equal(shouldSucceed, rpcResult.Succeeded);
         }
 
+
+        /// <remarks>
+        /// If an apiClient is not passed (ie. null by default), we creat a new Client that returns success for any bool command called.
+        /// </remarks>
         private void WithSetup(IDropClient dropClient, Action<global::Tool.DropDaemon.DropDaemon, DropEtwListener> action, Client apiClient = null)
         {
             var etwListener = ConfigureEtwLogging();
             string moniker = ServicePipDaemon.IpcProvider.RenderConnectionString(ServicePipDaemon.IpcProvider.CreateNewMoniker());
             var daemonConfig = new DaemonConfig(VoidLogger.Instance, moniker: moniker, enableCloudBuildIntegration: false);
             var dropConfig = new DropConfig(string.Empty, null);
+            if (apiClient == null)
+            {
+                apiClient = new Client(new MockClient(ipcOperation => IpcResult.Success("true")));
+            }
             var daemon = new global::Tool.DropDaemon.DropDaemon(UnixParser.Instance, daemonConfig, dropConfig, Task.FromResult(dropClient), client: apiClient);
             action(daemon, etwListener);
         }
@@ -621,6 +638,49 @@ namespace Test.Tool.DropDaemon
         private DropEtwListener ConfigureEtwLogging()
         {
             return new DropEtwListener();
+        }
+
+        internal class MockClient : IClient
+        {
+            public IClient InternalClient { get; set; }
+            public Task Completion => Task.CompletedTask;
+
+            public IClientConfig Config { get; set; } = new ClientConfig();
+            public Func<IIpcOperation, IIpcResult> SendFn { get; set; }
+
+            public void Dispose() { }
+
+            public void RequestStop() { }
+
+            public MockClient (IClient client)
+            {
+                InternalClient = client;
+                SendFn = ipcOperation => IpcResult.Success("true");
+            }
+
+            public MockClient(Func<IIpcOperation, IIpcResult> sendFn)
+            {
+                InternalClient = null;
+                SendFn = sendFn;
+            }
+
+            Task<IIpcResult> IClient.Send(IIpcOperation operation)
+            {
+                Contract.Requires(operation != null);
+                if (InternalClient != null)
+                {
+                    if (global::BuildXL.Ipc.ExternalApi.Commands.Command.Deserialize(operation.Payload) is RegisterFileForBuildManifestCommand)
+                    {
+                        // Override for RegisterFileForBuildManifestCommand (Always true)
+                        return Task.FromResult(SendFn(operation));
+                    }
+                    else
+                    {
+                        return InternalClient.Send(operation);
+                    }
+                }
+                return Task.FromResult(SendFn(operation));
+            }
         }
     }
 }

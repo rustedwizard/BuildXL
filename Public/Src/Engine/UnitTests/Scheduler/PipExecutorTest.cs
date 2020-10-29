@@ -365,13 +365,13 @@ namespace Test.BuildXL.Scheduler
                     var pip = new CopyFile(sourceArtifact, destinationArtifact, ReadOnlyArray<StringId>.Empty, PipProvenance.CreateDummy(env.Context));
 
                     await VerifyPipResult(PipResultStatus.Succeeded, env, pip);
-                    XAssert.Equals(PipOutputOrigin.Produced, env.State.FileContentManager.GetPipOutputOrigin(destinationArtifact));
+                    XAssert.AreEqual(PipOutputOrigin.Produced, env.State.FileContentManager.GetPipOutputOrigin(destinationArtifact));
 
                     await VerifyPipResult(PipResultStatus.UpToDate, env, pip);
-                    XAssert.Equals(PipOutputOrigin.UpToDate, env.State.FileContentManager.GetPipOutputOrigin(destinationArtifact));
+                    XAssert.AreEqual(PipOutputOrigin.UpToDate, env.State.FileContentManager.GetPipOutputOrigin(destinationArtifact));
 
                     await VerifyPipResult(PipResultStatus.UpToDate, env, pip);
-                    XAssert.Equals(PipOutputOrigin.UpToDate, env.State.FileContentManager.GetPipOutputOrigin(destinationArtifact));
+                    XAssert.AreEqual(PipOutputOrigin.UpToDate, env.State.FileContentManager.GetPipOutputOrigin(destinationArtifact));
 
                     string actual = File.ReadAllText(destination);
                     XAssert.AreEqual(Contents, actual);
@@ -636,7 +636,7 @@ namespace Test.BuildXL.Scheduler
                 context, 
                 cache: () => cache, 
                 config: pt => GetConfiguration(pt, preserveOutputs: PreserveOutputsMode.Enabled));
-            await new TestRunChecker(destination).VerifyDeployedFromCache(env2, createPip(env2), Contents);
+            await new TestRunChecker(destination).VerifyUpToDate(env2, createPip(env2), Contents);
         }
 
         [Fact]
@@ -2178,7 +2178,8 @@ EXIT /b 3
                                       options: Process.Options.ProducesPathIndependentOutputs,
                                       provenance: PipProvenance.CreateDummy(env.Context),
                                       toolDescription: StringId.Invalid,
-                                      additionalTempDirectories: ReadOnlyArray<AbsolutePath>.Empty));
+                                      additionalTempDirectories: ReadOnlyArray<AbsolutePath>.Empty,
+                                      processRetries: env.Configuration.Schedule.ProcessRetries));
 
                           await VerifyPipResult(PipResultStatus.Failed, env, p);
                           AssertVerboseEventLogged(LogEventId.PipWillBeRetriedDueToExitCode, count: RetryCount);
@@ -2360,6 +2361,10 @@ EXIT /b 3
 
             // Reset the file content manager to ensure pip runs with clean materialization state
             env.ResetFileContentManager();
+
+            // Reset the file system view to make sure that we do not use a cached information for existence checks
+            env.ResetFileSystemView();
+
             var operationTracker = new OperationTracker(env.LoggingContext);
 
             PipResult result;

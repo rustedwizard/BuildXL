@@ -32,6 +32,8 @@ public:
     DWORD ShareMode;
     DWORD CreationDisposition;
     DWORD FlagsAndAttributes;
+    unsigned long Id;
+    unsigned long CorrelationId;
 
     FileOperationContext(
         StrType lpOperation,
@@ -45,7 +47,9 @@ public:
         DesiredAccess(dwDesiredAccess),
         ShareMode(dwShareMode),
         CreationDisposition(dwCreationDisposition),
-        FlagsAndAttributes(dwFlagsAndAttributes)
+        FlagsAndAttributes(dwFlagsAndAttributes),
+        Id(GetNextId()),
+        CorrelationId(NoId)
     {}
     
     // Creates a call context for an operation on a path that reads existing content.
@@ -72,11 +76,21 @@ public:
             lpPath);
     }
 
+    void Correlate(const FileOperationContext& other)
+    {
+        CorrelationId = other.Id;
+    }
+
     FileOperationContext(const FileOperationContext& other) = default;
     FileOperationContext& operator=(const FileOperationContext&) = default;
+
+private:
+    // CODESYNC: Public\Src\Engine\Processes\SandboxedProcessReports.cs
+    static const unsigned long NoId = 0UL;
+    static unsigned long GetNextId();
 };
 
-enum FileExistence {
+enum class FileExistence {
     Existent,
     Nonexistent,
     InvalidPath,
@@ -99,19 +113,19 @@ public:
     void InferExistenceFromNtStatus(NTSTATUS status);
 };
 
-enum ReportLevel {
+enum class ReportLevel {
     Ignore,
     Report,
     ReportExplicit
 };
 
-enum ResultAction {
+enum class ResultAction {
     Allow,
     Deny,
     Warn
 };
 
-enum PathValidity {
+enum class PathValidity {
     Valid,
     // We observed ERROR_PATH_NOT_FOUND (not ERROR_FILE_NOT_FOUND); unfortunately this is possible
     // with C:\foo\"bar" where C:\foo doesn't exist; if it did, we'd get ERROR_INVALID_NAME for "bar".
@@ -175,7 +189,7 @@ public:
     
     // Returns a corresponding report line status. Note that warning-level access failures (allowed to proceed) map to FileAccessStatus_Denied.
     FileAccessStatus GetFileAccessStatus() const {
-        return (Result != ResultAction::Allow) ? FileAccessStatus_Denied : FileAccessStatus_Allowed;
+        return Result != ResultAction::Allow ? FileAccessStatus::FileAccessStatus_Denied : FileAccessStatus::FileAccessStatus_Allowed;
     }
 
     // Indicates if access to a file should be denied entirely (i.e., return an invalid handle and some error such as ERROR_ACCESS_DENIED).

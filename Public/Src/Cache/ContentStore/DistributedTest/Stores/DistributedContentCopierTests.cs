@@ -23,6 +23,8 @@ using Xunit;
 
 namespace ContentStoreTest.Distributed.Stores
 {
+    using ContentLocation = BuildXL.Cache.ContentStore.Distributed.ContentLocation;
+
     public class DistributedContentCopierTests : TestBase
     {
         public DistributedContentCopierTests()
@@ -113,6 +115,55 @@ namespace ContentStoreTest.Distributed.Stores
             }
         }
 
+        [Theory]
+        [InlineData(1)]
+        [InlineData(10)]
+        public async Task CopyRetriesWithRestrictions(int retries)
+        {
+            var context = new Context(Logger);
+            var copyAttemptsWithRestrictedReplicas = 2;
+            var restrictedCopyReplicaCount = 3;
+            using (var directory = new DisposableDirectory(FileSystem))
+            {
+                var (distributedCopier, mockFileCopier) = CreateMocks(FileSystem, directory.Path, TimeSpan.Zero, retries, copyAttemptsWithRestrictedReplicas, restrictedCopyReplicaCount);
+                var machineLocations = new MachineLocation[] { new MachineLocation(""), new MachineLocation(""), new MachineLocation(""), new MachineLocation(""), new MachineLocation("") };
+
+                var hash = ContentHash.Random();
+                var hashWithLocations = new ContentHashWithSizeAndLocations(
+                    hash,
+                    size: 99,
+                    machineLocations);
+
+                mockFileCopier.CopyToAsyncResult = new CopyFileResult(CopyResultCode.UnknownServerError);
+                var result = await distributedCopier.TryCopyAndPutAsync(
+                    new OperationContext(context),
+                    hashWithLocations,
+                    handleCopyAsync: tpl => Task.FromResult(new PutResult(hash, 99)));
+
+                result.ShouldBeError();
+                int copyAttempts = 0;
+                for (var attemptCount = 0; attemptCount < retries; attemptCount++)
+                {
+                    var maxReplicaCount = attemptCount < copyAttemptsWithRestrictedReplicas
+                        ? restrictedCopyReplicaCount
+                        : int.MaxValue;
+
+                    copyAttempts += Math.Min(maxReplicaCount, machineLocations.Length);
+                }
+
+                if (copyAttempts < distributedCopier.Settings.MaxRetryCount)
+                {
+                    mockFileCopier.CopyAttempts.Should().Be(copyAttempts);
+                    result.ErrorMessage.Should().NotContain("Maximum total retries");
+                }
+                else
+                {
+                    mockFileCopier.CopyAttempts.Should().Be(distributedCopier.Settings.MaxRetryCount);
+                    result.ErrorMessage.Should().Contain("Maximum total retries");
+                }
+            }
+        }
+
         ///<summary>
         /// Test case for bug https://dev.azure.com/mseng/1ES/_boards/board/t/DavidW%20-%20Team/Stories/?workitem=1654106
         /// During the first attempt of copying from a list of locations, one of the locations returns a DestinationPathError.
@@ -157,39 +208,28 @@ namespace ContentStoreTest.Distributed.Stores
             IAbsFileSystem fileSystem,
             AbsolutePath rootDirectory,
             TimeSpan retryInterval,
-            int retries = 1)
+            int retries = 1,
+            int copyAttemptsWithRestrictedReplicas = 0,
+            int restrictedCopyReplicaCount = 3)
         {
             var mockFileCopier = new MockFileCopier();
-            var existenceChecker = new TestFileCopier();
             var contentCopier = new TestDistributedContentCopier(
                 rootDirectory,
                 // Need to use exactly one retry.
                 new DistributedContentStoreSettings()
                 {
                     RetryIntervalForCopies = Enumerable.Range(0, retries).Select(r => retryInterval).ToArray(),
+                    CopyAttemptsWithRestrictedReplicas = copyAttemptsWithRestrictedReplicas,
+                    RestrictedCopyReplicaCount = restrictedCopyReplicaCount,
                     TrustedHashFileSizeBoundary = long.MaxValue // Disable trusted hash because we never actually move bytes and thus the hasher thinks there is a mismatch.
                 },
                 fileSystem,
                 mockFileCopier,
-                existenceChecker,
-                copyRequester: null,
-                new TestDistributedContentCopier.NoOpPathTransformer(rootDirectory));
+                copyRequester: null);
             return (contentCopier, mockFileCopier);
         }
 
-        public class MockPathTransformer : IPathTransformer
-        {
-            /// <inheritdoc />
-            public MachineLocation GetLocalMachineLocation(AbsolutePath cacheRoot) => new MachineLocation("");
-
-            /// <inheritdoc />
-            public PathBase GeneratePath(ContentHash contentHash, byte[] contentLocationIdContent) => null;
-
-            /// <inheritdoc />
-            public byte[] GetPathLocation(PathBase path) => new byte[] { };
-        }
-
-        public class MockFileCopier : IFileCopier
+        public class MockFileCopier : IRemoteFileCopier
         {
             public int CopyAttempts = 0;
 #pragma warning disable 649
@@ -197,8 +237,10 @@ namespace ContentStoreTest.Distributed.Stores
 #pragma warning restore 649
             public CopyFileResult[] CustomResults;
 
+            public MachineLocation GetLocalMachineLocation(AbsolutePath cacheRoot) => new MachineLocation("");
+
             /// <inheritdoc />
-            public Task<CopyFileResult> CopyToAsync(PathBase sourcePath, Stream destinationStream, long expectedContentSize, CancellationToken cancellationToken)
+            public Task<CopyFileResult> CopyToAsync(OperationContext context, ContentLocation sourceLocation, Stream destinationStream, CopyOptions options)
             {
                 CopyAttempts++;
                 if (CustomResults != null)
@@ -213,28 +255,26 @@ namespace ContentStoreTest.Distributed.Stores
 #pragma warning restore 649
 
             /// <inheritdoc />
-            public Task<FileExistenceResult> CheckFileExistsAsync(PathBase path, TimeSpan timeout, CancellationToken cancellationToken)
-                => Task.FromResult(CheckFileExistsAsyncResult);
+            public Task<FileExistenceResult> CheckFileExistsAsync(OperationContext context, ContentLocation sourceLocation)
+                 => Task.FromResult(CheckFileExistsAsyncResult);
         }
     }
 
-    public class TestDistributedContentCopier : DistributedContentCopier<AbsolutePath>, IDistributedContentCopierHost
+    public class TestDistributedContentCopier : DistributedContentCopier, IDistributedContentCopierHost
     {
-        public readonly NoOpPathTransformer PathTransformer;
-
         public TestDistributedContentCopier(
             AbsolutePath workingDirectory,
             DistributedContentStoreSettings settings,
             IAbsFileSystem fileSystem,
-            IFileCopier<AbsolutePath> fileCopier,
-            IFileExistenceChecker<AbsolutePath> fileExistenceChecker,
-            IContentCommunicationManager copyRequester,
-            IPathTransformer<AbsolutePath> pathTransformer)
-            : base(settings, fileSystem, fileCopier, fileExistenceChecker, copyRequester, pathTransformer, TestSystemClock.Instance)
+            IRemoteFileCopier fileCopier,
+            IContentCommunicationManager copyRequester)
+            : base(settings, fileSystem, fileCopier, copyRequester, TestSystemClock.Instance, TestGlobal.Logger)
         {
+            Settings = settings;
             WorkingFolder = workingDirectory;
-            PathTransformer = pathTransformer as NoOpPathTransformer;
         }
+
+        public DistributedContentStoreSettings Settings { get; }
 
         public AbsolutePath WorkingFolder { get; }
 
@@ -242,31 +282,24 @@ namespace ContentStoreTest.Distributed.Stores
         {
         }
 
-        protected override Task<CopyFileResult> CopyFileAsync(IFileCopier<AbsolutePath> copier, AbsolutePath sourcePath, AbsolutePath destinationPath, long expectedContentSize, bool overwrite, CancellationToken cancellationToken)
+        protected override async Task<CopyFileResult> CopyFileAsync(
+            OperationContext context,
+            IRemoteFileCopier copier,
+            ContentLocation sourcePath,
+            AbsolutePath destinationPath,
+            long expectedContentSize,
+            bool overwrite,
+            CopyOptions options,
+            CancellationToken cancellationToken)
         {
-            return copier.CopyToAsync(sourcePath, null, expectedContentSize, cancellationToken);
+            // TODO: why the destination str
+            using var destinationStream = await FileSystem.OpenSafeAsync(destinationPath, FileAccess.Write, FileMode.Create, FileShare.None, FileOptions.None, 1024);
+            return await copier.CopyToAsync(context, sourcePath, destinationStream, options);
         }
 
         internal Task<PutResult> TryCopyAndPutAsync(OperationContext operationContext, ContentHashWithSizeAndLocations hashWithLocations, Func<(CopyFileResult copyResult, AbsolutePath tempLocation, int attemptCount), Task<PutResult>> handleCopyAsync)
         {
             return base.TryCopyAndPutAsync(operationContext, this, hashWithLocations, CopyReason.None, handleCopyAsync);
-        }
-
-        public class NoOpPathTransformer : TestPathTransformer
-        {
-            private readonly AbsolutePath _root;
-
-            public byte[] LastContentLocation { get; set; }
-
-            public NoOpPathTransformer(AbsolutePath root)
-            {
-                _root = root;
-            }
-            public override AbsolutePath GeneratePath(ContentHash contentHash, byte[] contentLocationIdContent)
-            {
-                LastContentLocation = contentLocationIdContent;
-                return _root;
-            }
         }
     }
 }

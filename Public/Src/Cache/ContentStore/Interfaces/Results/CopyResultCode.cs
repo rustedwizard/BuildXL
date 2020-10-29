@@ -14,6 +14,16 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         Success,
 
         /// <summary>
+        /// The cause of the error was connection timeout.
+        /// </summary>
+        ConnectionTimeoutError,
+
+        /// <summary>
+        /// The cause of the error was inability to get first reply from the other side in time.
+        /// </summary>
+        TimeToFirstByteTimeoutError,
+
+        /// <summary>
         /// The cause of the exception was the destination path.
         /// </summary>
         DestinationPathError,

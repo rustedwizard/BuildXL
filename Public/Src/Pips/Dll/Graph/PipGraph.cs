@@ -23,6 +23,7 @@ using BuildXL.Utilities.Instrumentation.Common;
 namespace BuildXL.Pips.Graph
 {
     using BuildXL.Pips.DirectedGraph;
+    using BuildXL.Utilities.Configuration;
 
     /// <summary>
     /// Defines graph of pips and allows adding Pips with validation.
@@ -155,6 +156,24 @@ namespace BuildXL.Pips.Graph
         Pip IQueryablePipDependencyGraph.HydratePip(PipId pipId, PipQueryContext queryContext)
         {
             return PipTable.HydratePip(pipId, queryContext);
+        }
+
+        /// <inheritdoc />
+        public RewritePolicy GetRewritePolicy(PipId pipId)
+        {
+            return PipTable.GetRewritePolicy(pipId);
+        }
+
+        /// <inheritdoc />
+        public AbsolutePath GetProcessExecutablePath(PipId pipId)
+        {
+            return PipTable.GetProcessExecutablePath(pipId);
+        }
+
+        /// <inheritdoc />
+        public string GetFormattedSemiStableHash(PipId pipId)
+        {
+            return PipTable.GetFormattedSemiStableHash(pipId);
         }
 
         private NodeId TryFindContainingExclusiveOpaqueOutputDirectory(AbsolutePath filePath)
@@ -423,6 +442,13 @@ namespace BuildXL.Pips.Graph
             return PipTable.HydratePip(matchedPipId.Value, PipQueryContext.PipGraphTryFindProducer);
         }
 
+        /// <summary>
+        /// Gets all service pip ids
+        /// </summary>
+        public IEnumerable<PipId> GetServicePipIds()
+        {
+            return m_servicePipClients.Keys;
+        }
 
         /// <summary>
         /// For a given service PipId (<paramref name="servicePipId"/>), looks up all its clients, hydrates and returns them.
@@ -855,9 +881,9 @@ namespace BuildXL.Pips.Graph
         public int ContentCount => FileCount + m_sealedDirectoryNodes.Count + m_servicePipClients.Count;
 
         /// <summary>
-        /// Gets the number of declared content (file or sealed directories) for the build
+        /// Gets the number of declared content (file, sealed directories, or temp directories) for the build
         /// </summary>
-        internal int ArtifactContentCount => FileCount + m_sealedDirectoryNodes.Count;
+        internal int ArtifactContentCount => FileCount + m_sealedDirectoryNodes.Count + TemporaryPaths.Count;
 
         /// <summary>
         /// Gets the associated file or directory for the given content index. <paramref name="contentIndex"/> should be in the range [0, <see cref="ArtifactContentCount"/>)
@@ -874,6 +900,13 @@ namespace BuildXL.Pips.Graph
             if (contentIndex < m_sealedDirectoryNodes.Count)
             {
                 return m_sealedDirectoryNodes.BackingSet[contentIndex].Key;
+            }
+
+            contentIndex -= m_sealedDirectoryNodes.Count;
+
+            if (contentIndex < TemporaryPaths.Count)
+            {
+                return DirectoryArtifact.CreateWithZeroPartialSealId(TemporaryPaths.BackingSet[contentIndex].Key);
             }
 
             throw Contract.AssertFailure("Out of range: contentIndex >= ArtifactContentCount");

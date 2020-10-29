@@ -35,7 +35,7 @@ namespace Test.BuildXL.Processes
 
         private sealed class MyListener : IDetoursEventListener
         {
-            private ISet<string> m_fileAccesses = new HashSet<string>();
+            private readonly ISet<string> m_fileAccesses = new HashSet<string>();
 
             public IEnumerable<string> FileAccesses => m_fileAccesses;
             public int FileAccessPathCount => m_fileAccesses.Count;
@@ -44,27 +44,27 @@ namespace Test.BuildXL.Processes
             public int ProcessDataMessageCount { get; private set; }
             public int ProcessDetouringStatusMessageCount { get; private set; }
 
-            public override void HandleDebugMessage(long pipId, string pipDescription, string debugMessage)
+            public override void HandleDebugMessage(DebugData debugData)
             {
                 DebugMessageCount++;
             }
 
-            public override void HandleFileAccess(long pipId, string pipDescription, ReportedFileOperation operation, RequestedAccess requestedAccess, FileAccessStatus status, bool explicitlyReported, uint processId, uint error, DesiredAccess desiredAccess, ShareMode shareMode, CreationDisposition creationDisposition, FlagsAndAttributes flagsAndAttributes, string path, string processArgs, bool isAnAugmentedFileAccess)
+            public override void HandleFileAccess(FileAccessData fileAccessData)
             {
-                if (operation == ReportedFileOperation.Process)
+                if (fileAccessData.Operation == ReportedFileOperation.Process)
                 {
                     ProcessMessageCount++;
                 }
 
-                m_fileAccesses.Add(path);
+                m_fileAccesses.Add(fileAccessData.Path);
             }
 
-            public override void HandleProcessData(long pipId, string pipDescription, string processName, uint processId, DateTime creationDateTime, DateTime exitDateTime, TimeSpan kernelTime, TimeSpan userTime, uint exitCode, IOCounters ioCounters, uint parentProcessId)
+            public override void HandleProcessData(ProcessData processData)
             {
                 ProcessDataMessageCount++;
             }
 
-            public override void HandleProcessDetouringStatus(ProcessDetouringStatusData data)
+            public override void HandleProcessDetouringStatus(ProcessDetouringStatusData processDetouringStatusData)
             {
                 ProcessDetouringStatusMessageCount++;
             }
@@ -109,12 +109,10 @@ namespace Test.BuildXL.Processes
                 if (!OperatingSystemHelper.IsUnixOS)
                 {
                     var inetCache = SpecialFolderUtilities.GetFolderPath(Environment.SpecialFolder.InternetCache);
-                    return fileAccesses.Where(a => !a.StartsWith(inetCache, StringComparison.OrdinalIgnoreCase)).Select(a => a.ToUpperInvariant()).Distinct();
+                    fileAccesses = fileAccesses.Where(a => !a.StartsWith(inetCache, OperatingSystemHelper.PathComparison));
                 }
-                else
-                {
-                    return fileAccesses.Distinct();
-                }
+
+                return fileAccesses.Select(a => a.ToCanonicalizedPath()).Distinct();
             }
 
             int ComputeNumAccessedPaths(SandboxedProcessResult result)
@@ -375,7 +373,7 @@ namespace Test.BuildXL.Processes
 
             void ToFileNames(IEnumerable<ReportedProcess> processes, out HashSet<string> set, out string joined)
             {
-                set = new HashSet<string>(processes.Select(p => p.Path).Select(Path.GetFileName), StringComparer.OrdinalIgnoreCase);
+                set = new HashSet<string>(processes.Select(p => p.Path).Select(Path.GetFileName), OperatingSystemHelper.PathComparer);
                 joined = string.Join(" ; ", set);
             }
         }
@@ -1260,6 +1258,65 @@ namespace Test.BuildXL.Processes
             {
                 XAssert.AreEqual(0, result.ExitCode);
             }
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("LD_PRELOAD=")]
+        // CODESYNC:  bxl_observer.hpp
+        [InlineData("__BUILDXL_FAM_PATH=")]
+        [InlineData("__BUILDXL_DETOURS_PATH=")]
+        [InlineData("__BUILDXL_ROOT_PID=")]
+        [InlineData("LD_PRELOAD=\0__BUILDXL_FAM_PATH=\0__BUILDXL_DETOURS_PATH=\0__BUILDXL_ROOT_PID=")]
+        public async Task TestChildProcessWasDetouredLibAsync(string envVarToReset)
+        {
+            if (!OperatingSystemHelper.IsLinuxOS)
+            {
+                return;
+            }
+
+            var parentInput = CreateSourceFile();
+            var childInput = CreateSourceFile();
+            var grandChildInput = CreateSourceFile();
+
+            var info = ToProcessInfo(ToProcess(
+                new Operation[] 
+                {
+                    Operation.ReadFile(parentInput),
+                    Operation.SpawnWithEnvs(
+                        Context.PathTable,
+                        true,
+                        new Operation[] 
+                        { 
+                            Operation.ReadFile(childInput),
+                            Operation.Spawn(
+                                Context.PathTable,
+                                true,
+                                new Operation[]
+                                {
+                                    Operation.ReadFile(grandChildInput)
+                                })
+                        },
+                        envVarToReset) 
+                }));
+            info.FileAccessManifest.ReportFileAccesses = true;
+
+            var result = await RunProcess(info);
+            
+            XAssert.AreEqual(0, result.ExitCode);
+
+            var observedAccesses = result.FileAccesses
+                .Select(reportedAccess => AbsolutePath.TryCreate(Context.PathTable, reportedAccess.GetPath(Context.PathTable), out AbsolutePath result) ? result : AbsolutePath.Invalid)
+                .ToArray();
+
+            XAssert.AreEqual(3, result.Processes.Count, "The parent and child process should have been detoured.");
+
+            // We should see the access that happens on the main test process
+            XAssert.IsTrue(observedAccesses.Contains(parentInput.Path), "Input file of parent process should have been observed");
+            // We should see the access that happens on the spawned child process
+            XAssert.IsTrue(observedAccesses.Contains(childInput.Path), "Input file of child process should have been observed");
+            // We should see the access that happens on the spawned grandchild process
+            XAssert.IsTrue(observedAccesses.Contains(grandChildInput.Path), "Input file of grandchild process should have been observed");
         }
 
         private static ReportedFileAccess GetFileAccessForReadFileOperation(

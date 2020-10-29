@@ -1,15 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#include "dirent.h"
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <dlfcn.h>
-#include <unistd.h>
-#include <sys/types.h>
-
 #include "bxl_observer.hpp"
 #include "IOHandler.hpp"
 
@@ -33,24 +24,39 @@ BxlObserver::BxlObserver()
     real_readlink("/proc/self/exe", progFullPath_, PATH_MAX);
 
     const char *rootPidStr = getenv(BxlEnvRootPid);
-    rootPid_ = (rootPidStr && *rootPidStr) ? atoi(rootPidStr) : -1;
+    rootPid_ = is_null_or_empty(rootPidStr) ? -1 : atoi(rootPidStr);
     disposed_ = false;
 
     InitFam();
     InitLogFile();
+    InitDetoursLibPath();
+}
+
+void BxlObserver::InitDetoursLibPath()
+{
+    const char *path = getenv(BxlEnvDetoursPath);
+    if (!is_null_or_empty(path))
+    {
+        strlcpy(detoursLibFullPath_, path, PATH_MAX);
+        detoursLibFullPath_[PATH_MAX-1] = '\0';
+    }
+    else
+    {
+        detoursLibFullPath_[0] = '\0';
+    }
 }
 
 void BxlObserver::InitFam()
 {
     // read FAM env var
     const char *famPath = getenv(BxlEnvFamPath);
-    if (!(famPath && *famPath))
+    if (is_null_or_empty(famPath))
     {
         real_fprintf(stderr, "[%s] ERROR: Env var '%s' not set\n", __func__, BxlEnvFamPath);
         return;
     }
 
-    // read FAM 
+    // read FAM
     FILE *famFile = real_fopen(famPath, "rb");
     if (!famFile)
     {
@@ -66,7 +72,8 @@ void BxlObserver::InitFam()
     real_fclose(famFile);
 
     // create SandboxedPip (which parses FAM and throws on error)
-    pip_ = std::shared_ptr<SandboxedPip>(new SandboxedPip(getpid(), famPayload, famLength));
+    pip_ = shared_ptr<SandboxedPip>(new SandboxedPip(getpid(), famPayload, famLength));
+    free(famPayload);
 
     // create sandbox
     sandbox_ = new Sandbox(0, Configuration::DetoursLinuxSandboxType);
@@ -85,7 +92,7 @@ void BxlObserver::InitFam()
 void BxlObserver::InitLogFile()
 {
     const char *logPath = getenv(BxlEnvLogPath);
-    if (logPath && *logPath)
+    if (!is_null_or_empty(logPath))
     {
         strlcpy(logFile_, logPath, PATH_MAX);
         logFile_[PATH_MAX-1] = '\0';
@@ -198,7 +205,7 @@ bool BxlObserver::Send(const char *buf, size_t bufsiz)
 
 bool BxlObserver::SendReport(AccessReport &report)
 {
-    // there is no central sendbox process here (i.e., there is an instance of this 
+    // there is no central sendbox process here (i.e., there is an instance of this
     // guy in every child process), so counting process tree size is not feasible
     if (report.operation == FileOperation::kOpProcessTreeCompleted)
     {
@@ -209,7 +216,7 @@ bool BxlObserver::SendReport(AccessReport &report)
     char buffer[PIPE_BUF] = {0};
     int maxMessageLength = PIPE_BUF - PrefixLength;
     int numWritten = snprintf(
-        &buffer[PrefixLength], maxMessageLength, "%s|%d|%d|%d|%d|%d|%d|%s\n", 
+        &buffer[PrefixLength], maxMessageLength, "%s|%d|%d|%d|%d|%d|%d|%s\n",
         __progname, getpid(), report.requestedAccess, report.status, report.reportExplicitly, report.error, report.operation, report.path);
     if (numWritten == maxMessageLength)
     {
@@ -226,7 +233,7 @@ void BxlObserver::report_exec(const char *syscallName, const char *procName, con
 {
     // first report 'procName' as is (without trying to resolve it) to ensure that a process name is reported before anything else
     report_access(syscallName, ES_EVENT_TYPE_NOTIFY_EXEC, std::string(procName), empty_str);
-    report_access(__func__, ES_EVENT_TYPE_NOTIFY_EXEC, file);
+    report_access(syscallName, ES_EVENT_TYPE_NOTIFY_EXEC, file);
 }
 
 AccessCheckResult BxlObserver::report_access(const char *syscallName, es_event_type_t eventType, std::string reportPath, std::string secondPath)
@@ -243,7 +250,7 @@ AccessCheckResult BxlObserver::report_access(const char *syscallName, es_event_t
         ? reportPath
         : std::string(progFullPath_);
 
-    IOEvent event(getpid(), 0, getppid(), eventType, reportPath, secondPath, execPath, mode, false);
+    IOEvent event(getpid(), 0, getppid(), eventType, ES_ACTION_TYPE_NOTIFY, reportPath, secondPath, execPath, mode, false);
     return report_access(syscallName, event, /* checkCache */ false /* because already checked cache above */);
 }
 
@@ -265,7 +272,7 @@ AccessCheckResult BxlObserver::report_access(const char *syscallName, IOEvent &e
         result = handler.HandleEvent(event);
     }
 
-    LOG_DEBUG("(( %10s:%2d )) %s %s%s", syscallName, event.GetEventType(), event.GetEventPath(), 
+    LOG_DEBUG("(( %10s:%2d )) %s %s%s", syscallName, event.GetEventType(), event.GetEventPath(),
         !result.ShouldReport() ? "[Ignored]" : result.ShouldDenyAccess() ? "[Denied]" : "[Allowed]",
         result.ShouldDenyAccess() && IsFailingUnexpectedAccesses() ? "[Blocked]" : "");
 
@@ -383,7 +390,7 @@ static char* find_prev_slash(char *pStr)
     return pStr;
 }
 
-// resolve any intermediate directory symlinks 
+// resolve any intermediate directory symlinks
 //   - TODO: cache this
 //   - TODO: break symlink cycles
 void BxlObserver::resolve_path(char *fullpath, bool followFinalSymlink)
@@ -412,8 +419,8 @@ void BxlObserver::resolve_path(char *fullpath, bool followFinalSymlink)
             }
             else if (parentDirLen == 2 && *(pFullpath - 1) == '.' && *(pFullpath - 2) == '.')
             {
-                // find previous slash unless already at the beginning 
-                if (pPrevSlash > fullpath) 
+                // find previous slash unless already at the beginning
+                if (pPrevSlash > fullpath)
                 {
                     pPrevSlash = find_prev_slash(pPrevSlash);
                 }
@@ -458,7 +465,7 @@ void BxlObserver::resolve_path(char *fullpath, bool followFinalSymlink)
 
         // append the rest of the original path to the readlink target
         strcpy(
-            readlinkBuf + nReadlinkBuf, 
+            readlinkBuf + nReadlinkBuf,
             (readlinkBuf[nReadlinkBuf-1] == '/' && *pFullpath == '/') ? pFullpath + 1 : pFullpath);
 
         // if readlink target is an absolute path -> overwrite fullpath with it and start from the beginning
@@ -473,4 +480,37 @@ void BxlObserver::resolve_path(char *fullpath, bool followFinalSymlink)
         pFullpath = find_prev_slash(pFullpath);
         strcpy(++pFullpath, readlinkBuf);
     }
+}
+
+char** BxlObserver::ensure_env_value_with_log(char *const envp[], char const *envName)
+{
+    char *envValue = getenv(envName);
+    if (is_null_or_empty(envValue))
+    {
+        return (char**)envp;
+    }
+
+    char **newEnvp = ensure_env_value(envp, envName, envValue);
+    if (newEnvp != envp)
+    {
+        LOG_DEBUG("envp has been modified with %s added to %s", envValue, envName);
+    }
+
+    return newEnvp;
+}
+
+char** BxlObserver::ensureEnvs(char *const envp[])
+{
+    char **newEnvp = ensure_paths_included_in_env(envp, LD_PRELOAD_ENV_VAR_PREFIX, detoursLibFullPath_, NULL);
+    if (newEnvp != envp)
+    {
+        LOG_DEBUG("envp has been modified with %s added to %s", detoursLibFullPath_, "LD_PRELOAD");
+    }
+
+    newEnvp = ensure_env_value_with_log(newEnvp, BxlEnvFamPath);
+    newEnvp = ensure_env_value_with_log(newEnvp, BxlEnvLogPath);
+    newEnvp = ensure_env_value_with_log(newEnvp, BxlEnvRootPid);
+    newEnvp = ensure_env_value_with_log(newEnvp, BxlEnvDetoursPath);
+
+    return newEnvp;
 }

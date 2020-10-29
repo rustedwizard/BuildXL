@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.ContractsLight;
 using System.Linq;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
@@ -79,10 +80,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Tracing
         /// <nodoc />
         public static string GetShortHashesTraceString(this GetBulkLocationsResult result)
         {
-            if (!result)
-            {
-                return result.ToString();
-            }
+            Contract.Requires(result.Succeeded);
 
             return string.Join(", ", result.ContentHashesInfo.Select(info => $"{info.ContentHash.ToShortString()}={info.Locations?.Count ?? 0}"));
         }
@@ -109,7 +107,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Tracing
                     sb.AppendSequence(page.Select(p => p.hash), (builder, hash) => hash.ToString(builder));
 
                     sb.Append("]");
-                    context.Debug(sb.ToString());
+                    context.Debug(sb.ToString(), component: tracerName);
                 }
             }
         }
@@ -128,9 +126,23 @@ namespace BuildXL.Cache.ContentStore.Distributed.Tracing
                 .Append($"[Add, #{eventStoreCounters[DispatchAddLocations].Value}, #{eventStoreCounters[DispatchAddLocationsHashes].Value}, {(long)eventStoreCounters[DispatchAddLocations].Duration.TotalMilliseconds}ms], ")
                 .Append($"[Remove, #{eventStoreCounters[DispatchRemoveLocations].Value}, #{eventStoreCounters[DispatchRemoveLocationsHashes].Value}, {(long)eventStoreCounters[DispatchRemoveLocations].Duration.TotalMilliseconds}ms], ")
                 .Append($"[Touch, #{eventStoreCounters[DispatchTouch].Value}, #{eventStoreCounters[DispatchTouchHashes].Value}, {(long)eventStoreCounters[DispatchTouch].Duration.TotalMilliseconds}ms], ")
+                .Append($"[UpdateMetadata, #{eventStoreCounters[DispatchUpdateMetadata].Value}, N/A, {(long)eventStoreCounters[DispatchUpdateMetadata].Duration.TotalMilliseconds}ms], ")
                 .Append($"[Stored, #{eventStoreCounters[DispatchBlob].Value}, N/A, {(long)eventStoreCounters[DispatchBlob].Duration.TotalMilliseconds}ms].");
             context.TraceInfo(
                 $"{nameof(EventHubContentLocationEventStore)}: processed {eventStoreCounters[ReceivedEventBatchCount].Value} message(s) by {duration}ms. {sb}");
+
+            var totalEvents = eventStoreCounters[DispatchAddLocations].Value + eventStoreCounters[DispatchRemoveLocations].Value +
+                eventStoreCounters[DispatchTouch].Value + eventStoreCounters[DispatchUpdateMetadata].Value;
+            context.TrackMetric(name: "Master_EventsProcessed", totalEvents, tracerName: nameof(EventHubContentLocationEventStore));
+
+            var totalHashes = eventStoreCounters[DispatchAddLocationsHashes].Value + eventStoreCounters[DispatchRemoveLocationsHashes].Value + eventStoreCounters[DispatchTouchHashes].Value;
+            context.TrackMetric(name: "Master_HashesProcessed", totalHashes, tracerName: nameof(EventHubContentLocationEventStore));
+
+            context.TrackMetric(name: "Master_AddEventsProcessed", eventStoreCounters[DispatchAddLocations].Value, tracerName: nameof(EventHubContentLocationEventStore));
+            context.TrackMetric(name: "Master_RemoveEventsProcessed", eventStoreCounters[DispatchRemoveLocations].Value, tracerName: nameof(EventHubContentLocationEventStore));
+            context.TrackMetric(name: "Master_TouchEventsProcessed", eventStoreCounters[DispatchTouch].Value, tracerName: nameof(EventHubContentLocationEventStore));
+            context.TrackMetric(name: "Master_UpdateMetadataEventsProcessed", eventStoreCounters[DispatchUpdateMetadata].Value, tracerName: nameof(EventHubContentLocationEventStore));
+            context.TrackMetric(name: "Master_StoredEventsProcessed", eventStoreCounters[DispatchUpdateMetadata].Value, tracerName: nameof(EventHubContentLocationEventStore));
         }
 
         /// <nodoc />
@@ -145,8 +157,21 @@ namespace BuildXL.Cache.ContentStore.Distributed.Tracing
                 .Append($"[Add, #{eventStoreCounters[SentAddLocationsEvents].Value}, #{eventStoreCounters[SentAddLocationsHashes].Value}], ")
                 .Append($"[Remove, #{eventStoreCounters[SentRemoveLocationsEvents].Value}, #{eventStoreCounters[SentRemoveLocationsHashes].Value}], ")
                 .Append($"[Touch, #{eventStoreCounters[SentTouchLocationsEvents].Value}, #{eventStoreCounters[SentTouchLocationsHashes].Value}], ")
+                .Append($"[UpdateMetadata, #{eventStoreCounters[SentUpdateMetadataEntryEvents].Value}, N/A, {(long)eventStoreCounters[SentUpdateMetadataEntryEvents].Duration.TotalMilliseconds}ms], ")
                 .Append($"[Stored, #{eventStoreCounters[SentStoredEvents].Value}, N/A].");
             context.TraceInfo($"{nameof(EventHubContentLocationEventStore)}: sent {eventStoreCounters[SentEventBatchCount].Value} message(s) by {duration}ms. {sb}");
+
+            var totalEvents = eventStoreCounters[SentAddLocationsEvents].Value + eventStoreCounters[SentRemoveLocationsEvents].Value +
+                eventStoreCounters[SentTouchLocationsEvents].Value + eventStoreCounters[SentUpdateMetadataEntryEvents].Value;
+            context.TrackMetric(name: "LLS_EventsSent", totalEvents, tracerName: nameof(EventHubContentLocationEventStore));
+
+            var totalHashes = eventStoreCounters[SentAddLocationsHashes].Value + eventStoreCounters[SentRemoveLocationsHashes].Value + eventStoreCounters[SentTouchLocationsHashes].Value;
+            context.TrackMetric(name: "LLS_TotalHashesSentInEvents", totalHashes, tracerName: nameof(EventHubContentLocationEventStore));
+
+            context.TrackMetric(name: "LLS_AddEventsSent", eventStoreCounters[SentAddLocationsEvents].Value, tracerName: nameof(EventHubContentLocationEventStore));
+            context.TrackMetric(name: "LLS_RemoveEventsSent", eventStoreCounters[SentRemoveLocationsEvents].Value, tracerName: nameof(EventHubContentLocationEventStore));
+            context.TrackMetric(name: "LLS_TouchEventsSent", eventStoreCounters[SentTouchLocationsEvents].Value, tracerName: nameof(EventHubContentLocationEventStore));
+            context.TrackMetric(name: "LLS_UpdateMetadataEventsSent", eventStoreCounters[SentUpdateMetadataEntryEvents].Value, tracerName: nameof(EventHubContentLocationEventStore));
         }
 
         public static void TraceStartupConfiguration(

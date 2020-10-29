@@ -421,7 +421,7 @@ namespace BuildXL.Pips.Operations
             ReadOnlyArray<PathAtom>? allowedSurvivingChildProcessNames = null,
             TimeSpan? nestedProcessTerminationTimeout = null,
             AbsentPathProbeInUndeclaredOpaquesMode absentPathProbeMode = AbsentPathProbeInUndeclaredOpaquesMode.Unsafe,
-            DoubleWritePolicy doubleWritePolicy = DoubleWritePolicy.DoubleWritesAreErrors,
+            RewritePolicy rewritePolicy = RewritePolicy.DefaultStrict,
             ContainerIsolationLevel containerIsolationLevel = ContainerIsolationLevel.None,
             int? weight = null,
             int? priority = null,
@@ -429,7 +429,9 @@ namespace BuildXL.Pips.Operations
             FileArtifact changeAffectedInputListWrittenFile = default,
             int? preserveOutputsTrustLevel = null,
             ReadOnlyArray<PathAtom>? childProcessesToBreakawayFromSandbox = null,
-            ReadOnlyArray<AbsolutePath>? outputDirectoryExclusions = null)
+            ReadOnlyArray<AbsolutePath>? outputDirectoryExclusions = null,
+            int processRetries = 0,
+            StringId retryAttemptEnvironmentVariable = default)
         {
             Contract.Requires(executable.IsValid);
             Contract.Requires(workingDirectory.IsValid);
@@ -457,6 +459,7 @@ namespace BuildXL.Pips.Operations
             Contract.Requires(additionalTempDirectories.IsValid);
             Contract.RequiresForAll(additionalTempDirectories, path => path.IsValid);
             Contract.Requires(tags.IsValid);
+            Contract.Requires(rewritePolicy.IsValid());
             // If the process needs to run in a container, the redirected directory has to be set
             Contract.Requires((options & Options.NeedsToRunInContainer) == Options.None || uniqueRedirectedDirectoryRoot.IsValid);
 
@@ -528,7 +531,7 @@ namespace BuildXL.Pips.Operations
             AllowedSurvivingChildProcessNames = allowedSurvivingChildProcessNames ?? ReadOnlyArray<PathAtom>.Empty;
             NestedProcessTerminationTimeout = nestedProcessTerminationTimeout;
             ProcessAbsentPathProbeInUndeclaredOpaquesMode = absentPathProbeMode;
-            DoubleWritePolicy = doubleWritePolicy;
+            RewritePolicy = rewritePolicy.StrictDefaultsIfAbsent();
             ContainerIsolationLevel = containerIsolationLevel;
             Weight = weight.HasValue && weight.Value >= MinWeight ? weight.Value : MinWeight;
             Priority = priority.HasValue && priority.Value >= MinPriority ? (priority <= MaxPriority ? priority.Value : MaxPriority) : MinPriority;
@@ -544,6 +547,8 @@ namespace BuildXL.Pips.Operations
             PreserveOutputsTrustLevel = preserveOutputsTrustLevel ?? (int)PreserveOutputsTrustValue.Lowest;
             ChildProcessesToBreakawayFromSandbox = childProcessesToBreakawayFromSandbox ?? ReadOnlyArray<PathAtom>.Empty;
             OutputDirectoryExclusions = outputDirectoryExclusions ?? ReadOnlyArray<AbsolutePath>.Empty;
+            ProcessRetries = processRetries;
+            RetryAttemptEnvironmentVariable = retryAttemptEnvironmentVariable;
         }
 
         /// <summary>
@@ -588,7 +593,7 @@ namespace BuildXL.Pips.Operations
             ReadOnlyArray<PathAtom>? allowedSurvivingChildProcessNames = null,
             TimeSpan? nestedProcessTerminationTimeout = null,
             AbsentPathProbeInUndeclaredOpaquesMode absentPathProbeMode = AbsentPathProbeInUndeclaredOpaquesMode.Unsafe,
-            DoubleWritePolicy doubleWritePolicy = DoubleWritePolicy.DoubleWritesAreErrors,
+            RewritePolicy rewritePolicy = RewritePolicy.DefaultStrict,
             ContainerIsolationLevel containerIsolationLevel = ContainerIsolationLevel.None,
             int? weight = null,
             int? priority = null,
@@ -635,7 +640,7 @@ namespace BuildXL.Pips.Operations
                 allowedSurvivingChildProcessNames,
                 nestedProcessTerminationTimeout,
                 absentPathProbeMode,
-                doubleWritePolicy,
+                rewritePolicy,
                 containerIsolationLevel,
                 weight,
                 priority,
@@ -776,6 +781,23 @@ namespace BuildXL.Pips.Operations
         public ReadOnlyArray<AbsolutePath> OutputDirectoryExclusions { get; }
 
         /// <summary>
+        /// Maximum number of times BuildXL will retry the pip when it returns an exit code in <see cref="RetryExitCodes"/>
+        /// </summary>
+        [PipCaching(FingerprintingRole = FingerprintingRole.None)]
+        public int ProcessRetries { get; }
+
+        /// <summary>
+        /// The name of the environment variable BuildXL will use to communicate the pip the number of times the pip has been retried to far.
+        /// </summary>
+        /// <remarks>
+        /// When defined, the first time the pip is executed the value of this environment variable will be 0. If a retry happens by virtue of 'retryExitCodes',
+        /// the variable will have value 1, and so on for subsequent retries.
+        /// This variable will automatically become a passthrough one and will have no effects on caching.
+        /// </remarks>
+        [PipCaching(FingerprintingRole = FingerprintingRole.Semantic)]
+        public StringId RetryAttemptEnvironmentVariable { get; }
+
+        /// <summary>
         /// Wall clock time limit to wait for nested processes to exit after main process has terminated.
         /// Default value is 30 seconds (SandboxedProcessInfo.DefaultNestedProcessTerminationTimeout).
         /// </summary>
@@ -794,11 +816,8 @@ namespace BuildXL.Pips.Operations
         /// <summary>
         /// What policy to apply when merging redirected outputs back
         /// </summary>
-        /// <remarks>
-        /// Only makes sense when <see cref="NeedsToRunInContainer"/> is true
-        /// </remarks>
         [PipCaching(FingerprintingRole = FingerprintingRole.Semantic)]
-        public DoubleWritePolicy DoubleWritePolicy { get; }
+        public RewritePolicy RewritePolicy { get; }
 
         /// <summary>
         /// How much of this process (in terms of inputs and outputs) should be isolated in the container
@@ -924,7 +943,7 @@ namespace BuildXL.Pips.Operations
                 allowedSurvivingChildProcessNames: reader.ReadReadOnlyArray(reader1 => reader1.ReadPathAtom()),
                 nestedProcessTerminationTimeout: reader.ReadNullableStruct(reader1 => reader1.ReadTimeSpan()),
                 absentPathProbeMode: (AbsentPathProbeInUndeclaredOpaquesMode)reader.ReadByte(),
-                doubleWritePolicy: (DoubleWritePolicy)reader.ReadByte(),
+                rewritePolicy: (RewritePolicy)reader.ReadByte(),
                 containerIsolationLevel: (ContainerIsolationLevel)reader.ReadByte(),
                 weight: reader.ReadInt32Compact(),
                 priority: reader.ReadInt32Compact(),
@@ -932,7 +951,9 @@ namespace BuildXL.Pips.Operations
                 changeAffectedInputListWrittenFile: reader.ReadFileArtifact(),
                 preserveOutputsTrustLevel: reader.ReadInt32(),
                 childProcessesToBreakawayFromSandbox: reader.ReadReadOnlyArray(reader1 => reader1.ReadPathAtom()),
-                outputDirectoryExclusions: reader.ReadReadOnlyArray(reader1 => reader1.ReadAbsolutePath())
+                outputDirectoryExclusions: reader.ReadReadOnlyArray(reader1 => reader1.ReadAbsolutePath()),
+                processRetries: reader.ReadInt32Compact(),
+                retryAttemptEnvironmentVariable: reader.ReadStringId()
                 );
         }
 
@@ -976,7 +997,7 @@ namespace BuildXL.Pips.Operations
             writer.Write(AllowedSurvivingChildProcessNames, (w, v) => w.Write(v));
             writer.Write(NestedProcessTerminationTimeout, (w, t) => w.Write(t));
             writer.Write((byte)ProcessAbsentPathProbeInUndeclaredOpaquesMode);
-            writer.Write((byte)DoubleWritePolicy);
+            writer.Write((byte)RewritePolicy);
             writer.Write((byte)ContainerIsolationLevel);
             writer.WriteCompact(Weight);
             writer.WriteCompact(Priority);
@@ -985,6 +1006,8 @@ namespace BuildXL.Pips.Operations
             writer.Write(PreserveOutputsTrustLevel);
             writer.Write(ChildProcessesToBreakawayFromSandbox, (w, v) => w.Write(v));
             writer.Write(OutputDirectoryExclusions, (w, v) => w.Write(v));
+            writer.WriteCompact(ProcessRetries);
+            writer.Write(RetryAttemptEnvironmentVariable);
         }
         #endregion
     }

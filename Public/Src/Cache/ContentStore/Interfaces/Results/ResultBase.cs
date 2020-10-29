@@ -116,7 +116,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         /// <summary>
         /// Returns an optional exception instance associated with the result.
         /// </summary>
-        public Exception? Exception { get; }
+        public Exception? Exception { get; protected set; }
 
         /// <summary>
         /// Description of the error that occurred.
@@ -128,6 +128,11 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         /// </summary>
         private bool _hasLazyDiagnostics;
         private string? _diagnostics;
+
+        /// <summary>
+        /// Indicates whether diagnostics should be printed in success case
+        /// </summary>
+        public bool PrintDiagnosticsForSuccess { get; protected set; }
 
         /// <summary>
         /// Optional verbose diagnostic information about the result (either error or success).
@@ -190,7 +195,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         /// <nodoc />
         protected virtual string GetSuccessString()
         {
-            return "Success";
+            return PrintDiagnosticsForSuccess && Diagnostics != null ? $"Success Diagnostics=[{Diagnostics}]" : "Success";
         }
 
         /// <inheritdoc />

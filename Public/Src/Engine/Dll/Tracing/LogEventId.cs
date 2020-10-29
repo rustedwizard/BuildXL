@@ -113,8 +113,8 @@ namespace BuildXL.Engine.Tracing
         ConfigIgnoreCreateProcessReport = 939,
         ConfigProbeDirectorySymlinkAsDirectory = 940,
         ConfigUnsafeAllowDuplicateTemporaryDirectory = 941,
-        ConfigIgnoreFullSymlinkResolving = 942,
-
+        ConfigIgnoreFullReparsePointResolving = 942,
+        ConfigUnsafeSkipFlaggingSharedOpaqueOutputs = 943,
 
         StartInitializingCache = 1502,
         EndInitializingCache = 1503,
@@ -169,6 +169,7 @@ namespace BuildXL.Engine.Tracing
         ParsePhaseComplete = 2831,
         StartEvaluateValues = 2832,
         EndEvaluateValues = 2833,
+        ScheduleConstructedWithConfiguration = 2845,
         StartExecute = 2834,
         EndExecute = 2835,
 

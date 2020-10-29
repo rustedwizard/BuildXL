@@ -57,7 +57,6 @@ namespace BuildXL.Cache.BuildCacheAdapter
         //     "MaxFingerprintsPerIncorporateRequest":{23},
         //     "HttpSendTimeoutMinutes":{24},
         //     "LogFlushIntervalSeconds":{25}
-        //     "DownloadBlobsThroughBlobStore":{26}
         //     "UseDedupStore":{27}
         //     "DisableContent":{28}
         //     "OverrideUnixFileAccessMode":{29}
@@ -184,6 +183,11 @@ namespace BuildXL.Cache.BuildCacheAdapter
                 if (!Uri.IsWellFormedUriString(cacheConfig.CacheServiceFingerprintEndpoint, UriKind.Absolute))
                 {
                     failures.Add(new IncorrectJsonConfigDataFailure($"{nameof(cacheConfig.CacheServiceFingerprintEndpoint)}=[{cacheConfig.CacheServiceFingerprintEndpoint}] is not a valid Uri."));
+                }
+
+                if (cacheConfig.DomainId < 0 || cacheConfig.DomainId > 99)
+                {
+                    failures.Add(new IncorrectJsonConfigDataFailure($"{nameof(cacheConfig.DomainId)} must be in the range [0,99]"));
                 }
 
                 return failures;

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Diagnostics.ContractsLight;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -93,7 +94,19 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             (var primaryResult, var secondaryResult) = await ExecuteRaidedAsync(
                 context,
-                executeAsync,
+                async (adapter, token) =>
+                {
+                    var result = await executeAsync(adapter, token);
+
+                    if (!result)
+                    {
+                        return new ErrorResult(result).AsResult<Result<bool>>();
+                    }
+                    else
+                    {
+                        return Result.Success(true);
+                    }
+                },
                 retryWindow,
                 concurrent: true);
 
@@ -111,11 +124,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <remarks>
         /// One of the elements in the result are not null.
         /// </remarks>
-        public async Task<(TResult? primary, TResult? secondary)> ExecuteRaidedAsync<TResult>(OperationContext context, Func<RedisDatabaseAdapter, CancellationToken, Task<TResult>> executeAsync, TimeSpan? retryWindow, bool concurrent = true, [CallerMemberName]string? caller = null)
-            where TResult : BoolResult
+        public async Task<(Result<TResult>? primary, Result<TResult>? secondary)> ExecuteRaidedAsync<TResult>(OperationContext context, Func<RedisDatabaseAdapter, CancellationToken, Task<Result<TResult>>> executeAsync, TimeSpan? retryWindow, bool concurrent = true, [CallerMemberName]string? caller = null)
         {
             using var cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(context.Token);
-            var primaryResultTask = ExecuteAndCaptureRedisErrorsAsync(PrimaryRedisDb, executeAsync, cancellationTokenSource.Token);
+            Task<Result<TResult>> primaryResultTask = ExecuteAndCaptureRedisErrorsAsync(PrimaryRedisDb, executeAsync, cancellationTokenSource.Token);
 
             if (SecondaryRedisDb == null)
             {
@@ -134,8 +146,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             // Instead of waiting for both - the primary and the secondary, we'll check for the primary first and then try to cancel the other one.
             // There is a time out delay acting as a window for the slower task to complete before we cancel the retry attempts
 
-            Task<TResult> fasterResultTask = await Task.WhenAny(primaryResultTask, secondaryResultTask);
-            Task<TResult> slowerResultTask = fasterResultTask == primaryResultTask ? secondaryResultTask : primaryResultTask;
+            Task<Result<TResult>> fasterResultTask = await Task.WhenAny(primaryResultTask, secondaryResultTask);
+            Task<Result<TResult>> slowerResultTask = fasterResultTask == primaryResultTask ? secondaryResultTask : primaryResultTask;
 
             // Try to cancel the slower operation only when the faster one finished successfully (and the timeout was provided).
             if (fasterResultTask.Result.Succeeded && retryWindow != null)
@@ -145,6 +157,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 if (secondResult != slowerResultTask)
                 {
                     var failingRedisDb = GetDbName(fasterResultTask == primaryResultTask ? SecondaryRedisDb : PrimaryRedisDb);
+                    var successRedisDb = GetOtherDbName(failingRedisDb);
                     Counters[RaidedRedisDatabaseCounters.CancelRedisInstance].Increment();
 
                     // Avoiding task unobserved exception if the second task will fail.
@@ -153,7 +166,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     // The second task is not done within a given timeout.
                     cancellationTokenSource.Cancel();
 
-                    Tracer.Info(context, $"{Tracer.Name}.{caller}: Cancelling redis db: {failingRedisDb}, using result: {fasterResultTask.Result} from other redis db");
+                    Tracer.Info(context, $"{Tracer.Name}.{caller}: Cancelling operation against '{failingRedisDb}' redis db after '{retryWindow.Value}'. Using successful result from '{successRedisDb}'.");
 
                     if (fasterResultTask == primaryResultTask)
                     {
@@ -166,17 +179,34 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 }
             }
 
-            await slowerResultTask;
+            (await slowerResultTask).IgnoreFailure();
             var primaryResult = await primaryResultTask;
             var secondaryResult = await secondaryResultTask;
 
             if (primaryResult.Succeeded != secondaryResult.Succeeded)
             {
                 var failingRedisDb = GetDbName(primaryResult.Succeeded ? SecondaryRedisDb : PrimaryRedisDb);
-                Tracer.Info(context, $"{Tracer.Name}.{caller}: Error in {failingRedisDb} redis db using result from other redis db: {(primaryResult.Succeeded ? primaryResult : secondaryResult)}");
+                var successRedisDb = GetOtherDbName(failingRedisDb);
+                // We don't have to print a result here, because errors should be already traced.
+                Tracer.Info(context, $"{Tracer.Name}.{caller}: Error in '{failingRedisDb}' redis db. Using successful result from '{successRedisDb}'.");
             }
 
             return (primaryResult, secondaryResult);
+        }
+
+        private string GetOtherDbName(string databaseName)
+        {
+            Contract.Requires(SecondaryRedisDb != null);
+
+            // This method returns the name of another database.
+            if (databaseName == PrimaryRedisDb.DatabaseName)
+            {
+                return SecondaryRedisDb.DatabaseName;
+            }
+            else
+            {
+                return PrimaryRedisDb.DatabaseName;
+            }
         }
 
         /// <nodoc />

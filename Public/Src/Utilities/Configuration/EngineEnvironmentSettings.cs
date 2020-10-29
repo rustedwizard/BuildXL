@@ -36,7 +36,7 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<int> MaxNumPipsForCacheMissAnalysis = CreateSetting("MaxNumPipsForCacheMissAnalysis", value => ParseInt32(value) ?? 1000);
 
         /// <summary>
-        /// The maximum number of RPC 
+        /// The maximum number of RPC
         /// </summary>
         public static readonly Setting<int> MaxMessagesPerBatch = CreateSetting("MaxMessagesPerBatch", value => ParseInt32(value) ?? 1000);
 
@@ -44,11 +44,6 @@ namespace BuildXL.Utilities.Configuration
         /// Defines whether BuildXL should launch the debugger after a particular engine phase.
         /// </summary>
         public static readonly Setting<EnginePhases?> LaunchDebuggerAfterPhase = CreateSetting("BuildXLDebugAfterPhase", value => ParsePhase(Environment.GetEnvironmentVariable("BuildXLDebugAfterPhase")));
-
-        /// <summary>
-        /// Defines whether file sizes and hashes should be exported into the json graph
-        /// </summary>
-        public static readonly Setting<bool> ExportFileDetails = CreateSetting("BuildXLExportFileDetails", value => value == "1");
 
         /// <summary>
         /// Defines optional text used to salt pip fingerprints.
@@ -72,21 +67,10 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<string> VmCommandProxyPath = CreateSetting("BUILDXL_VMCOMMANDPROXY_PATH", value => value);
 
         /// <summary>
-        /// Bypass NuGet up to date checks
-        /// </summary>
-        public static readonly Setting<bool> BypassNugetDownload = CreateSetting("BuildXLBypassNugetDownload", value => value == "1");
-
-        /// <summary>
-        /// Allows optionally specifying an alternative timeout fo connect between IDE service and BuildXL task
-        /// </summary>
-        public static readonly Setting<TimeSpan> IdeConnectTimeout = CreateSetting("BuildXLIdeConnectTimeoutSec", value => ParseTimeSpan(value, ts => TimeSpan.FromSeconds(ts)) ??
-            TimeSpan.FromSeconds(30));
-
-        /// <summary>
         /// Indicates whether the application should fail fast on null reference exceptions
         /// </summary>
         public static readonly Setting<bool> FailFastOnNullReferenceException = CreateSetting("FailFastOnNullReferenceException", value => value == "1");
-        
+
         /// <summary>
         /// Indicates whether the application should fail fast on critical exceptions occurred in the cache codebase.
         /// </summary>
@@ -132,7 +116,7 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<bool> InlineWorkerXLGHandling = CreateSetting("BuildXLInlineWorkerXLGHandling", value => value == "1");
 
         /// <summary>
-        /// Allows to overwrite the current system username with a custom value. If present, Aria telemetry and BuildXL.Native.UserUtilities 
+        /// Allows to overwrite the current system username with a custom value. If present, Aria telemetry and BuildXL.Native.UserUtilities
         /// will return this value. Often lab build machines are setup / provisioned with the same system username (e.g. in Apex builds) so we allow
         /// for this to be settable from the outside, thus partners can provide more fine grained telemetry data.
         /// </summary>
@@ -145,17 +129,27 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<bool> DoNotInlineWhenNewPipRunInSameQueue = CreateSetting("BuildXLDoNotInlineWhenNewPipRunInSameQueue", value => value == "1");
 
         /// <summary>
-        /// Specifies to disable load balance among workers.
+        /// Specifies the maximum load that the worker can acquire before BuildXL visits the next preferred work when <see cref="ScheduleConfigurationExtensions.ModuleAffinityEnabled"/> returns true.
         /// </summary>
-        public static readonly Setting<double?> DisableLoadBalanceMultiplier = CreateSetting("BuildXLDisableLoadBalanceMultiplier", value => ParseDouble(value));
-        
+        public static readonly Setting<double?> BuildXLModuleAffinityMultiplier = CreateSetting("BuildXLModuleAffinityMultiplier", value => ParseDouble(value));
+
+        /// <summary>
+        /// Disable pausing chooseworkerthreads
+        /// </summary>
+        public static readonly Setting<bool> DoNotPauseChooseWorkerThreads = CreateSetting("BuildXLDoNotPauseChooseWorkerThreads", value => value == "1");
+
+        /// <summary>
+        /// Disable delayed cache lookup.
+        /// </summary>
+        public static readonly Setting<bool> DisableDelayedCacheLookup = CreateSetting("BuildXLDisableDelayedCacheLookup", value => value == "1");
+
         #region Distribution-related timeouts
 
         /// <summary>
         /// Allows optionally specifying an alternative timeout for workers to wait for attach from master
         /// </summary>
         public static readonly Setting<TimeSpan> WorkerAttachTimeout = CreateSetting("BuildXLWorkerAttachTimeoutMin", value => ParseTimeSpan(value, ts => TimeSpan.FromMinutes(ts)) ??
-            TimeSpan.FromMinutes(60));
+            TimeSpan.FromMinutes(75));
 
         /// <summary>
         /// Maximum time to wait while establishing a connection to the remote machine (both master->worker and worker->master)
@@ -193,10 +187,12 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<bool> GrpcHandlerInliningEnabled = CreateSetting("BuildXLGrpcHandlerInliningEnabled", value => string.IsNullOrWhiteSpace(value) ? false : value == "1");
 
         /// <summary>
-        /// An artificial delay in reporting notifications to force batching
+        /// Whether HandlerInlining is enabled for grpc.
         /// </summary>
-        public static readonly Setting<TimeSpan> DistributionBatchArtificialDelay = CreateSetting("BuildXLDistributionBatchArtificialDelay", value => ParseTimeSpan(value, ts => TimeSpan.FromMilliseconds(ts)) ??
-            TimeSpan.Zero);
+        /// <remarks>
+        /// Default disabled
+        /// </remarks>
+        public static readonly Setting<bool> GrpcKeepAliveEnabled = CreateSetting("BuildXLGrpcKeepAliveEnabled", value => string.IsNullOrWhiteSpace(value) ? false : value == "1");
 
         /// <summary>
         /// The amount of concurrency to allow for input/output materialization
@@ -212,6 +208,28 @@ namespace BuildXL.Utilities.Configuration
             "BuildXL.HashingConcurrency",
             value => ParseInt32(value) ?? Environment.ProcessorCount * 2);
 
+        /// <summary>
+        /// Whether we skip IPC pips when materializing outputs
+        /// </summary>
+        /// <remarks>
+        /// Default disabled (we skip IPC pips when materializing outputs)
+        /// </remarks>
+        public static readonly Setting<bool> DoNotSkipIpcWhenMaterializingOutputs = CreateSetting("BuildXLDoNotSkipIpcWhenMaterializingOutputs", value => value == "1");
+
+        #endregion
+
+        #region Cache-related timeouts
+
+        /// <summary>
+        /// Timeout for pin and materialize operations.
+        /// </summary>
+        public static readonly Setting<int?> ArtifactContentCacheOperationTimeout = CreateSetting("BuildXLArtifactContentCacheOperationTimeout", value => ParseInt32(value));
+
+        /// <summary>
+        /// Timeout for fingerprintstore operations.
+        /// </summary>
+        public static readonly Setting<int?> FingerprintStoreOperationTimeout = CreateSetting("BuildXLFingerprintStoreOperationTimeout", value => ParseInt32(value));
+
         #endregion
 
         /// <summary>
@@ -223,6 +241,16 @@ namespace BuildXL.Utilities.Configuration
         /// The minimum step duration for the tracer to log
         /// </summary>
         public static readonly Setting<int> MinStepDurationSecForTracer = CreateSetting("BuildXLMinStepDurationSecForTracer", value => ParseInt32(value, allowZero: true) ?? 30);
+
+        /// <summary>
+        /// Disables retries due to detours failures
+        /// </summary>
+        public static readonly Setting<bool> DisableDetoursRetries = CreateSetting("BuildXLDisableDetoursRetries", value => value == "1");
+
+        /// <summary>
+        /// Threshold in bytes for large string buffer in string table.
+        /// </summary>
+        public static readonly Setting<int?> LargeStringBufferThresholdBytes = CreateSetting("BuildXLLargeStringBufferThresholdBytes", value => ParseInt32(value));
 
         /// <summary>
         /// Sets the variable for consumption by settings
@@ -332,8 +360,8 @@ namespace BuildXL.Utilities.Configuration
 
             private static ConcurrentDictionary<string, string> GetInitialVariables()
             {
-                ConcurrentDictionary<string, string> variables = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (DictionaryEntry entry in System.Environment.GetEnvironmentVariables())
+                ConcurrentDictionary<string, string> variables = new ConcurrentDictionary<string, string>(OperatingSystemHelper.EnvVarComparer);
+                foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
                 {
                     variables[(string)entry.Key] = (string)entry.Value;
                 }

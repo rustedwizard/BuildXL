@@ -44,7 +44,7 @@ namespace BuildXL.Utilities.Configuration
         /// on the state of the outputs.
         /// </summary>
         PreserveOutputsMode PreserveOutputs { get; }
-        
+
         /// <summary>
         /// Trust levle of how much we trust the preserveoutputs per pip.
         /// </summary>
@@ -79,11 +79,11 @@ namespace BuildXL.Utilities.Configuration
         /// Whether BuildXL is to ignore reparse points. Ignoring reparse points is an unsafe configuration. Defaults to off (i.e., not ignoring reparse points).
         /// </summary>
         bool IgnoreReparsePoints { get; }
-        
+
         /// <summary>
-        /// Whether BuildXL is to ignore fully resolving symbolic links. Ignoring symlink resolving is an unsafe configuration. Defaults to on (i.e., skipping full resolving, due to backwards compatibility).
+        /// Whether BuildXL is to ignore fully resolving of reparse points. Ignoring reparse point resolving is an unsafe configuration. Defaults to on (i.e., skipping full resolving, due to backwards compatibility).
         /// </summary>
-        bool IgnoreFullSymlinkResolving { get; }
+        bool IgnoreFullReparsePointResolving { get; }
 
         /// <summary>
         /// Whether BuildXL is to ignore Dlls loaded before Detours was started. Ignoring the preloaded (statically loaded) dlls is an unsafe configuration. Defaults to on (i.e., ignoring preloaded Dlls).
@@ -137,7 +137,7 @@ namespace BuildXL.Utilities.Configuration
         /// <remarks>
         /// Can be individually controlled on a per-pip basis, this value sets the default
         /// </remarks>
-        DoubleWritePolicy? DoubleWritePolicy { get; }
+        RewritePolicy? DoubleWritePolicy { get; }
 
         /// <summary>
         /// Undeclared accesses under a shared opaque are not reported.
@@ -171,6 +171,18 @@ namespace BuildXL.Utilities.Configuration
         /// </remarks>
         bool? ProcessSymlinkedAccesses { get; }
 
+        /// <summary>
+        /// Indicates if full reparse point resolving should be enabled in the process sandbox.
+        /// </summary>
+        bool? EnableFullReparsePointResolving { get; }
+
+        /// <summary>
+        /// When true, outputs produced under shared opaques won't be flagged as such.
+        /// </summary>
+        /// <remarks>
+        /// This means subsequent builds won't be able to recognize those as outputs and they won't be deleted before pips run
+        /// </remarks>
+        bool? SkipFlaggingSharedOpaqueOutputs { get; }
 
         // NOTE: if you add a property here, don't forget to update UnsafeSandboxConfigurationExtensions
 
@@ -227,7 +239,17 @@ namespace BuildXL.Utilities.Configuration
             {
                 writer.Write(@this.ProcessSymlinkedAccesses.Value);
             }
-            writer.Write(@this.IgnoreFullSymlinkResolving);
+            writer.Write(@this.IgnoreFullReparsePointResolving);
+            writer.Write(@this.SkipFlaggingSharedOpaqueOutputs.HasValue);
+            if (@this.SkipFlaggingSharedOpaqueOutputs.HasValue)
+            {
+                writer.Write(@this.SkipFlaggingSharedOpaqueOutputs.Value);
+            }
+            writer.Write(@this.EnableFullReparsePointResolving.HasValue);
+            if (@this.EnableFullReparsePointResolving.HasValue)
+            {
+                writer.Write(@this.EnableFullReparsePointResolving.Value);
+            }
         }
 
         /// <nodoc/>
@@ -251,12 +273,14 @@ namespace BuildXL.Utilities.Configuration
                 UnexpectedFileAccessesAreErrors = reader.ReadBoolean(),
                 IgnorePreloadedDlls = reader.ReadBoolean(),
                 IgnoreDynamicWritesOnAbsentProbes = (DynamicWriteOnAbsentProbePolicy)reader.ReadInt32Compact(),
-                DoubleWritePolicy = reader.ReadBoolean() ? (DoubleWritePolicy?)reader.ReadByte() : null,
+                DoubleWritePolicy = reader.ReadBoolean() ? (RewritePolicy?)reader.ReadByte() : null,
                 IgnoreUndeclaredAccessesUnderSharedOpaques = reader.ReadBoolean(),
                 IgnoreCreateProcessReport = reader.ReadBoolean(),
                 ProbeDirectorySymlinkAsDirectory = reader.ReadBoolean(),
                 ProcessSymlinkedAccesses = reader.ReadBoolean() ? (bool?) reader.ReadBoolean() : null,
-                IgnoreFullSymlinkResolving = reader.ReadBoolean(),
+                IgnoreFullReparsePointResolving = reader.ReadBoolean(),
+                SkipFlaggingSharedOpaqueOutputs = reader.ReadBoolean() ? (bool?)reader.ReadBoolean() : null,
+                EnableFullReparsePointResolving = reader.ReadBoolean() ? (bool?) reader.ReadBoolean() : null,
             };
         }
 
@@ -270,7 +294,7 @@ namespace BuildXL.Utilities.Configuration
                 && IsAsSafeOrSafer(lhs.IgnoreGetFinalPathNameByHandle, rhs.IgnoreGetFinalPathNameByHandle, SafeDefaults.IgnoreGetFinalPathNameByHandle)
                 && IsAsSafeOrSafer(lhs.IgnoreNonCreateFileReparsePoints, rhs.IgnoreNonCreateFileReparsePoints, SafeDefaults.IgnoreNonCreateFileReparsePoints)
                 && IsAsSafeOrSafer(lhs.IgnoreReparsePoints, rhs.IgnoreReparsePoints, SafeDefaults.IgnoreReparsePoints)
-                && IsAsSafeOrSafer(lhs.IgnoreFullSymlinkResolving, rhs.IgnoreFullSymlinkResolving, SafeDefaults.IgnoreFullSymlinkResolving)
+                && IsAsSafeOrSafer(lhs.IgnoreFullReparsePointResolving, rhs.IgnoreFullReparsePointResolving, SafeDefaults.IgnoreFullReparsePointResolving)
                 && IsAsSafeOrSafer(lhs.IgnoreSetFileInformationByHandle, rhs.IgnoreSetFileInformationByHandle, SafeDefaults.IgnoreSetFileInformationByHandle)
                 && IsAsSafeOrSafer(lhs.IgnoreZwOtherFileInformation, rhs.IgnoreZwOtherFileInformation, SafeDefaults.IgnoreZwOtherFileInformation)
                 && IsAsSafeOrSafer(lhs.IgnoreZwRenameFileInformation, rhs.IgnoreZwRenameFileInformation, SafeDefaults.IgnoreZwRenameFileInformation)
@@ -287,8 +311,9 @@ namespace BuildXL.Utilities.Configuration
                 && IsAsSafeOrSafer(lhs.IgnoreUndeclaredAccessesUnderSharedOpaques, rhs.IgnoreUndeclaredAccessesUnderSharedOpaques, SafeDefaults.IgnoreUndeclaredAccessesUnderSharedOpaques)
                 && IsAsSafeOrSafer(lhs.IgnoreCreateProcessReport, rhs.IgnoreCreateProcessReport, SafeDefaults.IgnoreCreateProcessReport)
                 && IsAsSafeOrSafer(lhs.ProbeDirectorySymlinkAsDirectory, rhs.ProbeDirectorySymlinkAsDirectory, SafeDefaults.ProbeDirectorySymlinkAsDirectory)
-                && IsAsSafeOrSafer(lhs.ProcessSymlinkedAccesses(), rhs.ProcessSymlinkedAccesses(), SafeDefaults.ProcessSymlinkedAccesses());
-
+                && IsAsSafeOrSafer(lhs.ProcessSymlinkedAccesses(), rhs.ProcessSymlinkedAccesses(), SafeDefaults.ProcessSymlinkedAccesses()
+                && IsAsSafeOrSafer(lhs.SkipFlaggingSharedOpaqueOutputs(), rhs.SkipFlaggingSharedOpaqueOutputs(), SafeDefaults.SkipFlaggingSharedOpaqueOutputs()))
+                && IsAsSafeOrSafer(lhs.EnableFullReparsePointResolving(), rhs.EnableFullReparsePointResolving(), SafeDefaults.EnableFullReparsePointResolving());
         }
 
         /// <nodoc />

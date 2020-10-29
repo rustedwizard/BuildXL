@@ -12,11 +12,6 @@ namespace MonitorTest {
         sources: globR(d`.`, "*.cs"),
         skipTestRun: BuildXLSdk.restrictTestRunToSomeQualifiers,
         references: [
-            ...addIf(BuildXLSdk.isFullFramework,
-                NetFx.System.Xml.dll,
-                NetFx.System.Xml.Linq.dll
-            ),
-
             // Needed to get Fluent Assertions
             ...BuildXLSdk.fluentAssertionsWorkaround,
 
@@ -28,13 +23,26 @@ namespace MonitorTest {
 
             // Needed to get TestWithOutput
             importFrom("BuildXL.Cache.ContentStore").InterfacesTest.dll,
+
+            // Used for TestGlobal.Logger
+            importFrom("BuildXL.Cache.ContentStore").Test.dll,
             
             importFrom("RuntimeContracts").pkg,
             ...azureSdk,
             ...importFrom("BuildXL.Cache.ContentStore").kustoPackages,
         ],
         runTestArgs: {
-            skipGroups: BuildXLSdk.isDotNetCoreBuild ? [ "SkipDotNetCore" ] : []
+            tools: {
+                exec: {
+                    unsafe: {
+                        passThroughEnvironmentVariables: [
+                            // Used to ensure tests against Azure can run whenever this environment variable is 
+                            // available
+                            "CACHE_MONITOR_APPLICATION_KEY"
+                        ]
+                    },
+                }
+            }
         },
         skipDocumentationGeneration: true,
         nullable: true,

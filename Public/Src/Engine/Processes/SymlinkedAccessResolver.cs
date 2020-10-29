@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
+using System.IO;
 using BuildXL.Native.IO;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
@@ -50,23 +51,29 @@ namespace BuildXL.Processes
         /// unnecesary conversions between strings and absolute paths.
         /// </remarks>
         /// <returns>Whether the given access needed resolution</returns>
-        public bool ResolveDirectorySymlinks(ReportedFileAccess access, AbsolutePath accessPath, out ReportedFileAccess resolvedAccess, out AbsolutePath resolvedPath)
+        public bool ResolveDirectorySymlinks(FileAccessManifest manifest, ReportedFileAccess access, AbsolutePath accessPath, out ReportedFileAccess resolvedAccess, out AbsolutePath resolvedPath)
         {
             Contract.Requires(accessPath.IsValid);
 
-            resolvedPath = ResolvePathWithCache(accessPath, access.Path, out string resolvedPathAsString);
+            resolvedPath = ResolvePathWithCache(
+                accessPath, 
+                access.Path, 
+                access.Operation, 
+                access.FlagsAndAttributes,
+                out string resolvedPathAsString,
+                out bool isDirectoryReparsePoint);
 
-            return ResolveAccess(access, accessPath, resolvedPath, resolvedPathAsString, out resolvedAccess);
+            return ResolveAccess(manifest, access, accessPath, resolvedPath, resolvedPathAsString, isDirectoryReparsePoint, out resolvedAccess);
         }
 
         /// <summary>
-        /// Adds synthetic read accesses for all intermediate directory symlinks for the given access path
+        /// Adds synthetic accesses for all intermediate directory symlinks for the given access path
         /// </summary>
         /// <remarks>
         /// TODO: This function is only adding accesses for symlinks in the given path, so if those suymlinks point to other symlinks,
         /// those are not added. So the result is not completely sound, consider doing multi-hop resolution.
         /// </remarks>
-        public void AddReadsForIntermediateSymlinks(FileAccessManifest manifest, ReportedFileAccess access, AbsolutePath accessPath, Dictionary<AbsolutePath, CompactSet<ReportedFileAccess>> accessesByPath)
+        public void AddAccessesForIntermediateSymlinks(FileAccessManifest manifest, ReportedFileAccess access, AbsolutePath accessPath, Dictionary<AbsolutePath, CompactSet<ReportedFileAccess>> accessesByPath)
         {
             Contract.Requires(accessPath.IsValid);
             AbsolutePath currentPath = accessPath.GetParent(m_context.PathTable);
@@ -80,36 +87,27 @@ namespace BuildXL.Processes
                     return;
                 }
 
-                bool isDirSymlink;
-                var result = m_symlinkCache.TryGet(currentPath);
-                if (!result.IsFound)
-                {
-                    isDirSymlink = FileUtilities.IsDirectorySymlinkOrJunction(currentPath.ToString(m_context.PathTable));
-                    m_symlinkCache.TryAdd(currentPath, isDirSymlink);
-                }
-                else
-                {
-                    isDirSymlink = result.Item.Value;
-                }
+                bool isDirSymlink = IsDirectorySymlinkOrJunctionWithCache(ExpandedAbsolutePath.CreateUnsafe(currentPath, currentPath.ToString(m_context.PathTable)));
 
                 if (isDirSymlink)
                 {
                     accessesByPath.TryGetValue(currentPath, out CompactSet<ReportedFileAccess> existingAccessesToPath);
-                    accessesByPath[currentPath] = existingAccessesToPath.Add(GenerateReadAccessForPath(manifest, currentPath, access));
+                    var generatedProbe = GenerateProbeForPath(manifest, currentPath, access);
+                    accessesByPath[currentPath] = existingAccessesToPath.Add(generatedProbe);
                 }
 
                 currentPath = currentPath.GetParent(m_context.PathTable);
             }
         }
 
-        private ReportedFileAccess GenerateReadAccessForPath(FileAccessManifest manifest, AbsolutePath currentPath, ReportedFileAccess access)
+        private ReportedFileAccess GenerateProbeForPath(FileAccessManifest manifest, AbsolutePath currentPath, ReportedFileAccess access)
         {
             manifest.TryFindManifestPathFor(currentPath, out AbsolutePath manifestPath, out FileAccessPolicy nodePolicy);
 
             return new ReportedFileAccess(
                 ReportedFileOperation.CreateFile,
                 access.Process,
-                RequestedAccess.Read,
+                RequestedAccess.Probe,
                 (nodePolicy & FileAccessPolicy.AllowRead) != 0 ? FileAccessStatus.Allowed : FileAccessStatus.Denied,
                 (nodePolicy & FileAccessPolicy.ReportAccess) != 0,
                 access.Error,
@@ -117,45 +115,58 @@ namespace BuildXL.Processes
                 DesiredAccess.GENERIC_READ,
                 ShareMode.FILE_SHARE_READ,
                 CreationDisposition.OPEN_ALWAYS,
-                FlagsAndAttributes.FILE_ATTRIBUTE_ARCHIVE,
+                // These generated accesses represent directory reparse points, so therefore we honor
+                // the directory attribute
+                FlagsAndAttributes.FILE_ATTRIBUTE_DIRECTORY,
                 manifestPath,
                 manifestPath == currentPath? null : currentPath.ToString(m_context.PathTable),
                 string.Empty);
         }
 
-        private AbsolutePath ResolvePathWithCache(AbsolutePath accessPath, [CanBeNull] string accessPathAsString, [CanBeNull] out string resolvedPathAsString)
+        private AbsolutePath ResolvePathWithCache(
+            AbsolutePath accessPath, 
+            [CanBeNull] string accessPathAsString, 
+            ReportedFileOperation operation, 
+            FlagsAndAttributes flagsAndAttributes,
+            [CanBeNull] out string resolvedPathAsString,
+            out bool isDirectoryReparsePoint)
         {
-            // BuildXL already handles the case of paths whose final fragment is a symlink. So we make sure to resolve everything else.
-
-            var parentPath = accessPath.GetParent(m_context.PathTable);
-            if (!parentPath.IsValid)
+            accessPathAsString ??= accessPath.ToString(m_context.PathTable);
+            // If the final segment is a directory reparse point and the operation acts on it, don't resolve it
+            if (ShouldNotResolveLastSegment(ExpandedAbsolutePath.CreateUnsafe(accessPath, accessPathAsString), operation, flagsAndAttributes, out isDirectoryReparsePoint))
             {
-                // The path doesn't have a root, so even if it is a symlink, BuildXL should be good with it
-                resolvedPathAsString = accessPathAsString;
-                return accessPath;
+                AbsolutePath resolvedParentPath = ResolvePathWithCache(accessPath.GetParent(m_context.PathTable), accessPathAsString: null, operation, flagsAndAttributes, out string resolvedParentPathAsString, out _);
+                PathAtom name = accessPath.GetName(m_context.PathTable);
+                resolvedPathAsString = resolvedParentPathAsString != null ? Path.Combine(resolvedParentPathAsString, name.ToString(m_context.StringTable)) : null;
+                return resolvedParentPath.Combine(m_context.PathTable, name);
             }
 
-            var lastFragment = accessPath.GetName(m_context.PathTable);
-
-            // In addition to buildxl already handling final fragment symlinks, by caching parents we enhance the chance of a hit, where
-            // many files shared the same parent. Query the cache with it.
-            var cachedResult = m_resolvedPathCache.TryGet(parentPath);
+            // Check the cache
+            var cachedResult = m_resolvedPathCache.TryGet(accessPath);
             if (cachedResult.IsFound)
             {
                 // Observe we don't cache expanded paths since that might cause the majority of all the paths of a build to live
                 // in memory for the whole execution time. So in case of a cache hit, we just return the absolute path. The expanded
                 // path needs to be reconstructed as needed.
                 resolvedPathAsString = null;
-                var resolvedParentPath = cachedResult.Item.Value;
+                return cachedResult.Item.Value;
+            }
 
-                // The cached resolved path could be invalid, meaning the original parent pointed to a drive's root
-                return resolvedParentPath.IsValid ?
-                    resolvedParentPath.Combine(m_context.PathTable, lastFragment) :
+            // If not found and the path is not a reparse point, check the cache for its parent.
+            // Many files may have the same parent, and since the path is not a reparse point we know that
+            // resolve(parent\segment) == resolve(parent)\segment
+            var parentPath = accessPath.GetParent(m_context.PathTable);
+            if (parentPath.IsValid && !isDirectoryReparsePoint && m_resolvedPathCache.TryGet(parentPath) is var cachedParent && cachedParent.IsFound)
+            {
+                var lastFragment = accessPath.GetName(m_context.PathTable);
+                resolvedPathAsString = null;
+                AbsolutePath cachedParentPath = cachedParent.Item.Value;
+                return cachedParentPath.IsValid ? 
+                    cachedParentPath.Combine(m_context.PathTable, lastFragment) :
                     AbsolutePath.Create(m_context.PathTable, lastFragment.ToString(m_context.StringTable));
             }
 
             // The cache didn't have it, so let's resolve it
-            accessPathAsString ??= accessPath.ToString(m_context.PathTable);
             if (!TryResolveSymlinkedPath(accessPathAsString, out ExpandedAbsolutePath resolvedExpandedPath))
             {
                 // If we cannot get the final path (e.g. file not found causes this), then we assume the path
@@ -163,55 +174,108 @@ namespace BuildXL.Processes
 
                 // Observe we cannot update the cache since the path was not resolved.
                 // TODO: we could consider always trying to resolve the parent
-                
+
                 resolvedPathAsString = accessPathAsString;
 
                 return accessPath;
             }
 
-            // Update the cache. Observe we may be storing an invalid path if the resolved path does not have a parent.
-            var resolvedPathParent = resolvedExpandedPath.Path.GetParent(m_context.PathTable);
-            m_resolvedPathCache.TryAdd(parentPath, resolvedPathParent);
+            // Update the cache
+            m_resolvedPathCache.TryAdd(accessPath, resolvedExpandedPath.Path);
 
-            // If the resolved path is the same as the access path, then we know its last fragment is not a symlink.
+            // If the path is not a reparse point, update the parent as well
+            if (!isDirectoryReparsePoint && parentPath.IsValid)
+            {
+                // Observe we may be storing an invalid path if the resolved path does not have a parent.
+                m_resolvedPathCache.TryAdd(parentPath, resolvedExpandedPath.Path.GetParent(m_context.PathTable));
+            }
+
+            // If the resolved path is the same as the access path, then we know its last fragment is not a reparse point.
             // So we might just update the symlink cache as well and hopefully speed up subsequent requests to generate read accesses
             // for intermediate symlink dirs
-            if (parentPath == resolvedExpandedPath.Path)
+            if (accessPath == resolvedExpandedPath.Path)
             {
-                m_symlinkCache.TryAdd(parentPath, false);
+                while (parentPath.IsValid && m_symlinkCache.TryAdd(parentPath, false))
+                {
+                    parentPath = parentPath.GetParent(m_context.PathTable);
+                }
             }
 
             resolvedPathAsString = resolvedExpandedPath.ExpandedPath;
             return resolvedExpandedPath.Path;
         }
 
+        private bool ShouldNotResolveLastSegment(ExpandedAbsolutePath accessPath, ReportedFileOperation operation, FlagsAndAttributes flagsAndAttributes, out bool isReparsePoint)
+        {
+            isReparsePoint = IsDirectorySymlinkOrJunctionWithCache(accessPath);
+            // The following operations act on the reparse point directly, not on the target
+            // TODO: the logic is not perfect but good enough. The detours implementation will replace
+            // this eventually
+            var operationOnReparsePoint = 
+                (operation == ReportedFileOperation.CreateHardLinkSource ||
+                 operation == ReportedFileOperation.CreateSymbolicLinkSource ||
+                 operation == ReportedFileOperation.GetFileAttributes ||
+                 operation == ReportedFileOperation.GetFileAttributesEx ||
+                 operation == ReportedFileOperation.DeleteFile || 
+                 (operation == ReportedFileOperation.CreateFile && (flagsAndAttributes & FlagsAndAttributes.FILE_FLAG_OPEN_REPARSE_POINT) != 0) ||
+                 (operation == ReportedFileOperation.NtCreateFile && (flagsAndAttributes & FlagsAndAttributes.FILE_FLAG_OPEN_REPARSE_POINT) != 0) ||
+                 (operation == ReportedFileOperation.ZwCreateFile && (flagsAndAttributes & FlagsAndAttributes.FILE_FLAG_OPEN_REPARSE_POINT) != 0) ||
+                 (operation == ReportedFileOperation.ZwOpenFile && (flagsAndAttributes & FlagsAndAttributes.FILE_FLAG_OPEN_REPARSE_POINT) != 0));
+
+            return operationOnReparsePoint && isReparsePoint;
+        }
+
+        private bool IsDirectorySymlinkOrJunctionWithCache(ExpandedAbsolutePath path)
+        {
+            if (m_symlinkCache.TryGet(path.Path) is var cachedResult && cachedResult.IsFound)
+            {
+                return cachedResult.Item.Value;
+            }
+
+            var result = FileUtilities.IsDirectorySymlinkOrJunction(path.ExpandedPath);
+            m_symlinkCache.TryAdd(path.Path, result);
+
+            return result;
+        }
+
         private bool ResolveAccess(
+            FileAccessManifest manifest,
             ReportedFileAccess access, 
             AbsolutePath accessPath, 
             AbsolutePath resolvedPath, 
             [CanBeNull]string resolvedPathAsString,
+            bool isDirectoryReparsePoint,
             out ReportedFileAccess resolvedAccess)
         {
+            var flags = isDirectoryReparsePoint ?
+                access.FlagsAndAttributes | FlagsAndAttributes.FILE_ATTRIBUTE_DIRECTORY :
+                access.FlagsAndAttributes;
+
             // If they are different, this means the original path contains symlinks we need to resolve
             if (resolvedPath != accessPath)
             {
                 if (access.ManifestPath == resolvedPath)
                 {
                     // When the manifest path matches the path, we don't store the latter
-                    resolvedAccess = access.CreateWithPath(null, access.ManifestPath);
+                    resolvedAccess = access.CreateWithPathAndAttributes(
+                        null, 
+                        access.ManifestPath, 
+                        flags);
                 }
                 else
                 {
                     resolvedPathAsString ??= resolvedPath.ToString(m_context.PathTable);
 
                     // In this case we need to normalize the manifest path as well
-                    AbsolutePath resolvedManifestPath = access.ManifestPath.IsValid ? 
-                        ResolvePathWithCache(access.ManifestPath, accessPathAsString: null, out _) :
-                        AbsolutePath.Invalid;
-                    
-                    resolvedAccess = access.CreateWithPath(
+                    // Observe the resolved path is fully resolved, and therefore if a manifest path is found, it will
+                    // also be fully resolved
+                    // If no manifest is found for the resolved path, the result is invalid, which is precisely what we need in resolvedManifestPath
+                    manifest.TryFindManifestPathFor(resolvedPath, out AbsolutePath resolvedManifestPath, out _); 
+
+                    resolvedAccess = access.CreateWithPathAndAttributes(
                         resolvedPath == resolvedManifestPath ? null : resolvedPathAsString,
-                        resolvedManifestPath);
+                        resolvedManifestPath,
+                        flags);
                 }
 
                 return true;

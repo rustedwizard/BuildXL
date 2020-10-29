@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Threading;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 
 #nullable enable
@@ -26,9 +27,19 @@ namespace BuildXL.Cache.ContentStore.Stores
         public bool UseRedundantPutFileShortcut { get; set; } = true;
 
         /// <summary>
+        /// Whether the shortcuts for empty files are used.
+        /// </summary>
+        public bool UseEmptyContentShortcut { get; set; } = true;
+
+        /// <summary>
         /// Whether to use native (unmanaged) file enumeration or not.
         /// </summary>
         public bool UseNativeBlobEnumeration { get; set; } = false;
+
+        /// <summary>
+        /// A timeout for space reservation operation.
+        /// </summary>
+        public TimeSpan ReserveTimeout { get; set; } = Timeout.InfiniteTimeSpan;
 
         /// <summary>
         /// Gets or sets whether to override Unix file access modes.

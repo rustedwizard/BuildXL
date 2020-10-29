@@ -4,12 +4,15 @@
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
+using BuildXL.Cache.ContentStore.Distributed;
 using BuildXL.Cache.ContentStore.Exceptions;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Service;
 using BuildXL.Cache.ContentStore.Service.Grpc;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Cache.ContentStore.Utils;
 using CLAP;
 using Microsoft.Practices.TransientFaultHandling;
 
@@ -49,22 +52,28 @@ namespace BuildXL.Cache.ContentStore.App
 
             try
             {
-                using (var clientCache = new GrpcCopyClientCache(context))
-                using (var rpcClientWrapper = clientCache.CreateAsync(host, grpcPort, useCompressionForCopies).GetAwaiter().GetResult())
+                var config = GrpcCopyClientConfiguration.WithGzipCompression(useCompressionForCopies);
+                config.BandwidthCheckerConfiguration = BandwidthChecker.Configuration.Disabled;
+                using var clientCache = new GrpcCopyClientCache(context, new GrpcCopyClientCacheConfiguration()
                 {
-                    var rpcClient = rpcClientWrapper.Value;
-                    var finalPath = new AbsolutePath(destinationPath);
+                    GrpcCopyClientConfiguration = config
+                });
 
-                    // This action is synchronous to make sure the calling application doesn't exit before the method returns.
-                    var copyFileResult = retryPolicy.ExecuteAsync(() => rpcClient.CopyFileAsync(context, hash, finalPath, CancellationToken.None)).Result;
-                    if (!copyFileResult.Succeeded)
-                    {
-                        throw new CacheException(copyFileResult.ErrorMessage);
-                    }
-                    else
-                    {
-                        _logger.Debug($"Copy of {hashString} to {finalPath} was successful");
-                    }
+                var finalPath = new AbsolutePath(destinationPath);
+
+                var copyFileResult = clientCache.UseAsync(new OperationContext(context), host, grpcPort, (nestedContext, rpcClient) =>
+                {
+                    return retryPolicy.ExecuteAsync(
+                        () => rpcClient.CopyFileAsync(nestedContext, hash, finalPath, new CopyOptions(bandwidthConfiguration: null)));
+                }).GetAwaiter().GetResult();
+
+                if (!copyFileResult.Succeeded)
+                {
+                    throw new CacheException(copyFileResult.ErrorMessage);
+                }
+                else
+                {
+                    _logger.Debug($"Copy of {hashString} to {finalPath} was successful");
                 }
             }
             catch (Exception ex)

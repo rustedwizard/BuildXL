@@ -29,11 +29,11 @@ using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
 
 namespace Test.BuildXL.Processes.Detours
 {
-    /* TODO: This class tests symlink / junction behavior from before /unsafe_IgnoreFullSymlinkResolving was introduced and makes
+    /* TODO: This class tests symlink / junction behavior from before /unsafe_IgnoreFullReparsePointResolving was introduced and makes
              sure we don't break compatibility for our partners relying on this. Once directory symlink support is the default,
              these tests need to be adjusted.
      */
-    
+
     [TestClassIfSupported(requiresWindowsBasedOperatingSystem: true)]
     public sealed partial class SandboxedProcessPipExecutorTest
     {
@@ -90,7 +90,7 @@ namespace Test.BuildXL.Processes.Detours
             bool ignorePreloadedDlls = true,
             bool enforceAccessPoliciesOnDirectoryCreation = false,
             bool probeDirectorySymlinkAsDirectory = false,
-            bool ignoreFullSymlinkResolving = true)
+            bool ignoreFullReparsePointResolving = true)
         {
             errorString = null;
 
@@ -100,6 +100,8 @@ namespace Test.BuildXL.Processes.Detours
             {
                 directoryTranslator.AddTranslation(substSource, substTarget);
             }
+
+            directoryTranslator.AddDirectoryTranslationFromEnvironment();
 
             if (directoriesToTranslate != null)
             {
@@ -120,7 +122,7 @@ namespace Test.BuildXL.Processes.Detours
                 {
                     UnexpectedFileAccessesAreErrors = unexpectedFileAccessesAreErrors,
                     IgnoreReparsePoints = ignoreReparsePoints,
-                    IgnoreFullSymlinkResolving = ignoreFullSymlinkResolving,
+                    IgnoreFullReparsePointResolving = ignoreFullReparsePointResolving,
                     ExistingDirectoryProbesAsEnumerations = existingDirectoryProbesAsEnumerations,
                     IgnoreZwRenameFileInformation = ignoreZwRenameFileInformation,
                     IgnoreZwOtherFileInformation = ignoreZwOtherFileInformation,
@@ -569,7 +571,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -633,7 +635,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -696,7 +698,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -747,7 +749,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -799,7 +801,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -851,6 +853,142 @@ namespace Test.BuildXL.Processes.Detours
             }
         }
 
+        [Theory]
+        [InlineData("CallDetouredSetFileDispositionByHandle")]
+        [InlineData("CallDetouredSetFileDispositionByHandleEx", Skip = "Undocumented API, and keeps returning incorrect parameter")]
+        [InlineData("CallDetouredZwSetFileDispositionByHandle")]
+        [InlineData("CallDetouredZwSetFileDispositionByHandleEx")]
+        public async Task CallDetouredSetFileDispositionByHandle(string functionName)
+        {
+            var context = BuildXLContext.CreateInstanceForTesting();
+            var pathTable = context.PathTable;
+
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
+            {
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
+                string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
+                Contract.Assume(currentCodeFolder != null);
+
+                string executable = Path.Combine(currentCodeFolder, DetourTestFolder, DetoursTestsExe);
+
+                XAssert.IsTrue(File.Exists(executable));
+                FileArtifact executableFileArtifact = FileArtifact.CreateSourceFile(AbsolutePath.Create(pathTable, executable));
+
+                string workingDirectory = tempFiles.RootDirectory;
+                Contract.Assume(workingDirectory != null);
+                AbsolutePath workingDirectoryAbsolutePath = AbsolutePath.Create(pathTable, workingDirectory);
+
+                string testDirPath = Path.Combine(workingDirectory, "input");
+                tempFiles.GetDirectory("input");
+
+                string firstTestFile = Path.Combine(testDirPath, "SetFileDisposition.txt");
+                XAssert.IsFalse(File.Exists(firstTestFile));
+                AbsolutePath firstAbsPath = AbsolutePath.Create(pathTable, firstTestFile);
+                createdInputPaths[firstTestFile] = firstAbsPath;
+
+                FileArtifact firstFileArtifact = FileArtifact.CreateSourceFile(firstAbsPath);
+                if (File.Exists(firstTestFile))
+                {
+                    File.Delete(firstTestFile);
+                }
+
+                // Create the file.
+                using (FileStream fs = File.Create(firstTestFile))
+                {
+                    byte[] info = new System.Text.UTF8Encoding(true).GetBytes("aaa");
+
+                    // Add some information to the file.
+                    await fs.WriteAsync(info, 0, info.Length);
+                    fs.Close();
+                }
+
+                XAssert.IsTrue(File.Exists(firstTestFile));
+
+                var allDependencies = new List<FileArtifact>(2);
+                var allDirectoryDependencies = new List<DirectoryArtifact>(2);
+                allDependencies.Add(executableFileArtifact);
+
+                var arguments = new PipDataBuilder(pathTable.StringTable);
+                arguments.Add(functionName);
+
+                var environmentVariables = new List<EnvironmentVariable>();
+                Process pip = new Process(
+                    executableFileArtifact,
+                    workingDirectoryAbsolutePath,
+                    arguments.ToPipData(" ", PipDataFragmentEscaping.NoEscaping),
+                    FileArtifact.Invalid,
+                    PipData.Invalid,
+                    ReadOnlyArray<EnvironmentVariable>.From(environmentVariables),
+                    FileArtifact.Invalid,
+                    FileArtifact.Invalid,
+                    FileArtifact.Invalid,
+                    tempFiles.GetUniqueDirectory(pathTable),
+                    null,
+                    null,
+                    dependencies: ReadOnlyArray<FileArtifact>.FromWithoutCopy(allDependencies.ToArray<FileArtifact>()),
+                    outputs: ReadOnlyArray<FileArtifactWithAttributes>.Empty,
+                    directoryDependencies: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    directoryOutputs: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    orderDependencies: ReadOnlyArray<PipId>.Empty,
+                    untrackedPaths: ReadOnlyArray<AbsolutePath>.Empty,
+                    untrackedScopes: ReadOnlyArray<AbsolutePath>.Empty,
+                    tags: ReadOnlyArray<StringId>.Empty,
+
+                    // We expect the CreateFile call to fail, but with no monitoring error logged.
+                    successExitCodes: ReadOnlyArray<int>.FromWithoutCopy(new[] { 0 }),
+                    semaphores: ReadOnlyArray<ProcessSemaphoreInfo>.Empty,
+                    provenance: PipProvenance.CreateDummy(context),
+                    toolDescription: StringId.Invalid,
+                    additionalTempDirectories: ReadOnlyArray<AbsolutePath>.Empty);
+
+                string errorString = null;
+                SandboxedProcessPipExecutionResult result = await RunProcessAsync(
+                    pathTable,
+                    ignoreSetFileInformationByHandle: false,
+                    ignoreZwRenameFileInformation: false,
+                    ignoreZwOtherFileInformation: false,
+                    unexpectedFileAccessesAreErrors: false,
+                    monitorNtCreate: true,
+                    ignoreReparsePoints: false,
+                    context: context,
+                    pip: pip,
+                    errorString: out errorString);
+
+                XAssert.IsFalse(File.Exists(firstTestFile));
+
+                VerifyFileAccesses(
+                    context,
+                    result.AllReportedFileAccesses,
+                    new[]
+                    {
+                        (createdInputPaths[firstTestFile], RequestedAccess.Write, FileAccessStatus.Denied),
+                    });
+
+                bool zwFunction =
+                    string.Equals(functionName, "CallDetouredZwSetFileDispositionByHandle")
+                    || string.Equals(functionName, "CallDetouredZwSetFileDispositionByHandleEx");
+
+                ReportedFileOperation op = zwFunction
+                    ? ReportedFileOperation.ZwSetDispositionInformationFile
+                    : ReportedFileOperation.SetFileInformationByHandleSource;
+
+                bool foundDelete = false;
+                foreach (var rfa in result.AllReportedFileAccesses)
+                {
+                    var path = !string.IsNullOrEmpty(rfa.Path) ? AbsolutePath.Create(context.PathTable, rfa.Path) : rfa.ManifestPath;
+                    if (path == createdInputPaths[firstTestFile]
+                        && rfa.DesiredAccess == DesiredAccess.DELETE
+                        && rfa.Operation == op)
+                    {
+                        foundDelete = true;
+                        break;
+                    }
+                }
+
+                XAssert.IsTrue(foundDelete);
+            }
+        }
+        
         [TheoryIfSupported(requiresSymlinkPermission: true)]
         [InlineData(true)]
         [InlineData(false)]
@@ -861,7 +999,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -984,7 +1122,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -1071,7 +1209,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -1160,7 +1298,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -1364,7 +1502,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -1418,7 +1556,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -1472,7 +1610,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -1526,7 +1664,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -1574,7 +1712,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -1599,7 +1737,7 @@ namespace Test.BuildXL.Processes.Detours
                     {
                         UnexpectedFileAccessesAreErrors = true,
                         IgnoreReparsePoints = false,
-                        IgnoreFullSymlinkResolving = true,
+                        IgnoreFullReparsePointResolving = true,
                         IgnoreSetFileInformationByHandle = false,
                         IgnoreZwRenameFileInformation = false,
                         IgnoreZwOtherFileInformation = false,
@@ -1645,7 +1783,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -1695,7 +1833,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -1867,7 +2005,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -1979,7 +2117,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -2090,7 +2228,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -2190,7 +2328,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
 
@@ -2303,7 +2441,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 string currentCodeFolder = Path.GetDirectoryName(AssemblyHelper.GetAssemblyLocation(Assembly.GetExecutingAssembly()));
                 Contract.Assume(currentCodeFolder != null);
                 List<AbsolutePath> untrackedPaths = new List<AbsolutePath>();
@@ -2418,7 +2556,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -2472,7 +2610,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -2528,7 +2666,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -2583,7 +2721,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -2824,7 +2962,9 @@ namespace Test.BuildXL.Processes.Detours
         [Theory]
         [InlineData("CallDetouredMoveFileExWForRenamingDirectory")]
         [InlineData("CallDetouredSetFileInformationByHandleForRenamingDirectory")]
-        [InlineData("CallDetouredZwSetFileInformationByHandleForRenamingDirectory")]
+        [InlineData("CallDetouredZwSetFileInformationByHandleExForRenamingDirectory")]
+        [InlineData("CallDetouredZwSetFileInformationByHandleByPassForRenamingDirectory")]
+        [InlineData("CallDetouredZwSetFileInformationByHandleExByPassForRenamingDirectory")]
         public async Task CallMoveDirectoryReportSelectiveAccesses(string callArgument)
         {
             var context = BuildXLContext.CreateInstanceForTesting();
@@ -3077,7 +3217,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -3132,7 +3272,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 AbsolutePath testDirectoryAbsolutePath = tempFiles.GetDirectory(pathTable, "input");
                 AbsolutePath testFilePath = tempFiles.GetFileName(pathTable, testDirectoryAbsolutePath, "CreateSymLinkOnFiles1.txt");
                 List<AbsolutePath> testDirList = new List<AbsolutePath>();
@@ -3192,7 +3332,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 AbsolutePath testDirectoryAbsolutePath = tempFiles.GetDirectory(pathTable, "input");
                 AbsolutePath testFilePath = tempFiles.GetFileName(pathTable, testDirectoryAbsolutePath, "CreateSymLinkOnFiles1.txt");
                 List<AbsolutePath> testDirList = new List<AbsolutePath>();
@@ -3252,7 +3392,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 AbsolutePath testDirectoryAbsolutePath = tempFiles.GetDirectory(pathTable, "input");
                 AbsolutePath testFilePath = tempFiles.GetFileName(pathTable, testDirectoryAbsolutePath, "CreateSymLinkOnFiles1.txt");
                 List<AbsolutePath> testDirList = new List<AbsolutePath>();
@@ -3312,7 +3452,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 AbsolutePath testDirectoryAbsolutePath = tempFiles.GetDirectory(pathTable, "input");
                 AbsolutePath testFilePath = tempFiles.GetFileName(pathTable, testDirectoryAbsolutePath, "CreateSymLinkOnFiles1.txt");
                 List<AbsolutePath> testDirList = new List<AbsolutePath>();
@@ -3372,7 +3512,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
                 AbsolutePath testDirectoryAbsolutePath = tempFiles.GetDirectory(pathTable, "input");
                 AbsolutePath testFilePath = AbsolutePath.Create(pathTable, Path.Combine(testDirectoryAbsolutePath.ToString(pathTable), "CreateSymLinkOnFiles1.txt"));
                 DirectoryArtifact dirArt = DirectoryArtifact.CreateWithZeroPartialSealId(testFilePath);
@@ -3435,7 +3575,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -4945,7 +5085,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -5001,7 +5141,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -5060,7 +5200,7 @@ namespace Test.BuildXL.Processes.Detours
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -5125,7 +5265,7 @@ namespace Test.BuildXL.Processes.Detours
                 // In this test, the native is accessing AccessSymLinkOnDirectories1.dir\foo, such that
                 // there is a junction from AccessJunctionOnDirectories2.dir to AccessSymLinkOnDirectories1.dir,
                 // and the dependency is specified in terms of AccessJunctionOnDirectories2.dir.
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -5195,7 +5335,7 @@ namespace Test.BuildXL.Processes.Detours
                 // In this test, the native is accessing AccessSymLinkOnDirectories1.dir\foo, such that
                 // there is a junction from AccessJunctionOnDirectories2.dir to AccessSymLinkOnDirectories1.dir,
                 // and the dependency is specified in terms of AccessJunctionOnDirectories2.dir.
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -5843,14 +5983,14 @@ namespace Test.BuildXL.Processes.Detours
                     // We access imports\x64\symlink.imports.link and imports\x64 --> icache\current\x64 is a junction.
                     // The access path imports\x64\symlink.imports.link is not resolved to icache\current\x64\symlink.imports.link.
 
-                    if (string.Equals(symlinkRelativeTarget, @"..\..\..\targets\x64\hello.txt", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(symlinkRelativeTarget, @"..\..\..\targets\x64\hello.txt", OperatingSystemHelper.PathComparison))
                     {
                         // When symlink.imports.link is replaced with '..\..\..\targets\x64\hello.txt', the resulting path is a non-existent path.
                         VerifyExecutionStatus(context, result, SandboxedProcessPipExecutionStatus.ExecutionFailed);
                         VerifyExitCode(context, result, NativeIOConstants.ErrorPathNotFound);
                         SetExpectedFailures(1, 0);
                     }
-                    else if (string.Equals(symlinkRelativeTarget, @"..\..\targets\x64\hello.txt", StringComparison.OrdinalIgnoreCase))
+                    else if (string.Equals(symlinkRelativeTarget, @"..\..\targets\x64\hello.txt", OperatingSystemHelper.PathComparison))
                     {
                         // When symlink.imports.link is replaced with '..\..\targets\x64\hello.txt', the resulting path is 'target\x64\hello.txt', which is an existing path.
                         VerifyNormalSuccess(context, result);
@@ -5873,7 +6013,7 @@ namespace Test.BuildXL.Processes.Detours
                     // We access imports\x64\symlink.imports.link and imports\x64 --> icache\current\x64 is a directory symlink.
                     // The accessed path imports\x64\symlink.imports.link will be resolved first to icache\current\x64\symlink.imports.link before
                     // symlink.import.link is replaced by the relative target. That is for directory symlink, Windows use the target path for resolution.
-                    if (string.Equals(symlinkRelativeTarget, @"..\..\..\targets\x64\hello.txt", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(symlinkRelativeTarget, @"..\..\..\targets\x64\hello.txt", OperatingSystemHelper.PathComparison))
                     {
                         VerifyNormalSuccess(context, result);
 
@@ -5889,7 +6029,7 @@ namespace Test.BuildXL.Processes.Detours
                                 (targetFile, RequestedAccess.Read, FileAccessStatus.Allowed)
                             });
                     }
-                    else if (string.Equals(symlinkRelativeTarget, @"..\..\targets\x64\hello.txt", StringComparison.OrdinalIgnoreCase))
+                    else if (string.Equals(symlinkRelativeTarget, @"..\..\targets\x64\hello.txt", OperatingSystemHelper.PathComparison))
                     {
                         // When symlink.imports.link is replaced with '..\..\targets\x64\hello.txt', the resulting path is a non-existent path.
                         VerifyExecutionStatus(context, result, SandboxedProcessPipExecutionStatus.ExecutionFailed);
@@ -6235,6 +6375,104 @@ namespace Test.BuildXL.Processes.Detours
             }
         }
 
+        [FactIfSupported(requiresSymlinkPermission: true)]
+        public async Task ProbeDirectorySymlinkWithFullResolvingEnabledAsync()
+        {
+            var context = BuildXLContext.CreateInstanceForTesting();
+            var pathTable = context.PathTable;
+
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
+            {
+                var targetDirectory = tempFiles.GetDirectory(pathTable, @"target");
+                var directoryLink = tempFiles.GetFileName("directory.lnk");
+                XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(directoryLink, targetDirectory.ToString(pathTable), isTargetFile: false));
+
+                var process = CreateDetourProcess(
+                    context,
+                    pathTable,
+                    tempFiles,
+                    argumentStr: "CallProbeDirectorySymlink",
+                    inputFiles: ReadOnlyArray<FileArtifact>.FromWithoutCopy(new FileArtifact[] { FileArtifact.CreateSourceFile(AbsolutePath.Create(pathTable, directoryLink)) }),
+                    inputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    outputFiles: ReadOnlyArray<FileArtifactWithAttributes>.Empty,
+                    outputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    untrackedScopes: ReadOnlyArray<AbsolutePath>.Empty);
+
+                string errorString;
+
+                SandboxedProcessPipExecutionResult result = await RunProcessAsync(
+                    pathTable: pathTable,
+                    ignoreSetFileInformationByHandle: false,
+                    ignoreZwRenameFileInformation: false,
+                    monitorNtCreate: true,
+                    ignoreReparsePoints: false,
+                    context: context,
+                    pip: process,
+                    ignoreFullReparsePointResolving: false,
+                    errorString: out errorString);
+
+                VerifyNormalSuccess(context, result);
+
+                VerifyFileAccesses(context, result.AllReportedFileAccesses, new[]
+                {
+                    (AbsolutePath.Create(pathTable, directoryLink), RequestedAccess.Probe, FileAccessStatus.Allowed)
+                });
+
+                var allAccessPaths = result.AllReportedFileAccesses.Select(fa => fa.Path ?? fa.ManifestPath.ToString(pathTable));
+                XAssert.IsFalse(allAccessPaths.Any(p => p.Contains(targetDirectory.ToString(pathTable))));
+            }
+        }
+
+        [FactIfSupported(requiresSymlinkPermission: true)]
+        public async Task UseCreateFileWToOpenAReparsePointNotTheTargetWithFullResolvingEnabledAsync()
+        {
+            var context = BuildXLContext.CreateInstanceForTesting();
+            var pathTable = context.PathTable;
+
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
+            {
+                var targetDirectory = tempFiles.GetDirectory(pathTable, @"target");
+
+                var directoryLink = tempFiles.GetFileName("directory.lnk");
+                XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(directoryLink, targetDirectory.ToString(pathTable), isTargetFile: false));
+
+                var process = CreateDetourProcess(
+                    context,
+                    pathTable,
+                    tempFiles,
+                    argumentStr: "CallProbeDirectorySymlinkTargetWithReparsePointFlag",
+                    inputFiles: ReadOnlyArray<FileArtifact>.Empty,
+                    inputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    outputFiles: ReadOnlyArray<FileArtifactWithAttributes>.Empty,
+                    outputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    untrackedScopes: ReadOnlyArray<AbsolutePath>.Empty);
+
+                string errorString;
+
+                SandboxedProcessPipExecutionResult result = await RunProcessAsync(
+                    pathTable: pathTable,
+                    ignoreSetFileInformationByHandle: false,
+                    ignoreZwRenameFileInformation: false,
+                    monitorNtCreate: true,
+                    ignoreReparsePoints: false,
+                    context: context,
+                    pip: process,
+                    ignoreFullReparsePointResolving: false,
+                    unexpectedFileAccessesAreErrors: false,
+                    errorString: out errorString);
+
+                VerifyNormalSuccess(context, result);
+
+                VerifyFileAccesses(context, result.AllReportedFileAccesses, new[]
+                {
+                    (AbsolutePath.Create(pathTable, directoryLink), RequestedAccess.Probe, FileAccessStatus.Allowed)
+                });
+
+                var allAccessPaths = result.AllReportedFileAccesses.Select(fa => fa.Path ?? fa.ManifestPath.ToString(pathTable));
+                XAssert.IsFalse(allAccessPaths.Any(p => p.Contains(targetDirectory.ToString(pathTable))));
+            }
+        }
+
         [TheoryIfSupported(requiresSymlinkPermission: true)]
         [MemberData(nameof(TruthTable.GetTable), 3, MemberType = typeof(TruthTable))]
         public async Task ProbeDirectorySymlinkTarget(bool targetExists, bool withReparsePointFlag, bool probeDirectorySymlinkAsDirectory)
@@ -6302,7 +6540,7 @@ namespace Test.BuildXL.Processes.Detours
                     else
                     {
                         // Probe should succeed because the directory symlink exists, regardless the existence of its target.
-                        // However, since the probe is treated a existing file probe, we should get access denied.
+                        // However, since the probe is treated as existing file probe, we should get access denied.
                         VerifyAccessDenied(context, result);
                         VerifyFileAccesses(
                             context,
@@ -6553,7 +6791,7 @@ namespace Test.BuildXL.Processes.Detours
             var pathTable = context.PathTable;
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
             {
-                var createdInputPaths = new Dictionary<string, AbsolutePath>(StringComparer.OrdinalIgnoreCase);
+                var createdInputPaths = new Dictionary<string, AbsolutePath>(OperatingSystemHelper.PathComparer);
 
                 var pip = SetupDetoursTests(
                     context,
@@ -6663,43 +6901,33 @@ namespace Test.BuildXL.Processes.Detours
                 m_accumulator = acc;
             }
 
-            public override void HandleFileAccess(long pipId, string pipDescription, 
-                ReportedFileOperation operation, RequestedAccess requestedAccess, 
-                FileAccessStatus status, bool explicitlyReported, 
-                uint processId, uint error,
-                DesiredAccess desiredAccess, ShareMode shareMode, 
-                CreationDisposition creationDisposition, FlagsAndAttributes flagsAndAttributes, 
-                string path, string processArgs, bool isAnAugmentedFileAccess)
+            public override void HandleFileAccess(FileAccessData fileAccessData)
             {
                 var reportedAccess = new ReportedFileAccess(
-                    operation,
+                    fileAccessData.Operation,
                     new ReportedProcess(1, m_executable.ToString(m_context.PathTable)),
-                    requestedAccess,
-                    status,
-                    explicitlyReported,
-                    error,
+                    fileAccessData.RequestedAccess,
+                    fileAccessData.Status,
+                    fileAccessData.ExplicitlyReported,
+                    fileAccessData.Error,
                     new Usn(0),
-                    desiredAccess,
-                    shareMode,
-                    creationDisposition,
-                    flagsAndAttributes,
+                    fileAccessData.DesiredAccess,
+                    fileAccessData.ShareMode,
+                    fileAccessData.CreationDisposition,
+                    fileAccessData.FlagsAndAttributes,
                     m_executable,
-                    path,
+                    fileAccessData.Path,
                     "",
                     FileAccessStatusMethod.PolicyBased);
 
                 m_accumulator?.Invoke(reportedAccess);
             }
 
-            public override void HandleDebugMessage(long pipId, string pipDescription, string debugMessage) { }
+            public override void HandleDebugMessage(DebugData debugData) { }
 
-            public override void HandleProcessData(long pipId, string pipDescription, 
-                string processName, uint processId, 
-                DateTime creationDateTime, DateTime exitDateTime, 
-                TimeSpan kernelTime, TimeSpan userTime,
-                uint exitCode, IOCounters ioCounters, uint parentProcessId) { }
+            public override void HandleProcessData(ProcessData processData) { }
 
-            public override void HandleProcessDetouringStatus(ProcessDetouringStatusData data) { }
+            public override void HandleProcessDetouringStatus(ProcessDetouringStatusData processDetouringStatusData) { }
         };
 
         [FactIfSupported(requiresSymlinkPermission: true)]
@@ -6709,7 +6937,7 @@ namespace Test.BuildXL.Processes.Detours
             var pathTable = context.PathTable;
 
             using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
-            {               
+            {
                 var targetDirectory = tempFiles.GetDirectory(pathTable, "SourceDirectory");
                 var targetDirectoryArtifact = CreateDirectory(pathTable, targetDirectory);
                 var expandedDirectoryPath = targetDirectory.Expand(pathTable).ToString();
@@ -6753,7 +6981,7 @@ namespace Test.BuildXL.Processes.Detours
                     pip: process,
                     errorString: out errorString,
                     unexpectedFileAccessesAreErrors: false,
-                    ignoreFullSymlinkResolving: false,
+                    ignoreFullReparsePointResolving: false,
                     detoursListener: accumulator);
 
                 VerifyNormalSuccess(context, result);
@@ -6762,8 +6990,8 @@ namespace Test.BuildXL.Processes.Detours
                 VerifyFileAccesses(context, result.AllReportedFileAccesses, new[]
                 {
                     // Uncached initial ReparsePointTarget reports
-                    (firstDirectorySymlink, RequestedAccess.Write, FileAccessStatus.Allowed, new ReportedFileOperation?(ReportedFileOperation.ReparsePointTarget)),
-                    (secondDirectorySymlink, RequestedAccess.Write, FileAccessStatus.Allowed, new ReportedFileOperation?(ReportedFileOperation.ReparsePointTarget)),
+                    (firstDirectorySymlink, RequestedAccess.Read, FileAccessStatus.Allowed, new ReportedFileOperation?(ReportedFileOperation.ReparsePointTarget)),
+                    (secondDirectorySymlink, RequestedAccess.Read, FileAccessStatus.Allowed, new ReportedFileOperation?(ReportedFileOperation.ReparsePointTarget)),
                     (outputFile, RequestedAccess.Write, FileAccessStatus.Allowed, new ReportedFileOperation?(ReportedFileOperation.ReparsePointTarget)),
 
                     // ResolvedPathCache reports ReparsePointTargetCached reports
@@ -6780,6 +7008,81 @@ namespace Test.BuildXL.Processes.Detours
                 // Assert we have three ReparsePointTargetCached reports, those get reported once the process tries to read the output file through the symbolic link chain and resolving
                 // does not need to happen again, as the cache is populated
                 XAssert.IsTrue(directlyReportedFileAccesses.Where(report => report.Operation == ReportedFileOperation.ReparsePointTargetCached).Count() == 3);
+            }
+        }
+
+        [FactIfSupported(requiresSymlinkPermission: true)]
+        public async Task CallDetoursValidateResolvedReparsePointAccesses()
+        {
+            var context = BuildXLContext.CreateInstanceForTesting();
+            var pathTable = context.PathTable;
+
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true, rootPath: TemporaryDirectory))
+            {
+                var targetDirectory = tempFiles.GetDirectory(pathTable, "TargetDirectory");
+                var targetDirectoryArtifact = CreateDirectory(pathTable, targetDirectory);
+                var expandedDirectoryPath = targetDirectory.Expand(pathTable).ToString();
+
+                var outputFile = tempFiles.GetFileName(pathTable, "TargetDirectory\\output.txt");
+                var outputArtifact = FileArtifact.CreateSourceFile(outputFile);
+                var outputPath = outputArtifact.Path.ToString(pathTable);
+
+                if (File.Exists(outputPath))
+                {
+                    ExceptionUtilities.HandleRecoverableIOException(() => File.Delete(outputPath), exception => { });
+                }
+
+                File.WriteAllText(outputPath, "Some content");
+
+                var anotherDirectory = tempFiles.GetDirectory(pathTable, "AnotherDirectory");
+                var anotherDirectoryArtifact = CreateDirectory(pathTable, anotherDirectory);
+                var anotherExpandedDirectoryPath = anotherDirectory.Expand(pathTable).ToString();
+
+                var directorySymlink = tempFiles.GetFileName(anotherExpandedDirectoryPath, "Target_DirectorySymlink");
+                var directorySymlinkAbsolutePath = AbsolutePath.Create(pathTable, directorySymlink);
+
+                var fileSymlink = tempFiles.GetFileName(expandedDirectoryPath, "symlink.txt");
+                var fileSymlinkAbsolutePath = AbsolutePath.Create(pathTable, fileSymlink);
+
+                XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(directorySymlink, $"..{Path.DirectorySeparatorChar}{Path.GetFileName(expandedDirectoryPath)}", false));
+                XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(fileSymlink, outputPath, true));
+
+                var process = CreateDetourProcess(
+                    context,
+                    pathTable,
+                    tempFiles,
+                    argumentStr: "CallValidateFileSymlinkAccesses",
+                    inputFiles: ReadOnlyArray<FileArtifact>.FromWithoutCopy(new FileArtifact[] { FileArtifact.CreateSourceFile(directorySymlinkAbsolutePath), FileArtifact.CreateSourceFile(fileSymlinkAbsolutePath) }),
+                    inputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    outputFiles: ReadOnlyArray<FileArtifactWithAttributes>.Empty,
+                    outputDirectories: ReadOnlyArray<DirectoryArtifact>.Empty,
+                    untrackedScopes: ReadOnlyArray<AbsolutePath>.Empty);
+
+                string errorString = null;
+                SandboxedProcessPipExecutionResult result = await RunProcessAsync(
+                    pathTable: pathTable,
+                    ignoreSetFileInformationByHandle: false,
+                    ignoreZwRenameFileInformation: false,
+                    monitorNtCreate: true,
+                    ignoreReparsePoints: false,
+                    disableDetours: false,
+                    context: context,
+                    pip: process,
+                    errorString: out errorString,
+                    unexpectedFileAccessesAreErrors: false,
+                    ignoreFullReparsePointResolving: false);
+
+                VerifyNormalSuccess(context, result);
+
+                VerifyFileAccesses(context, result.AllReportedFileAccesses, new[]
+                {
+                    // Intermediate directory symbolic links are always reported with Read access only
+                    (directorySymlinkAbsolutePath, RequestedAccess.Read, FileAccessStatus.Allowed),
+                    // Make sure that both the output file and the symbolic file pointing to it have the same RequestedAccess
+                    // as specified in the native 'CallValidateFileSymlinkAccesses()' test harness
+                    (fileSymlinkAbsolutePath, RequestedAccess.ReadWrite, FileAccessStatus.Denied),
+                    (outputFile, RequestedAccess.ReadWrite, FileAccessStatus.Denied)
+                });
             }
         }
 
@@ -6915,9 +7218,10 @@ namespace Test.BuildXL.Processes.Detours
                         if (observation.Item4.HasValue)
                         {
                             operationDoesMatch = pathSpecificAccess.Operation == observation.Item4.Value;
+                            if (!operationDoesMatch) continue; // Look at all available operations to find a match
                         }
 
-                        foundExpectedAccess = true && operationDoesMatch;
+                        foundExpectedAccess = true;
                         break;
                     }
                 }
@@ -7002,7 +7306,7 @@ namespace Test.BuildXL.Processes.Detours
             IReadOnlyList<ReportedFileAccess> reportedFileAccesses,
             string[] executableNames)
         {
-            var executableNameSet = new HashSet<string>(executableNames, StringComparer.OrdinalIgnoreCase);
+            var executableNameSet = new HashSet<string>(executableNames, OperatingSystemHelper.PathComparer);
             var reportedProcessCreations = reportedFileAccesses
                 .Where(rfa => rfa.Operation == ReportedFileOperation.CreateProcess)
                 .Select(rfa => !string.IsNullOrEmpty(rfa.Path) ? AbsolutePath.Create(context.PathTable, rfa.Path) : rfa.ManifestPath)

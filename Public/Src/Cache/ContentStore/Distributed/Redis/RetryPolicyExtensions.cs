@@ -13,22 +13,22 @@ using Microsoft.Practices.TransientFaultHandling;
 
 namespace BuildXL.Cache.ContentStore.Distributed.Redis
 {
-    internal static class RetryPolicyExtensions
+    /// <summary>
+    /// Set of extension methods for <see cref="RetryPolicy"/>.
+    /// </summary>
+    public static class RetryPolicyExtensions
     {
+        /// <summary>
+        /// Execute a given <paramref name="func"/> func and trace transient failures.
+        /// </summary>
         public static async Task ExecuteAsync(
             this RetryPolicy policy,
             Context context,
             Func<Task> func,
             CancellationToken token,
-            bool traceFailure,
+            string? databaseName,
             [CallerMemberName] string? caller = null)
         {
-            if (!traceFailure)
-            {
-                await policy.ExecuteAsync(func, token);
-                return;
-            }
-
             await policy.ExecuteAsync(
                 context,
                 async () =>
@@ -37,37 +37,43 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
                     return true;
                 },
                 token,
-                traceFailure: true,
+                databaseName: databaseName,
                 caller);
         }
 
+        /// <summary>
+        /// Execute a given <paramref name="func"/> func and trace transient failures.
+        /// </summary>
         public static async Task<T> ExecuteAsync<T>(
             this RetryPolicy policy,
             Context context,
             Func<Task<T>> func,
             CancellationToken token,
-            bool traceFailure,
             string? databaseName,
             [CallerMemberName] string? caller = null)
         {
-            if (!traceFailure)
-            {
-                return await policy.ExecuteAsync(func, token);
-            }
-
-            try
-            {
-                return await func();
-            }
-            catch (Exception e)
+            int attempt = 0;
+            Func<Task<T>> outerFunc = async () =>
             {
                 string databaseText = string.IsNullOrEmpty(databaseName) ? string.Empty : $" against '{databaseName}'";
-                // Intentionally tracing only message, because if the issue is transient, its not very important to see the full stack trace (we never seen them before)
-                // and if the issue is not transient, then the client of this class is responsible for properly tracing the full stack trace.
-                context.Debug($"Redis operation '{caller}'{databaseText} failed: {e.Message}.");
-                ExceptionDispatchInfo.Capture(e).Throw();
-                throw; // unreachable
-            }
+                try
+                {
+                    attempt++;
+
+                    var result = await func();
+                    return result;
+                }
+                catch (Exception e)
+                {
+                    // Intentionally tracing only message, because if the issue is transient, its not very important to see the full stack trace (we never seen them before)
+                    // and if the issue is not transient, then the client of this class is responsible for properly tracing the full stack trace.
+                    context.Debug($"RetryPolicy.ExecuteAsync: attempt #{attempt}, Redis operation '{caller}'{databaseText} failed with: {e.Message}.");
+                    ExceptionDispatchInfo.Capture(e).Throw();
+                    throw; // unreachable
+                }
+            };
+
+            return await policy.ExecuteAsync(outerFunc, token);
         }
     }
 }

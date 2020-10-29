@@ -54,7 +54,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
     internal sealed class ManagedChunkerNonDeterministic : INonDeterministicChunker
     {
         public ChunkerConfiguration Configuration { get; }
-        private readonly SHA512Managed _shaHasher = new SHA512Managed();
+        private readonly SHA512 _shaHasher = new SHA512CryptoServiceProvider();
 
         public ManagedChunkerNonDeterministic(ChunkerConfiguration configuration)
         {
@@ -97,14 +97,11 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
             private void ChunkTranslate(DedupBasicChunkInfo chunk)
             {
-                if (chunk.m_nStartChunk == 0 && chunk.m_nChunkLength == 0)
-                {
-                    return;
-                }
-
                 Contract.Assert(_currentBuffer != null);
+                Contract.Assert(chunk.m_nChunkLength != 0);
+                Contract.Assert(_currentBuffer.Value.Array != null);
 
-                byte[] hash = _parent._shaHasher.ComputeHash(
+               byte[] hash = _parent._shaHasher.ComputeHash(
                     _currentBuffer.Value.Array,
                     _currentBuffer.Value.Offset + (int)chunk.m_nStartChunk,
                     (int)chunk.m_nChunkLength);

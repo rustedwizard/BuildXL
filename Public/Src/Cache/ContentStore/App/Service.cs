@@ -13,6 +13,7 @@ using BuildXL.Cache.ContentStore.Service;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Utils;
 using CLAP;
+using BuildXL.Cache.ContentStore.Distributed.Utilities;
 #if !NET_FRAMEWORK
 using BuildXL.Cache.Host.Configuration;
 using BuildXL.Cache.Host.Service;
@@ -30,6 +31,7 @@ namespace BuildXL.Cache.ContentStore.App
             "Number of seconds to give clients to disconnect before connections are closed hard";
 
         private const string GrpcPortDescription = "The port number for spinning up a service with GRPC";
+        private const string RemoteGrpcPortDescription = "The port number for contacting a backing cache service";
 
         /// <summary>
         ///     Run the service verb.
@@ -43,13 +45,20 @@ namespace BuildXL.Cache.ContentStore.App
             [Description("Cache root paths")] string[] paths,
             [DefaultValue(DefaultMaxConnections), Description(MaxConnectionsDescription)] uint maxConnections,
             [DefaultValue(DefaultGracefulShutdownSeconds), Description(GracefulShutdownSecondsDescription)] uint gracefulShutdownSeconds,
-            [DefaultValue(ServiceConfiguration.GrpcDisabledPort), Description(GrpcPortDescription)] int grpcPort,
+            [DefaultValue(ServiceConfiguration.GrpcDisabledPort), Description(GrpcPortDescription)] uint grpcPort,
             [Description("Name of the memory mapped file used to share GRPC port. 'CASaaS GRPC port' if not specified.")] string grpcPortFileName,
             [DefaultValue(null), Description("Writable directory for service operations (use CWD if null)")] string dataRootPath,
             [DefaultValue(null), Description("Duration of inactivity after which a session will be timed out.")] double? unusedSessionTimeoutSeconds,
             [DefaultValue(null), Description("Duration of inactivity after which a session with a heartbeat will be timed out.")] double? unusedSessionHeartbeatTimeoutSeconds,
             [DefaultValue(false), Description("Stop running service")] bool stop,
-            [DefaultValue(Constants.OneMB), Description("Max size quota in MB")] int maxSizeQuotaMB
+            [DefaultValue(Constants.OneMB), Description("Max size quota in MB")] int maxSizeQuotaMB,
+            [DefaultValue(ServiceConfiguration.GrpcDisabledPort), Description(RemoteGrpcPortDescription)] uint backingGrpcPort,
+            [DefaultValue(null), Description("Name of scenario for backing CAS service")] string backingScenario,
+            [DefaultValue("None"), Description("Ring Id. Used only for telemetry.")] string ringId,
+            [DefaultValue("None"), Description("Stamp Id. Used only for telemetry.")] string stampId,
+            [DefaultValue(null), Description("nLog configuration path. If empty, it is disabled")] string nLogConfigurationPath,
+            [DefaultValue(null), Description("Whether to use Azure Blob logging or not")] string nLogToBlobStorageSecretName,
+            [DefaultValue(null), Description("If using Azure Blob logging, where to temporarily store logs")] string nLogToBlobStorageWorkspacePath
             )
         {
             Initialize();
@@ -84,7 +93,7 @@ namespace BuildXL.Cache.ContentStore.App
             var cancellationTokenSource = new CancellationTokenSource();
 
 #if NET_FRAMEWORK
-            var configuration = new ServiceConfiguration(caches, serverDataRootPath, maxConnections, gracefulShutdownSeconds, grpcPort, grpcPortFileName);
+            var configuration = new ServiceConfiguration(caches, serverDataRootPath, maxConnections, gracefulShutdownSeconds, (int)grpcPort, grpcPortFileName);
             if (!configuration.IsValid)
             {
                 throw new CacheException($"Invalid service configuration, error=[{configuration.Error}]");
@@ -159,26 +168,48 @@ namespace BuildXL.Cache.ContentStore.App
                 args.Cancel = true;
             };
 
-            var localCasSettings = LocalCasSettings.Default(maxSizeQuotaMB, serverDataRootPath.Path, names[0], (uint)grpcPort);
+            var localCasSettings = LocalCasSettings.Default(maxSizeQuotaMB, serverDataRootPath.Path, names[0], grpcPort, grpcPortFileName);
+            localCasSettings.ServiceSettings.ScenarioName = _scenario;
 
             var distributedContentSettings = DistributedContentSettings.CreateDisabled();
+            if (backingGrpcPort != ServiceConfiguration.GrpcDisabledPort)
+            {
+                distributedContentSettings.BackingGrpcPort = (int)backingGrpcPort;
+                distributedContentSettings.BackingScenario = backingScenario;
+            }
 
-            var distributedCacheServiceConfiguration = new DistributedCacheServiceConfiguration(localCasSettings, distributedContentSettings);
+            LoggingSettings loggingSettings = null;
+            if (!string.IsNullOrEmpty(nLogConfigurationPath))
+            {
+                loggingSettings = new LoggingSettings()
+                {
+                    NLogConfigurationPath = nLogConfigurationPath,
+                    Configuration = new AzureBlobStorageLogPublicConfiguration()
+                    {
+                        SecretName = nLogToBlobStorageSecretName,
+                        WorkspaceFolderPath = nLogToBlobStorageWorkspacePath,
+                    }
+                };
+            }
+
+            var distributedCacheServiceConfiguration = new DistributedCacheServiceConfiguration(localCasSettings, distributedContentSettings, loggingSettings);
 
             // Ensure the computed keyspace is computed based on the hostInfo's StampId
             distributedCacheServiceConfiguration.UseStampBasedIsolation = false;
 
             var distributedCacheServiceArguments = new DistributedCacheServiceArguments(
                 logger: _logger,
-                copier: null,
-                pathTransformer: null,
+                copier: new DistributedCopier(),
                 copyRequester: null,
                 host: new EnvironmentVariableHost(),
                 hostInfo: new HostInfo(null, null, new List<string>()),
                 cancellation: cancellationTokenSource.Token,
                 dataRootPath: serverDataRootPath.Path,
                 configuration: distributedCacheServiceConfiguration,
-                keyspace: null);
+                keyspace: null)
+            {
+                TelemetryFieldsProvider = new TelemetryFieldsProvider(ringId, stampId, serviceName: "Service"),
+            };
 
             DistributedCacheServiceFacade.RunAsync(distributedCacheServiceArguments).GetAwaiter().GetResult();
 

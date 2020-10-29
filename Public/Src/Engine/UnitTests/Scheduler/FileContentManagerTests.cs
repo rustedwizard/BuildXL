@@ -241,7 +241,7 @@ namespace Test.BuildXL.Scheduler
             // Report files for directory
             harness.FileContentManager.ReportDynamicDirectoryContents(
                 dynamicOutputDirectory,
-                dynamicDirectoryContents,
+                dynamicDirectoryContents.Select(fa => FileArtifactWithAttributes.Create(fa, FileExistence.Required)),
                 PipOutputOrigin.NotMaterialized);
 
             var producer = CreateCmdProcess(
@@ -280,18 +280,18 @@ namespace Test.BuildXL.Scheduler
             var directoryMaterializationResult = await harness.FileContentManager.TryMaterializeDependenciesAsync(directoryConsumer, harness.UntrackedOpContext);
             Assert.True(directoryMaterializationResult);
 
-            var filesAfterMaterialization = new HashSet<string>(Directory.GetFiles(dynamicOutputDirectory.Path.ToString(pathTable), "*.*", SearchOption.AllDirectories), StringComparer.OrdinalIgnoreCase);
+            var filesAfterMaterialization = new HashSet<string>(Directory.GetFiles(dynamicOutputDirectory.Path.ToString(pathTable), "*.*", SearchOption.AllDirectories), OperatingSystemHelper.PathComparer);
 
-            HashSet<string> dynamicDirectoryContentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> dynamicDirectoryContentPaths = new HashSet<string>(OperatingSystemHelper.PathComparer);
             dynamicDirectoryContentPaths.UnionWith(dynamicDirectoryContents.Select(f => f.Path.ToString(pathTable)));
 
             // Check that the dynamic directory contents are the only remaining files
             Assert.Subset(dynamicDirectoryContentPaths, filesAfterMaterialization);
             Assert.Superset(dynamicDirectoryContentPaths, filesAfterMaterialization);
 
-            var directoriesAfterMaterialization = new HashSet<string>(Directory.GetDirectories(dynamicOutputDirectory.Path.ToString(pathTable), "*.*", SearchOption.AllDirectories), StringComparer.OrdinalIgnoreCase);
+            var directoriesAfterMaterialization = new HashSet<string>(Directory.GetDirectories(dynamicOutputDirectory.Path.ToString(pathTable), "*.*", SearchOption.AllDirectories), OperatingSystemHelper.PathComparer);
 
-            HashSet<string> dynamicDirectorySubDirectoryPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> dynamicDirectorySubDirectoryPaths = new HashSet<string>(OperatingSystemHelper.PathComparer);
             dynamicDirectorySubDirectoryPaths.UnionWith(dynamicDirectoryContents.Select(f => f.Path.GetParent(pathTable).ToString(pathTable)));
 
             // Don't count the root directory
@@ -353,10 +353,10 @@ namespace Test.BuildXL.Scheduler
                 filesAndContentHashes,
                 onFailure: () => XAssert.Fail("TryLoadAvailableOutputContentAsync failed"),
                 onContentUnavailable:
-                    (i, s, f) =>
+                    (index, expectedHash, hashOnDiskIfAvailableOrNull, failure) =>
                         XAssert.Fail(
                             I(
-                                $"Content of '{filesAndContentHashes[i].Item1.Path.ToString(harness.PipContext.PathTable)}' with content hash '{filesAndContentHashes[i].Item2.ToHex()}' is not available")));
+                                $"Content of '{filesAndContentHashes[index].Item1.Path.ToString(harness.PipContext.PathTable)}' with content hash '{filesAndContentHashes[index].Item2.ToHex()}' is not available")));
 
             XAssert.IsTrue(loadAvailableOutput);
         }
@@ -405,17 +405,17 @@ namespace Test.BuildXL.Scheduler
                 filesAndContentHashes,
                 onFailure: () => XAssert.Fail("TryLoadAvailableOutputContentAsync failed"),
                 onContentUnavailable:
-                    (i, s, f) =>
+                    (index, expectedHash, hashOnDiskIfAvailable, failure) =>
                     {
                         if (checkFileOnDiskForUpToDate)
                         {
                             XAssert.Fail(
                                 I(
-                                    $"Content of '{filesAndContentHashes[i].fileArtifact.Path.ToString(harness.PipContext.PathTable)}' with content hash '{filesAndContentHashes[i].contentHash.ToHex()}' is not available"));
+                                    $"Content of '{filesAndContentHashes[index].fileArtifact.Path.ToString(harness.PipContext.PathTable)}' with content hash '{filesAndContentHashes[index].contentHash.ToHex()}' is not available"));
                         }
                         else
                         {
-                            XAssert.AreEqual(filesAndContentHashes[i].Item2.ToHex(), s);
+                            XAssert.AreEqual(filesAndContentHashes[index].Item2.ToHex(), expectedHash);
                         }
                     });
 

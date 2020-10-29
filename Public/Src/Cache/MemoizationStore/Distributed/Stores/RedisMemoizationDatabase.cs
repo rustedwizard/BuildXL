@@ -3,6 +3,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.ContractsLight;
+using System.Linq;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.Redis;
@@ -15,6 +17,7 @@ using BuildXL.Cache.MemoizationStore.Interfaces.Results;
 using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Cache.MemoizationStore.Stores;
 using BuildXL.Utilities;
+using StackExchange.Redis;
 
 namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
 {
@@ -27,39 +30,60 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
     /// </summary>
     internal class RedisMemoizationDatabase : MemoizationDatabase
     {
-        private readonly RedisDatabaseAdapter _redis;
+        private readonly RaidedRedisDatabase _redis;
         private readonly IClock _clock;
 
-        private readonly ObjectPool<StreamBinaryWriter> _writerPool = new ObjectPool<StreamBinaryWriter>(() => new StreamBinaryWriter(), w => w.ResetPosition());
-        private readonly ObjectPool<StreamBinaryReader> _readerPool = new ObjectPool<StreamBinaryReader>(() => new StreamBinaryReader(), r => { });
+        private readonly SerializationPool _serializationPool = new SerializationPool();
 
         private readonly TimeSpan _metadataExpiryTime;
+        private readonly TimeSpan? _slowOperationCancellationTimeout;
 
         /// <inheritdoc />
-        protected override Tracer Tracer => new Tracer(nameof(RedisMemoizationDatabase));
+        protected override Tracer Tracer { get; } = new Tracer(nameof(RedisMemoizationDatabase));
 
         private string GetKey(Fingerprint weakFingerprint) => $"WF_{weakFingerprint.Serialize()}";
 
         /// <nodoc />
         public RedisMemoizationDatabase(
-            RedisDatabaseAdapter redis,
+            RaidedRedisDatabase redis,
             IClock clock,
-            TimeSpan metadataExpiryTime
-            )
+            TimeSpan metadataExpiryTime,
+            TimeSpan? operationsTimeout,
+            TimeSpan? slowOperationCancellationTimeout)
+            : base(operationsTimeout)
         {
             _redis = redis;
             _clock = clock;
             _metadataExpiryTime = metadataExpiryTime;
+            _slowOperationCancellationTimeout = slowOperationCancellationTimeout;
+        }
+
+        /// <nodoc />
+        public RedisMemoizationDatabase(
+            RedisDatabaseAdapter primaryRedis,
+            RedisDatabaseAdapter secondaryRedis,
+            IClock clock,
+            TimeSpan metadataExpiryTime,
+            TimeSpan? operationsTimeout,
+            TimeSpan? slowOperationRedisTimeout)
+            : this(null, clock, metadataExpiryTime, operationsTimeout, slowOperationRedisTimeout)
+        {
+            _redis = new RaidedRedisDatabase(Tracer, primaryRedis, secondaryRedis);
         }
 
         /// <inheritdoc />
-        protected override async Task<Result<bool>> CompareExchangeCore(OperationContext context, StrongFingerprint strongFingerprint, string expectedReplacementToken, ContentHashListWithDeterminism expected, ContentHashListWithDeterminism replacement)
+        protected override Task<Result<bool>> CompareExchangeCore(OperationContext context, StrongFingerprint strongFingerprint, string expectedReplacementToken, ContentHashListWithDeterminism expected, ContentHashListWithDeterminism replacement)
         {
             var newReplacementToken = Guid.NewGuid().ToString();
-            return Result.Success(await CompareExchangeInternalAsync(context, strongFingerprint, expectedReplacementToken, expected, replacement, newReplacementToken));
+            return CompareExchangeInternalAsync(context, strongFingerprint, expectedReplacementToken, replacement, newReplacementToken);
         }
 
-        private Task<bool> CompareExchangeInternalAsync(OperationContext context, StrongFingerprint strongFingerprint, string expectedReplacementToken, ContentHashListWithDeterminism expected, ContentHashListWithDeterminism replacement, string newReplacementToken)
+        private async Task<Result<bool>> CompareExchangeInternalAsync(
+            OperationContext context,
+            StrongFingerprint strongFingerprint,
+            string expectedReplacementToken,
+            ContentHashListWithDeterminism replacement,
+            string newReplacementToken)
         {
             var key = GetKey(strongFingerprint.WeakFingerprint);
             var replacementMetadata = new MetadataEntry(replacement, _clock.UtcNow);
@@ -68,12 +92,42 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
             byte[] selectorBytes = SerializeSelector(strongFingerprint.Selector, isReplacementToken: false);
             byte[] tokenFieldNameBytes = SerializeSelector(strongFingerprint.Selector, isReplacementToken: true);
 
-            return _redis.ExecuteBatchAsync(context, batch =>
+            var (primaryResult, secondaryResult) = await _redis.ExecuteRaidedAsync<bool>(
+                context,
+                async (redis, cancellationToken) =>
+                {
+                    using var nestedContext = new CancellableOperationContext(context, cancellationToken);
+
+                    return await redis.ExecuteBatchAsync(
+                        nestedContext,
+                        batch =>
+                        {
+                            var task = batch.CompareExchangeAsync(
+                                key,
+                                selectorBytes,
+                                tokenFieldNameBytes,
+                                expectedReplacementToken,
+                                replacementBytes,
+                                newReplacementToken);
+                            batch.KeyExpireAsync(key, _metadataExpiryTime).FireAndForget(nestedContext);
+                            return task;
+                        },
+                        RedisOperation.CompareExchange);
+                },
+                retryWindow: _slowOperationCancellationTimeout);
+
+            Contract.Assert(primaryResult != null || secondaryResult != null);
+
+            if (primaryResult?.Succeeded == true || secondaryResult?.Succeeded == true)
             {
-                var task = batch.CompareExchangeAsync(key, selectorBytes, tokenFieldNameBytes, expectedReplacementToken, replacementBytes, newReplacementToken);
-                batch.KeyExpireAsync(key, _metadataExpiryTime).FireAndForget(context);
-                return task;
-            }, RedisOperation.CompareExchange);
+                // One of the operations is successful.
+                return (primaryResult?.Value ?? false) || (secondaryResult?.Value ?? false);
+            }
+
+            // All operations failed, propagating the error back to the caller.
+            var failure = primaryResult ?? secondaryResult;
+            Contract.Assert(!failure.Succeeded);
+            return new Result<bool>(failure);
         }
 
         /// <inheritdoc />
@@ -83,29 +137,63 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
         }
 
         /// <inheritdoc />
-        protected override async Task<Result<(ContentHashListWithDeterminism contentHashListInfo, string replacementToken)>> GetContentHashListCoreAsync(OperationContext context, StrongFingerprint strongFingerprint, bool preferShared)
+        protected override async Task<Result<(ContentHashListWithDeterminism contentHashListInfo, string replacementToken)>> GetContentHashListCoreAsync(
+            OperationContext context, StrongFingerprint strongFingerprint, bool preferShared)
         {
             var key = GetKey(strongFingerprint.WeakFingerprint);
+            byte[] selectorBytes = SerializeSelector(strongFingerprint.Selector, isReplacementToken: false);
+            byte[] replacementTokenFieldName = SerializeSelector(strongFingerprint.Selector, isReplacementToken: true);
 
-            (byte[] metadataBytes, string replacementToken) = await _redis.ExecuteBatchAsync(context,
-                async batch =>
+            var (primaryResult, secondaryResult) = await _redis.ExecuteRaidedAsync<(byte[], string)>(
+                context,
+                async (redis, cancellationToken) =>
                 {
-                    byte[] selectorBytes = SerializeSelector(strongFingerprint.Selector, isReplacementToken: false);
-                    var metadataBytesTask = batch.AddOperation(key, b => b.HashGetAsync(key, selectorBytes));
+                    using var nestedContext = new CancellableOperationContext(context, cancellationToken);
 
-                    byte[] replacementTokenFieldName = SerializeSelector(strongFingerprint.Selector, isReplacementToken: true);
-                    var replacementTokenTask = batch.AddOperation(key, b => b.HashGetAsync(key, replacementTokenFieldName));
-
-                    return ((byte[])await metadataBytesTask, (string)await replacementTokenTask);
+                    return await redis.ExecuteBatchAsync(
+                        context,
+                        async batch =>
+                        {
+                            var metadataBytesTask = batch.AddOperation(key, b => b.HashGetAsync(key, selectorBytes));
+                            var replacementTokenTask = batch.AddOperation(key, b => b.HashGetAsync(key, replacementTokenFieldName));
+                            return ((byte[])await metadataBytesTask, (string)await replacementTokenTask);
+                        },
+                        RedisOperation.GetContentHashList);
                 },
-                RedisOperation.GetContentHashList);
+                retryWindow: _slowOperationCancellationTimeout);
+            Contract.Assert(primaryResult != null || secondaryResult != null);
 
-            if (metadataBytes == null)
+            MetadataEntry? metadata = null;
+            string replacementToken = null;
+
+            if (primaryResult != null && primaryResult.Succeeded)
+            {
+                var (primaryMetadataBytes, primaryReplacementToken) = primaryResult.Value;
+                if (primaryMetadataBytes != null)
+                {
+                    metadata = DeserializeMetadataEntry(primaryMetadataBytes);
+                    replacementToken = primaryReplacementToken;
+                }
+            }
+
+            if (secondaryResult != null && secondaryResult.Succeeded)
+            {
+                var (secondaryMetadataBytes, secondaryReplacementToken) = secondaryResult.Value;
+                if (secondaryMetadataBytes != null)
+                {
+                    var secondaryMetadata = DeserializeMetadataEntry(secondaryMetadataBytes);
+                    if ((metadata?.LastAccessTimeUtc ?? DateTime.MinValue) < secondaryMetadata.LastAccessTimeUtc)
+                    {
+                        metadata = secondaryMetadata;
+                        replacementToken = secondaryReplacementToken;
+                    }
+                }
+            }
+
+            if (metadata == null)
             {
                 return new Result<(ContentHashListWithDeterminism contentHashListInfo, string replacementToken)>((default, string.Empty));
             }
-
-            var metadata = DeserializeMetadataEntry(metadataBytes);
 
             // Update the time, only if no one else has changed it in the mean time. We don't
             // really care if this succeeds or not, because if it doesn't it only means someone
@@ -114,11 +202,10 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
                 context,
                 strongFingerprint,
                 replacementToken,
-                metadata.ContentHashListWithDeterminism,
-                metadata.ContentHashListWithDeterminism,
-                replacementToken);
+                metadata.Value.ContentHashListWithDeterminism,
+                replacementToken).IgnoreFailure();
 
-            return new Result<(ContentHashListWithDeterminism, string)>((metadata.ContentHashListWithDeterminism, replacementToken));
+            return new Result<(ContentHashListWithDeterminism, string)>((metadata.Value.ContentHashListWithDeterminism, replacementToken));
         }
 
         /// <inheritdoc />
@@ -126,12 +213,27 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
         {
             var weakFingerprintKey = GetKey(weakFingerprint);
 
-            var redisValues = await _redis.GetHashKeysAsync(context, weakFingerprintKey, context.Token);
-
-            var result = new List<Selector>(redisValues.Length / 2);
-            for (var i = 0; i < redisValues.Length; i++)
+            var (primaryResult, secondaryResult) = await _redis.ExecuteRaidedAsync<RedisValue[]>(context, async (redis, cancellationToken) =>
             {
-                byte[] selectorBytes = redisValues[i];
+                using var nestedContext = new CancellableOperationContext(context, cancellationToken);
+                return await redis.GetHashKeysAsync(nestedContext, weakFingerprintKey, nestedContext.Context.Token);
+            }, retryWindow: null);
+            Contract.Assert(primaryResult != null || secondaryResult != null);
+
+            IEnumerable<RedisValue> enumerable = Array.Empty<RedisValue>();
+            if (primaryResult != null && primaryResult.Succeeded)
+            {
+                enumerable = enumerable.Concat(primaryResult.Value);
+            }
+
+            if (secondaryResult != null && secondaryResult.Succeeded)
+            {
+                enumerable = enumerable.Concat(secondaryResult.Value);
+            }
+
+            var result = new HashSet<Selector>();
+            foreach (var selectorBytes in enumerable)
+            {
                 var (selector, isReplacementToken) = DeserializeSelector(selectorBytes);
 
                 if (!isReplacementToken)
@@ -140,60 +242,36 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
                 }
             }
 
-            return LevelSelectors.Single<List<Selector>>(result);
-        }
-
-        private Fingerprint DeserializeKey(string key)
-        {
-            if (Fingerprint.TryParse(key.Substring(3), out var weakFingerprint))
-            {
-                return weakFingerprint;
-            }
-            return default;
+            return LevelSelectors.Single<List<Selector>>(result.ToList());
         }
 
         private (Selector, bool isReplacementToken) DeserializeSelector(byte[] selectorBytes)
         {
-            using (var pooledReader = _readerPool.GetInstance())
+            return _serializationPool.Deserialize(selectorBytes, reader =>
             {
-                var reader = pooledReader.Instance;
-                return reader.Deserialize(new ArraySegment<byte>(selectorBytes), reader =>
-                {
-                    var isReplacementToken = reader.ReadBoolean();
-                    var selector = Selector.Deserialize(reader);
-                    return (selector, isReplacementToken);
-                });
-            }
+                var isReplacementToken = reader.ReadBoolean();
+                var selector = Selector.Deserialize(reader);
+                return (selector, isReplacementToken);
+            });
         }
 
         private byte[] SerializeSelector(Selector selector, bool isReplacementToken)
         {
-            using (var pooledWriter = _writerPool.GetInstance())
+            return _serializationPool.Serialize(selector, isReplacementToken, (isReplacementToken, selector, writer) =>
             {
-                var writer = pooledWriter.Instance.Writer;
                 writer.Write(isReplacementToken);
                 selector.Serialize(writer);
-                return pooledWriter.Instance.Buffer.ToArray();
-            }
+            });
         }
 
         private byte[] SerializeMetadataEntry(MetadataEntry metadata)
         {
-            using (var pooledWriter = _writerPool.GetInstance())
-            {
-                var writer = pooledWriter.Instance.Writer;
-                metadata.Serialize(writer);
-                return pooledWriter.Instance.Buffer.ToArray();
-            }
+            return _serializationPool.Serialize(metadata, (metadata, writer) => metadata.Serialize(writer));
         }
 
         private MetadataEntry DeserializeMetadataEntry(byte[] bytes)
         {
-            using (var pooledReader = _readerPool.GetInstance())
-            {
-                var reader = pooledReader.Instance;
-                return reader.Deserialize(new ArraySegment<byte>(bytes), reader => MetadataEntry.Deserialize(reader));
-            }
+            return _serializationPool.Deserialize(bytes, reader => MetadataEntry.Deserialize(reader));
         }
     }
 }

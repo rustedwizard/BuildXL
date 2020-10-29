@@ -12,7 +12,6 @@ namespace Test {
         runTestArgs: {
             parallelGroups: categoriesToRunInParallel,
         },
-        skipTestRun: BuildXLSdk.restrictTestRunToSomeQualifiers,
         references: [
             ...addIf(BuildXLSdk.isFullFramework,
                 NetFx.System.Xml.dll,
@@ -35,6 +34,7 @@ namespace Test {
             InterfacesTest.dll,
             Interfaces.dll,
             Library.dll,
+            Grpc.dll,
             App.exe, // Tests launch the server, so this needs to be deployed.
             BuildXLSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
 
@@ -44,8 +44,7 @@ namespace Test {
         ],
         runtimeContent: [
             Library.dll,
-            importFrom("Grpc.Core").pkg,
-            importFrom("Grpc.Core.Api").pkg,
+            ...getGrpcPackages(true),
         ],
     });
 }

@@ -7,6 +7,8 @@
 
 #include "Utils.h"
 
+#pragma warning( disable : 4061 )
+
 using namespace std;
 
 _NtCreateFile GetNtCreateFile()
@@ -88,4 +90,119 @@ BOOLEAN TestCreateSymbolicLinkA(_In_ LPCSTR lpSymlinkFileName, _In_ LPCSTR lpTar
     }
 
     return res;
+}
+
+BOOL SetRenameFileByHandle(HANDLE hFile, const wstring& target)
+{
+    size_t targetLength = target.length();
+    size_t targetLengthInBytes = targetLength * sizeof(WCHAR);
+    size_t bufferSize = sizeof(FILE_RENAME_INFO) + targetLengthInBytes;
+    auto const buffer = make_unique<char[]>(bufferSize);
+    auto const fri = reinterpret_cast<PFILE_RENAME_INFO>(buffer.get());
+    fri->ReplaceIfExists = TRUE;
+    fri->FileNameLength = (ULONG)targetLengthInBytes;
+    fri->RootDirectory = nullptr;
+    wmemcpy(fri->FileName, target.c_str(), targetLength);
+
+    return SetFileInformationByHandle(
+        hFile,
+        FILE_INFO_BY_HANDLE_CLASS::FileRenameInfo,
+        fri,
+        (DWORD)bufferSize);
+}
+
+NTSTATUS ZwSetRenameFileByHandle(HANDLE hFile, LPCWSTR targetName, FILE_INFORMATION_CLASS_EXTRA fileInfoClass)
+{
+    assert(fileInfoClass == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformation
+        || fileInfoClass == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationEx
+        || fileInfoClass == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationBypassAccessCheck
+        || fileInfoClass == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationExBypassAccessCheck);
+
+    wstring target;
+    if (!TryGetNtFullPath(targetName, target))
+    {
+        return (NTSTATUS)STATUS_INVALID_HANDLE;
+    }
+
+    size_t targetLength = target.length();
+    size_t targetLengthInBytes = targetLength * sizeof(WCHAR);
+    size_t bufferSize = sizeof(FILE_RENAME_INFO) + targetLengthInBytes;
+    auto const buffer = make_unique<char[]>(bufferSize);
+    auto const fri = reinterpret_cast<PFILE_RENAME_INFO>(buffer.get());
+    fri->ReplaceIfExists = TRUE;
+    fri->FileNameLength = (ULONG)targetLengthInBytes;
+    fri->RootDirectory = nullptr;
+    wmemcpy(fri->FileName, target.c_str(), targetLength);
+
+    IO_STATUS_BLOCK ioStatusBlock;
+    return ZwSetInformationFile(
+        hFile,
+        &ioStatusBlock,
+        fri,
+        (ULONG)bufferSize,
+        (FILE_INFORMATION_CLASS)FILE_INFORMATION_CLASS_EXTRA::FileRenameInformation);
+}
+
+BOOL SetFileDispositionByHandle(HANDLE hFile, FILE_INFO_BY_HANDLE_CLASS fileInfoClass)
+{
+    LPVOID fileInfo = NULL;
+    FILE_DISPOSITION_INFO fi;
+    FILE_DISPOSITION_INFO_EX fiEx;
+    size_t bufferSize = 0;
+
+    switch (fileInfoClass)
+    {
+        case FILE_INFO_BY_HANDLE_CLASS::FileDispositionInfo:
+            bufferSize = sizeof(FILE_DISPOSITION_INFO);
+            fi.DeleteFile = TRUE;
+            fileInfo = &fi;
+            break;
+        case FILE_INFO_BY_HANDLE_CLASS::FileDispositionInfoEx:
+            bufferSize = sizeof(FILE_DISPOSITION_INFO_EX);
+            fiEx.Flags = FILE_DISPOSITION_FLAG_DELETE;
+            fileInfo = &fiEx;
+            break;
+        default:
+            assert(FALSE);
+            break;
+    }
+
+    return SetFileInformationByHandle(
+        hFile,
+        fileInfoClass,
+        fileInfo,
+        (DWORD)bufferSize);
+}
+
+NTSTATUS ZwSetFileDispositionByHandle(HANDLE hFile, FILE_INFORMATION_CLASS_EXTRA fileInfoClass)
+{
+    PVOID fileInfo = NULL;
+    FILE_DISPOSITION_INFO fi;
+    FILE_DISPOSITION_INFO_EX fiEx;
+    size_t bufferSize = 0;
+
+    switch (fileInfoClass)
+    {
+        case FILE_INFORMATION_CLASS_EXTRA::FileDispositionInformation:
+            bufferSize = sizeof(FILE_DISPOSITION_INFO);
+            fi.DeleteFile = TRUE;
+            fileInfo = &fi;
+            break;
+        case FILE_INFORMATION_CLASS_EXTRA::FileDispositionInformationEx:
+            bufferSize = sizeof(FILE_DISPOSITION_INFO_EX);
+            fiEx.Flags = FILE_DISPOSITION_FLAG_DELETE;
+            fileInfo = &fiEx;
+            break;
+        default:
+            assert(FALSE);
+            break;
+    }
+
+    IO_STATUS_BLOCK ioStatusBlock;
+    return ZwSetInformationFile(
+        hFile,
+        &ioStatusBlock,
+        fileInfo,
+        (ULONG)bufferSize,
+        (FILE_INFORMATION_CLASS)fileInfoClass);
 }

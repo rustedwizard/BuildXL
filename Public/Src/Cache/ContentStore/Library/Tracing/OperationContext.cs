@@ -59,10 +59,9 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
         /// <summary>
         /// Creates new instance with a given <see cref="CancellationToken"/> without creating nested tracing context.
         /// </summary>
-        public OperationContext WithCancellationToken(CancellationToken linkedCancellationToken)
+        public CancellableOperationContext WithCancellationToken(CancellationToken linkedCancellationToken)
         {
-            var token = CancellationTokenSource.CreateLinkedTokenSource(Token, linkedCancellationToken).Token;
-            return new OperationContext(TracingContext, token);
+            return new CancellableOperationContext(this, linkedCancellationToken);
         }
 
         /// <nodoc />
@@ -70,6 +69,20 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
         {
             var token = CancellationTokenSource.CreateLinkedTokenSource(Token, linkedCancellationToken).Token;
             return new OperationContext(new Context(TracingContext, caller), token);
+        }
+
+        /// <nodoc />
+        public async Task<T> WithTimeoutAsync<T>(Func<OperationContext, Task<T>> func, TimeSpan timeout, Func<T>? getTimeoutResult = null)
+            where T : ResultBase
+        {
+            try
+            {
+                return await PerformAsyncOperationWithTimeoutBuilder<T>.WithOptionalTimeoutAsync(func, timeout, this);
+            }
+            catch (TimeoutException) when (getTimeoutResult != null)
+            {
+                return getTimeoutResult();
+            }
         }
 
         /// <summary>
@@ -93,6 +106,18 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
         }
 
         /// <nodoc />
+        public void TraceWarning(string message)
+        {
+            TracingContext.TraceMessage(Severity.Warning, message);
+        }
+
+        /// <nodoc />
+        public void TraceError(string message)
+        {
+            TracingContext.TraceMessage(Severity.Error, message);
+        }
+
+        /// <nodoc />
         public Task<T> PerformInitializationAsync<T>(Tracer operationTracer, Func<Task<T>> operation, Counter? counter = default, Func<T, string>? endMessageFactory = null, [CallerMemberName]string? caller = null)
             where T : ResultBase
         {
@@ -100,6 +125,11 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
                 .WithOptions(counter, traceErrorsOnly: false, traceOperationStarted: false, traceOperationFinished: true, extraStartMessage: null, endMessageFactory: endMessageFactory)
                 .RunAsync(caller);
         }
+
+        /// <summary>
+        /// Track metric with a given name and a value in MDM.
+        /// </summary>
+        public void TrackMetric(string name, long value, string tracerName) => TracingContext.TrackMetric(name, value, tracerName);
 
         /// <nodoc />
         public T PerformOperation<T>(
@@ -129,12 +159,50 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
             bool traceOperationFinished = true,
             string? extraStartMessage = null,
             Func<T, string>? extraEndMessage = null,
-            TimeSpan? timeout = null,
             bool isCritical = false,
+            TimeSpan? pendingOperationTracingInterval = null,
             [CallerMemberName]string? caller = null) where T : ResultBase
         {
             return this.CreateOperation(operationTracer, operation)
-                .WithOptions(counter, traceErrorsOnly, traceOperationStarted, traceOperationFinished, extraStartMessage, extraEndMessage, isCritical: isCritical, timeout: timeout)
+                .WithOptions(
+                    counter,
+                    traceErrorsOnly,
+                    traceOperationStarted,
+                    traceOperationFinished,
+                    extraStartMessage,
+                    extraEndMessage,
+                    isCritical: isCritical,
+                    pendingOperationTracingInterval: pendingOperationTracingInterval,
+                    caller: caller)
+                .RunAsync(caller);
+        }
+
+        /// <nodoc />
+        public Task<T> PerformOperationWithTimeoutAsync<T>(
+            Tracer operationTracer,
+            Func<OperationContext, Task<T>> operation,
+            Counter? counter = default,
+            bool traceErrorsOnly = false,
+            bool traceOperationStarted = true,
+            bool traceOperationFinished = true,
+            string? extraStartMessage = null,
+            Func<T, string>? extraEndMessage = null,
+            TimeSpan? timeout = null,
+            bool isCritical = false,
+            TimeSpan? pendingOperationTracingInterval = null,
+            [CallerMemberName] string? caller = null) where T : ResultBase
+        {
+            return this.CreateOperationWithTimeout(operationTracer, operation, timeout)
+                .WithOptions(
+                    counter,
+                    traceErrorsOnly,
+                    traceOperationStarted,
+                    traceOperationFinished,
+                    extraStartMessage,
+                    extraEndMessage,
+                    isCritical: isCritical,
+                    pendingOperationTracingInterval: pendingOperationTracingInterval,
+                    caller: caller)
                 .RunAsync(caller);
         }
 
@@ -150,11 +218,10 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
             Func<T, string>? extraEndMessage = null,
             Func<T, ResultBase>? resultBaseFactory = null,
             bool isCritical = false,
-            TimeSpan? timeout = null,
             [CallerMemberName]string? caller = null)
         {
             return this.CreateNonResultOperation(operationTracer, operation, resultBaseFactory)
-                .WithOptions(counter, traceErrorsOnly, traceOperationStarted, traceOperationFinished, extraStartMessage, extraEndMessage, isCritical: isCritical, timeout: timeout)
+                .WithOptions(counter, traceErrorsOnly, traceOperationStarted, traceOperationFinished, extraStartMessage, extraEndMessage, isCritical: isCritical)
                 .RunAsync(caller);
         }
     }

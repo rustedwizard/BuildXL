@@ -418,27 +418,26 @@ namespace Test.BuildXL.Scheduler
             };
 
             var baselineFingerprint = fingerprinter.ComputeWeakFingerprint(process, out string fingerprintText);
-            fingerprintText = fingerprintText.ToUpperInvariant();
-
+            
             // Make sure the actual user profile doesn't show up in the fingerprint
-            XAssert.IsFalse(fingerprintText.Contains(userProfileDir.ToUpperInvariant()));
+            XAssert.IsFalse(fingerprintText.Contains(userProfileDir.ToCanonicalizedPath()));
 
             // Check that the paths originally containing the user profile are still there
-            XAssert.IsTrue(fingerprintText.Contains(appDataSubdirName.ToUpperInvariant()));
-            XAssert.IsTrue(fingerprintText.Contains(Path.GetFileName(Environment.GetFolderPath(Environment.SpecialFolder.InternetCache)).ToUpperInvariant()));
+            XAssert.IsTrue(fingerprintText.Contains(appDataSubdirName.ToCanonicalizedPath()));
+            XAssert.IsTrue(fingerprintText.Contains(Path.GetFileName(Environment.GetFolderPath(Environment.SpecialFolder.InternetCache)).ToCanonicalizedPath()));
 
             // Validate the JSON fingerprinter does the same
             var json = JsonFingerprinter.CreateJsonString(writer =>
             {
                 fingerprinter.AddWeakFingerprint(writer, process);
             },
-            pathTable: m_context.PathTable).ToUpperInvariant();
+            pathTable: m_context.PathTable);
             
             var fence = OperatingSystemHelper.IsUnixOS ? "\"" : "";
-            XAssert.IsFalse(json.Contains($"{fence}{userProfileDir.ToUpperInvariant()}{fence}"));
+            XAssert.IsFalse(json.Contains($"{fence}{userProfileDir.ToCanonicalizedPath()}{fence}"));
 
-            XAssert.IsTrue(json.Contains(appDataSubdirName.ToUpperInvariant()));
-            XAssert.IsTrue(json.Contains(Path.GetFileName(Environment.GetFolderPath(Environment.SpecialFolder.InternetCache)).ToUpperInvariant()));
+            XAssert.IsTrue(json.Contains(appDataSubdirName.ToCanonicalizedPath()));
+            XAssert.IsTrue(json.Contains(Path.GetFileName(Environment.GetFolderPath(Environment.SpecialFolder.InternetCache)).ToCanonicalizedPath()));
         }
 
         [Theory]
@@ -481,8 +480,7 @@ namespace Test.BuildXL.Scheduler
             };
 
             var contentFingerprint = fingerprinter1.ComputeWeakFingerprint(process, out string fingerprintText);
-            fingerprintText = fingerprintText.ToUpperInvariant();
-
+            
             var fingerprinter2 = new PipContentFingerprinter(
                 m_context.PathTable,
                 GetContentHashLookup(executable, contentHash2),
@@ -493,8 +491,7 @@ namespace Test.BuildXL.Scheduler
             };
 
             var contentFingerprint2 = fingerprinter2.ComputeWeakFingerprint(process, out string fingerprintText2);
-            fingerprintText2 = fingerprintText2.ToUpperInvariant();
-
+            
             XAssert.AreEqual(expectedEqualityOutcome, fingerprintText.Equals(fingerprintText2), $"fp1: '{fingerprintText}'; fp2: '{fingerprintText2}'");
             XAssert.AreEqual(expectedEqualityOutcome, contentFingerprint.Equals(contentFingerprint2));
         }
@@ -548,19 +545,18 @@ namespace Test.BuildXL.Scheduler
             };
 
             fingerprinter.ComputeWeakFingerprint(process, out string fingerprintText);
-            fingerprintText = fingerprintText.ToUpperInvariant();
 
             // Check that neither the real nor redirect user profile appears in the fingerprint
-            XAssert.IsFalse(fingerprintText.Contains(userProfile.ToUpperInvariant()));
-            XAssert.IsFalse(fingerprintText.Contains(redirectedUserProfile.ToUpperInvariant()));
+            XAssert.IsFalse(fingerprintText.Contains(userProfile.ToCanonicalizedPath()));
+            XAssert.IsFalse(fingerprintText.Contains(redirectedUserProfile.ToCanonicalizedPath()));
 
             // Check that all paths have been added
             // Note: normally, there would be no duplicates in untracked paths/scopes blocks. However, for testing purposes
             // (i.e., tokenization happens properly in both of those blocks, and for both real and redirected profiles)
             // we've intentionally added the 'same' paths twice.
-            XAssert.IsTrue(fingerprintText.IndexOf("Foo".ToUpperInvariant(), StringComparison.InvariantCulture) != fingerprintText.LastIndexOf("Foo",StringComparison.InvariantCulture));
-            XAssert.IsTrue(fingerprintText.IndexOf("INETCACHE".ToUpperInvariant(), StringComparison.InvariantCulture) != fingerprintText.LastIndexOf("INETCACHE",StringComparison.InvariantCulture));
-            XAssert.IsTrue(fingerprintText.IndexOf("HISTORY".ToUpperInvariant(), StringComparison.InvariantCulture) != fingerprintText.LastIndexOf("HISTORY",StringComparison.InvariantCulture));
+            XAssert.IsTrue(fingerprintText.IndexOf("Foo", OperatingSystemHelper.PathComparison) != fingerprintText.LastIndexOf("Foo", OperatingSystemHelper.PathComparison));
+            XAssert.IsTrue(fingerprintText.IndexOf("INETCACHE", OperatingSystemHelper.PathComparison) != fingerprintText.LastIndexOf("INETCACHE", OperatingSystemHelper.PathComparison));
+            XAssert.IsTrue(fingerprintText.IndexOf("HISTORY", OperatingSystemHelper.PathComparison) != fingerprintText.LastIndexOf("HISTORY", OperatingSystemHelper.PathComparison));
         }
 
         /// <summary>
@@ -708,7 +704,6 @@ namespace Test.BuildXL.Scheduler
             };
 
             var contentFingerprint1 = fingerprinter1.ComputeWeakFingerprint(process, out string fingerprintText1);
-            fingerprintText1 = fingerprintText1.ToUpperInvariant();
 
             // 'change' the input file => the rendering of an argument should result in a different value => should compute a different fingerprint 
             inputFileHash = FileContentInfo.CreateWithUnknownLength(ContentHashingUtilities.CreateSpecialValue(2));
@@ -723,7 +718,6 @@ namespace Test.BuildXL.Scheduler
             };
 
             var contentFingerprint2 = fingerprinter2.ComputeWeakFingerprint(process, out string fingerprintText2);
-            fingerprintText2 = fingerprintText2.ToUpperInvariant();
 
             XAssert.AreNotEqual(fingerprintText1, fingerprintText2, $"fp1: '{fingerprintText1}'; fp2: '{fingerprintText2}'");
             XAssert.AreNotEqual(contentFingerprint1, contentFingerprint2);
@@ -816,7 +810,7 @@ namespace Test.BuildXL.Scheduler
             bool allowUndeclaredSourceReads = source.Vary(p => p.AllowUndeclaredSourceReads);
             bool needsToRunInContainer = source.Vary(p => p.NeedsToRunInContainer);
             bool requiresAdmin = source.Vary(p => p.RequiresAdmin);
-            DoubleWritePolicy doubleWritePolicy = source.Vary(p => p.DoubleWritePolicy);
+            RewritePolicy doubleWritePolicy = source.Vary(p => p.RewritePolicy);
             ContainerIsolationLevel containerIsolationLevel = source.Vary(p => p.ContainerIsolationLevel);
             var uniqueRedirectedDirectoryRoot = source.Vary(p => p.UniqueRedirectedDirectoryRoot);
             var preserveOutputAllowlist = source.Vary(p => p.PreserveOutputAllowlist);
@@ -909,11 +903,12 @@ namespace Test.BuildXL.Scheduler
                 toolDescription: StringId.Invalid,
                 additionalTempDirectories: ReadOnlyArray<AbsolutePath>.Empty,
                 options: options,
-                doubleWritePolicy: doubleWritePolicy,
+                rewritePolicy: doubleWritePolicy,
                 containerIsolationLevel: containerIsolationLevel,
                 preserveOutputAllowlist: preserveOutputAllowlist,
                 changeAffectedInputListWrittenFile: changeAffectedInputListWrittenFile,
-                outputDirectoryExclusions: ReadOnlyArray<AbsolutePath>.From(source.Vary(p => p.OutputDirectoryExclusions)));
+                outputDirectoryExclusions: ReadOnlyArray<AbsolutePath>.From(source.Vary(p => p.OutputDirectoryExclusions)),
+                retryAttemptEnvironmentVariable: source.Vary(p => p.RetryAttemptEnvironmentVariable));
         }
 
         private CopyFile CreateCopyFileVariant(VariationSource<CopyFile> source)
@@ -1175,7 +1170,7 @@ namespace Test.BuildXL.Scheduler
                                     paths, 
                                     role, 
                                     fingerprinterTestKind)).ToArray()).Select(ec => ec.Cast<ReadOnlyArray<DirectoryArtifact>>())),
-                       new FingerprintingTypeDescriptor<DoubleWritePolicy>(DoubleWritePolicy.DoubleWritesAreErrors, DoubleWritePolicy.UnsafeFirstDoubleWriteWins),
+                       new FingerprintingTypeDescriptor<RewritePolicy>(RewritePolicy.DoubleWritesAreErrors, RewritePolicy.UnsafeFirstDoubleWriteWins),
                        new FingerprintingTypeDescriptor<ContainerIsolationLevel>(
                            ContainerIsolationLevel.None, 
                            ContainerIsolationLevel.IsolateSharedOpaqueOutputDirectories, 

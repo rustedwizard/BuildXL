@@ -204,7 +204,14 @@ namespace BuildXL.Scheduler.FileSystem
             {
                 var handleDirectoryEntry = new Action<string, FileAttributes>((entryName, entryAttributes) =>
                 {
-                    var childExistence = (entryAttributes & FileAttributes.Directory) != 0 ? PathExistence.ExistsAsDirectory : PathExistence.ExistsAsFile;
+                    // Reparse points are always treated as files. Otherwise, honor the directory attribute to determine 
+                    // existence
+                    var childExistence = (entryAttributes & FileAttributes.ReparsePoint) != 0 ?
+                        PathExistence.ExistsAsFile :
+                        (entryAttributes & FileAttributes.Directory) != 0 ? 
+                            PathExistence.ExistsAsDirectory : 
+                            PathExistence.ExistsAsFile;
+                    
                     var childPath = path.Combine(PathTable, entryName);
 
                     childExistence = GetOrAddExistence(childPath, mode, childExistence, updateParents: false);
@@ -225,7 +232,12 @@ namespace BuildXL.Scheduler.FileSystem
                     using (Counters.StartStopwatch(FileSystemViewCounters.RealFileSystemEnumerationsDuration))
                     {
 
-                        possibleExistence = LocalDiskFileSystem.TryEnumerateDirectoryAndTrackMembership(path, handleDirectoryEntry);
+                        possibleExistence = LocalDiskFileSystem.TryEnumerateDirectoryAndTrackMembership(
+                            path,
+                            handleDirectoryEntry,
+                            // This method is called during observed input processing. Currently, we simply include all entries.
+                            // TODO: In the future, we may want to restrict it based on pip's untracked scopes/paths.
+                            shouldIncludeEntry: null /* include all entries */);
                     }
 
                     if (possibleExistence.Succeeded)
@@ -499,9 +511,9 @@ namespace BuildXL.Scheduler.FileSystem
         /// <summary>
         /// Reports existence of path in output file system
         /// </summary>
-        public void ReportOutputFileSystemExistence(AbsolutePath path, PathExistence existence)
+        public void ReportOutputFileSystemExistence(AbsolutePath path, PathExistence existence, bool updateParents = true)
         {
-            GetOrAddExistence(path, FileSystemViewMode.Output, existence);
+            GetOrAddExistence(path, FileSystemViewMode.Output, existence, updateParents);
         }
 
         private static bool ExistsInGraphFileSystem(FileArtifact artifact, FileSystemViewMode mode)

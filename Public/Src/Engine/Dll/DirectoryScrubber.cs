@@ -57,11 +57,11 @@ namespace BuildXL.Engine
         /// </remarks>
         public static IEnumerable<string> CollapsePaths(IEnumerable<string> paths)
         {
-            paths = paths.Select(path => (path.Length > 0 && path[path.Length - 1] == Path.DirectorySeparatorChar) ? path : path + @"\").OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
+            paths = paths.Select(path => (path.Length > 0 && path[path.Length - 1] == Path.DirectorySeparatorChar) ? path : path + @"\").OrderBy(path => path, OperatingSystemHelper.PathComparer);
             string lastPath = null;
             foreach(var path in paths)
             {
-                if (lastPath == null || !path.StartsWith(lastPath, StringComparison.OrdinalIgnoreCase))
+                if (lastPath == null || !path.StartsWith(lastPath, OperatingSystemHelper.PathComparison))
                 {
                     // returned value should not have \ on end so that it matched with blockedpaths.
                     yield return path.Substring(0, path.Length - 1);
@@ -123,8 +123,8 @@ namespace BuildXL.Engine
             bool logRemovedFiles = true)
         {
             var finalPathsToScrub = CollapsePaths(pathsToScrub).ToList();
-            var finalBlockedPaths = new HashSet<string>(blockedPaths, StringComparer.OrdinalIgnoreCase);
-            var finalNonDeletableRootDirectories = new HashSet<string>(nonDeletableRootDirectories, StringComparer.OrdinalIgnoreCase);
+            var finalBlockedPaths = new HashSet<string>(blockedPaths, OperatingSystemHelper.PathComparer);
+            var finalNonDeletableRootDirectories = new HashSet<string>(nonDeletableRootDirectories, OperatingSystemHelper.PathComparer);
             if (mountPathExpander != null)
             {
                 finalNonDeletableRootDirectories.UnionWith(mountPathExpander.GetAllRoots().Select(p => p.ToString(mountPathExpander.PathTable)));
@@ -176,10 +176,9 @@ namespace BuildXL.Engine
                 dueTime: m_loggingConfiguration.GetTimerUpdatePeriodInMs(),
                 period: m_loggingConfiguration.GetTimerUpdatePeriodInMs()))
             {
-                var deletableDirectoryCandidates = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-                var nondeletableDirectories = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                var deletableDirectoryCandidates = new ConcurrentDictionary<string, bool>(OperatingSystemHelper.PathComparer);
+                var nondeletableDirectories = new ConcurrentDictionary<string, bool>(OperatingSystemHelper.PathComparer);
                 var directoriesToEnumerate = new BlockingCollection<string>();
-                var allEnumeratedDirectories = new ConcurrentBigSet<string>();
 
                 foreach (var path in pathsToScrub)
                 {
@@ -195,7 +194,6 @@ namespace BuildXL.Engine
                         if (!isPathInBuild(path))
                         {
                             directoriesToEnumerate.Add(path);
-                            allEnumeratedDirectories.Add(path);
                         }
                         else
                         {
@@ -251,20 +249,11 @@ namespace BuildXL.Engine
                                             return;
                                         }
 
-                                        string realPath = fullPath;
-                                        
-                                        // If this is a symlinked directory, get the final real target directory that it points to, so we can track duplicate work properly
-                                        var isDirectorySymlink = FileUtilities.IsDirectorySymlinkOrJunction(fullPath);
-                                        if (isDirectorySymlink &&
-                                            FileUtilities.TryGetLastReparsePointTargetInChain(handle: null, sourcePath: fullPath) is var maybeRealPath &&
-                                            maybeRealPath.Succeeded)
-                                        {
-                                            realPath = maybeRealPath.Result;
-                                        }
-
-                                        // If the current path is a directory, only follow it if we haven't followed it before (making sure we use the real path in case of symlinks)
-                                        var shouldEnumerateDirectory = (attributes & FileAttributes.Directory) == FileAttributes.Directory && !allEnumeratedDirectories.GetOrAdd(realPath).IsFound;
-                                        if (shouldEnumerateDirectory)
+                                        // Only enumerate real directories. We don't follow junctions/symlinks since if there are outputs to scrub under those
+                                        // they should also be reachable through real directories from roots BuildXL knows about. This is because we are fully
+                                        // resolving dir junctions on detours, and therefore the real paths will also be reported, and proper declarations on 
+                                        // those will be required
+                                        if (FileUtilities.IsDirectoryNoFollow(attributes))
                                         {
                                             if (nondeletableDirectories.ContainsKey(fullPath))
                                             {
@@ -296,23 +285,13 @@ namespace BuildXL.Engine
                                                 shouldDeleteCurrentDirectory = false;
                                             }
                                         }
-
                                         // On Mac directory symlinks are treated like any files, and so we must delete them if 
                                         // when they happen to be marked as shared opaque directory output.  
-                                        //
-                                        // When 'fullPath' is a directory symlink the 'if' right above this 'if' will add it to 
-                                        // 'deletableDirectoryCandidates'; there is code that deletes all directories added to this
-                                        // list but that code expects a real directory and so might fail to delete a directory symlink.
-                                        if (!shouldEnumerateDirectory || (isDirectorySymlink && OperatingSystemHelper.IsMacOS))
+                                        else if (OperatingSystemHelper.IsMacOS || !FileUtilities.IsDirectorySymlinkOrJunction(attributes))
                                         {
                                             Interlocked.Increment(ref filesEncountered);
 
-                                            // For the Windows case we never want to delete directory symlinks. Rationale: creating
-                                            // them as part of the build is not supported yet (so we should never delete them) and
-                                            // we may end up here if the content of a dir symlink is already being deleted in another thread
-                                            // (using the real path or another symlink that points to the same location) and therefore we 
-                                            // got a !shouldEnumerateDirectory because allEnumeratedDirectories.GetOrAdd(realPath) returned false
-                                            if (!isPathInBuild(fullPath) && (OperatingSystemHelper.IsMacOS || !isDirectorySymlink))
+                                            if (!isPathInBuild(fullPath))
                                             {
                                                 // File is not in the build, delete it.
                                                 if (TryDeleteFile(pm.LoggingContext, fullPath, logRemovedFiles))
@@ -326,6 +305,14 @@ namespace BuildXL.Engine
                                                 // it should not be deleted.
                                                 shouldDeleteCurrentDirectory = false;
                                             }
+                                        }
+                                        // Finally, this is the case of Windows and the file being a directory symlink
+                                        else 
+                                        {
+                                            // Since on Windows we don't track dir symlinks for outputs properly, we don't 
+                                            // want to delete them. This may happen if dir symlinks is the only content of the
+                                            // directory, so we flag it as non deletable
+                                            shouldDeleteCurrentDirectory = false;
                                         }
                                     });
 
@@ -376,7 +363,7 @@ namespace BuildXL.Engine
                 }
 
                 // Collect all directories that need to be deleted.
-                var deleteableDirectories = new HashSet<string>(deletableDirectoryCandidates.Keys, StringComparer.OrdinalIgnoreCase);
+                var deleteableDirectories = new HashSet<string>(deletableDirectoryCandidates.Keys, OperatingSystemHelper.PathComparer);
                 deleteableDirectories.ExceptWith(nondeletableDirectories.Keys);
 
                 // Delete directories by considering only the top-most ones.

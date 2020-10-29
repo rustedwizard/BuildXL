@@ -382,12 +382,37 @@ namespace BuildXL.Utilities.Configuration
         /// <summary>
         /// Mode for managing memory during builds
         /// </summary>
-        ManageMemoryMode ManageMemoryMode { get; }
+        ManageMemoryMode? ManageMemoryMode { get; }
 
         /// <summary>
         /// Ignores any filters that might have been specified for composite shared opaques.
         /// Temporary option. For A/B testing purposes only.
         /// </summary>
         bool? DisableCompositeOpaqueFilters { get; }
+        
+        /// <summary>
+        /// Enable plugin mode
+        /// </summary>
+        bool? EnablePlugin { get; }
+
+        /// <summary>
+        /// Paths to load plugins
+        /// </summary>
+        IReadOnlyList<AbsolutePath> PluginLocations { get; }
+
+        /// <summary>
+        /// Treats absent directory as existent when it is probed and the path is under an opaque directory
+        /// </summary>
+        bool TreatAbsentDirectoryAsExistentUnderOpaque { get; }
+
+        /// <summary>
+        /// Maximum allowed workers per module
+        /// </summary>
+        int MaxWorkersPerModule { get; }
+
+        /// <summary>
+        /// Updates file content table by scanning change journal.
+        /// </summary>
+        bool UpdateFileContentTableByScanningChangeJournal { get; }
     }
 }

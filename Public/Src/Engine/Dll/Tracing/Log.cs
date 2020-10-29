@@ -89,7 +89,7 @@ namespace BuildXL.Engine.Tracing
 
         [GeneratedEvent(
             (ushort)LogEventId.EndExecute,
-            EventGenerators = EventGenerators.LocalAndTelemetry,
+            EventGenerators = EventGenerators.LocalOnly,
             Message = EventConstants.PhasePrefix + "Done executing pips in {executeStatistics.ElapsedMilliseconds} ms.",
             EventLevel = Level.Verbose,
             EventTask = (ushort)Tasks.Engine,
@@ -1043,13 +1043,13 @@ namespace BuildXL.Engine.Tracing
         public abstract void ConfigIgnoreReparsePoints(LoggingContext context);
 
         [GeneratedEvent(
-            (ushort)LogEventId.ConfigIgnoreFullSymlinkResolving,
+            (ushort)LogEventId.ConfigIgnoreFullReparsePointResolving,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.Engine,
-            Message = "/unsafe_IgnoreFullSymlinkResolving enabled: {ShortProductName} will not fully resolve paths containing any sort of symbolic links (directory + file symbolic links). This might lead to incorrect builds because some file accesses will not be enforced.")]
-        public abstract void ConfigIgnoreFullSymlinkResolving(LoggingContext context);
+            Message = "/unsafe_IgnoreFullReparsePointResolving enabled: {ShortProductName} will not fully resolve paths containing any sort of reparse point (old-resolver logic). This might lead to incorrect builds because some file accesses will not be enforced.")]
+        public abstract void ConfigIgnoreFullReparsePointResolving(LoggingContext context);
         
         [GeneratedEvent(
             (ushort)LogEventId.ConfigIgnorePreloadedDlls,
@@ -1447,7 +1447,7 @@ If you can't update and need this feature after July 2018 please reach out to th
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.InfrastructureError),
             EventTask = (int)Tasks.Engine,
-            Message = "Failed to acquire a lock to prevent directory deletion. This may be due to invoking concurrent builds with overlapping directories. Error: {0}")]
+            Message = "Failed to acquire a lock to prevent directory deletion. This may be due to invoking concurrent builds with overlapping directories. Kill all instances of {ShortProductName} if concurrent builds are unexpected. Error: {0}")]
         public abstract void FailedToAcquireDirectoryDeletionLock(LoggingContext context, string message);
 
         [GeneratedEvent(
@@ -2791,6 +2791,24 @@ If you can't update and need this feature after July 2018 please reach out to th
             EventTask = (int)Tasks.Engine,
             Message = "/unsafe_AllowDuplicateTemporaryDirectory enabled: Duplicate temporary directory detection between pips is disabled.")]
         public abstract void ConfigUnsafeAllowDuplicateTemporaryDirectory(LoggingContext context);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.ScheduleConstructedWithConfiguration,
+            EventGenerators = EventGenerators.LocalAndTelemetry,
+            EventLevel = Level.Verbose,
+            Keywords = (int)(Keywords.UserMessage | Keywords.Performance | Keywords.Progress),
+            EventTask = (int)Tasks.Engine,
+            Message = "Schedule constructed. Resolvers involved: [{frontendKinds}].")]
+        public abstract void ScheduleConstructedWithConfiguration(LoggingContext context, string frontendKinds);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.ConfigUnsafeSkipFlaggingSharedOpaqueOutputs,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "/unsafe_SkipFlaggingSharedOpaqueOutputs enabled: Shared opaque outputs won't be flagged. Subsequent builds will fail at identifying them as outputs and they won't be deleted before pips run.")]
+        public abstract void ConfigUnsafeSkipFlaggingSharedOpaqueOutputs(LoggingContext context);
     }
 
     /// <summary>

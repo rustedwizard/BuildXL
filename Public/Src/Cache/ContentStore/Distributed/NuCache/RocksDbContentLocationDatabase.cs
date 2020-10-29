@@ -173,7 +173,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     if (IsStoredEpochInvalid(out var epoch))
                     {
                         Counters[ContentLocationDatabaseCounters.EpochMismatches].Increment();
-                        context.TraceDebug($"Stored epoch '{epoch}' does not match configured epoch '{_configuration.Epoch}'. Retrying with clean=true.");
+                        Tracer.Debug(context, $"Stored epoch '{epoch}' does not match configured epoch '{_configuration.Epoch}'. Retrying with clean=true.");
                         reload = true;
                     }
                     else
@@ -184,7 +184,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                 if (!result.Succeeded)
                 {
-                    context.TracingContext.Warning($"Failed to load database without cleaning. Retrying with clean=true. Failure: {result}");
+                    Tracer.Warning(context, $"Failed to load database without cleaning. Retrying with clean=true. Failure: {result}");
                     reload = true;
                 }
             }
@@ -249,6 +249,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         // Since the writes to ClusterState are relatively few, we can make-do with disabling
                         // compaction here and pretending like we are using a read-only database.
                         DisableAutomaticCompactions = !IsDatabaseWriteable,
+                        LeveledCompactionDynamicLevelTargetSizes = _configuration.EnableDynamicLevelTargetSizes,
                     },
                     // When an exception is caught from within methods using the database, this handler is called to
                     // decide whether the exception should be rethrown in user code, and the database invalidated. Our
@@ -830,17 +831,17 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private byte[] SerializeWeakFingerprint(Fingerprint weakFingerprint)
         {
-            return SerializeCore(weakFingerprint, (instance, writer) => instance.Serialize(writer));
+            return SerializationPool.Serialize(weakFingerprint, (instance, writer) => instance.Serialize(writer));
         }
 
         private byte[] SerializeStrongFingerprint(StrongFingerprint strongFingerprint)
         {
-            return SerializeCore(strongFingerprint, (instance, writer) => instance.Serialize(writer));
+            return SerializationPool.Serialize(strongFingerprint, (instance, writer) => instance.Serialize(writer));
         }
 
         private StrongFingerprint DeserializeStrongFingerprint(byte[] bytes)
         {
-            return DeserializeCore(bytes, reader => StrongFingerprint.Deserialize(reader));
+            return SerializationPool.Deserialize(bytes, reader => StrongFingerprint.Deserialize(reader));
         }
 
         private byte[] GetMetadataKey(StrongFingerprint strongFingerprint)
@@ -850,21 +851,21 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private byte[] SerializeMetadataEntry(MetadataEntry value)
         {
-            return SerializeCore(value, (instance, writer) => instance.Serialize(writer));
+            return SerializationPool.Serialize(value, (instance, writer) => instance.Serialize(writer));
         }
 
         private MetadataEntry DeserializeMetadataEntry(byte[] data)
         {
-            return DeserializeCore(data, reader => MetadataEntry.Deserialize(reader));
+            return SerializationPool.Deserialize(data, reader => MetadataEntry.Deserialize(reader));
         }
 
         private long DeserializeMetadataLastAccessTimeUtc(byte[] data)
         {
-            return DeserializeCore(data, reader => MetadataEntry.DeserializeLastAccessTimeUtc(reader));
+            return SerializationPool.Deserialize(data, reader => MetadataEntry.DeserializeLastAccessTimeUtc(reader));
         }
 
 
-        private Result<long> GetLongProperty(IBuildXLKeyValueStore store, string propertyName, string columnFamilyName)
+        private Result<long> GetLongProperty(IBuildXLKeyValueStore store, string propertyName, string columnFamilyName = null)
         {
             try
             {
@@ -959,10 +960,52 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             }).ToBoolResult();
         }
 
-        /// <inheritdoc />
-        public override Result<long> GetContentDatabaseSizeBytes()
+        /// <nodoc />
+        public enum LongProperty
         {
-            return _keyValueStore.Use(store => long.Parse(store.GetProperty("rocksdb.live-sst-files-size"))).ToResult();
+            /// <summary>
+            /// Size of live data.
+            /// </summary>
+            /// <remarks>
+            ///  This differs from <see cref="LiveFilesSizeBytes"/> because the files include the size of tombstones
+            ///  and other stuff that's in there, not just actual data.
+            /// </remarks>
+            LiveDataSizeBytes,
+
+            /// <summary>
+            /// Size of live files.
+            /// </summary>
+            LiveFilesSizeBytes,
+        }
+
+        /// <nodoc />
+        public enum Entity
+        {
+            /// <nodoc />
+            ContentTracking = 0,
+
+            /// <nodoc />
+            Metadata = 1,
+        }
+
+        /// <nodoc />
+        public Result<long> GetLongProperty(LongProperty property, Entity entity)
+        {
+            var propertyName = property switch
+            {
+                LongProperty.LiveFilesSizeBytes => "rocksdb.live-sst-files-size",
+                LongProperty.LiveDataSizeBytes => "rocksdb.estimate-live-data-size",
+                _ => throw new NotImplementedException($"Unhandled property `{property}` for entity `{entity}`"),
+            };
+
+            var columnFamilyName = entity switch
+            {
+                Entity.ContentTracking => null,
+                Entity.Metadata => nameof(Columns.Metadata),
+                _ => throw new NotImplementedException($"Unhandled entity `{entity}`"),
+            };
+
+            return _keyValueStore.Use(store => GetLongProperty(store, propertyName, columnFamilyName)).Result;
         }
 
         private void FullRangeCompaction(OperationContext context)
@@ -1118,12 +1161,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private byte[] SerializeCompactionInfo(CompactionInfo strongFingerprint)
         {
-            return SerializeCore(strongFingerprint, (instance, writer) => instance.Serialize(writer));
+            return SerializationPool.Serialize(strongFingerprint, (instance, writer) => instance.Serialize(writer));
         }
 
         private CompactionInfo DeserializeCompactionInfo(byte[] bytes)
         {
-            return DeserializeCore(bytes, reader => CompactionInfo.Deserialize(reader));
+            return SerializationPool.Deserialize(bytes, reader => CompactionInfo.Deserialize(reader));
         }
 
         private struct CompactionInfo

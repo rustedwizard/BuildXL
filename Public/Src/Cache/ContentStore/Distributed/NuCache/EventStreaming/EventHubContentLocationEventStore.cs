@@ -14,7 +14,9 @@ using System.Threading.Tasks.Dataflow;
 using BuildXL.Cache.ContentStore.Distributed.Tracing;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
+using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Utilities.ParallelAlgorithms;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
 using Microsoft.Azure.EventHubs;
@@ -218,28 +220,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
         private IReadOnlyList<EventData> SerializeEventData(OperationContext context, ContentLocationEventData[] events)
         {
-            // EventDataSerializer is not thread-safe.
-            // This is usually not a problem, because the nagle queue that is used by this class
-            // kind of guarantees that it would be just a single thread responsible for sending the events
-            // to event hub.
-            // But this is not the case when the batch size is 1 (used by tests only).
-            // In this case a special version of a nagle queue is created, that doesn't have this guarantee.
-            // In this case this method can be called from multiple threads causing serialization/deserialization issues.
-            // So to prevent random test failures because of the state corruption we're using lock
-            // if the batch size is 1.
-            if (_configuration.EventBatchSize == 1)
-            {
-                lock (EventDataSerializer)
-                {
-                    return EventDataSerializer.Serialize(context, events);
-                }
-            }
-
             return EventDataSerializer.Serialize(context, events);
         }
 
         private async Task ProcessEventsAsync(OperationContext context, List<EventData> messages)
         {
+            // Tracking raw messages count.
+            Counters[ReceivedEventHubEventsCount].Add(messages.Count);
+            CacheActivityTracker.AddValue(CaSaaSActivityTrackingCounters.ReceivedEventHubMessages, messages.Count);
+
             // Creating nested context for all the processing operations.
             context = context.CreateNested(nameof(EventHubContentLocationEventStore));
 
@@ -265,7 +254,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                 await ProcessEventsCoreAsync(new ProcessEventsInput(state, messages, actionBlockIndex: -1, store: this), EventDataSerializer);
             }
 
-            async Task<BoolResult> sendToActionBlockAsync(SharedEventProcessingState localState)
+            async Task<BoolResult> sendToActionBlockAsync(SharedEventProcessingState st)
             {
                 // This local function "sends" a message into an action block based on the sender's hash code to process events in parallel from different machines.
                 // (keep in mind, that the data from the same machine should be processed sequentially, because events order matters).
@@ -274,7 +263,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                 {
                     int actionBlockIndex = messageGroup.Key;
                     var eventProcessingBlock = _eventProcessingBlocks![actionBlockIndex];
-                    var input = new ProcessEventsInput(localState, messageGroup, actionBlockIndex, this);
+                    var input = new ProcessEventsInput(st, messageGroup, actionBlockIndex, this);
 
                     var sendAsyncTask = eventProcessingBlock.SendAsync(input);
                     if (sendAsyncTask.Status == TaskStatus.WaitingForActivation)
@@ -359,8 +348,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
                             counters[ReceivedMessagesTotalSize].Add(message.Body.Count);
                             counters[ReceivedEventBatchCount].Increment();
+                            CacheActivityTracker.AddValue(CaSaaSActivityTrackingCounters.ProcessedEventHubMessages, value: 1);
 
-                            if (!foundEpochFilter || !string.Equals(eventFilter as string, _configuration.Epoch))
+                            if (!_configuration.IgnoreEpoch &&
+                                (!foundEpochFilter || !string.Equals(eventFilter as string, _configuration.Epoch)))
                             {
                                 counters[FilteredEvents].Increment();
                                 continue;
@@ -422,31 +413,37 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
         private void UpdatingPendingEventProcessingStates()
         {
             // Prevent concurrent access to dequeuing from the queue and updating the last processed sequence point
-            if (Interlocked.CompareExchange(ref _updatingPendingEventProcessingStates, value: 1, comparand: 0) == 0)
-            {
-                var pendingEventProcessingStates = _pendingEventProcessingStates;
-
-                // Look at top event on queue, to see if it is complete, and dequeue and set as last processed event if it is. Otherwise,
-                // just exit.
-                while (pendingEventProcessingStates.TryPeek(out var peekPendingEventProcessingState))
+            ConcurrencyHelper.RunOnceIfNeeded(
+                ref _updatingPendingEventProcessingStates,
+                () =>
                 {
-                    if (peekPendingEventProcessingState.IsComplete)
-                    {
-                        bool found = pendingEventProcessingStates.TryDequeue(out var pendingEventProcessingState);
-                        Contract.Assert(found, "There should be no concurrent access to _pendingEventProcessingStates, so after peek a state should be dequeued.");
-                        Contract.Assert(peekPendingEventProcessingState == pendingEventProcessingState, "There should be no concurrent access to _pendingEventProcessingStates, so the state for peek and dequeue should be the same.");
+                    var pendingEventProcessingStates = _pendingEventProcessingStates;
 
-                        _lastProcessedSequencePoint = new EventSequencePoint(pendingEventProcessingState!.SequenceNumber);
-                    }
-                    else
+                    // Look at top event on queue, to see if it is complete, and dequeue and set as last processed event if it is. Otherwise,
+                    // just exit.
+                    while (pendingEventProcessingStates.TryPeek(out var peekPendingEventProcessingState))
                     {
-                        // Top event batch on queue is not complete, no need to continue.
-                        break;
-                    }
-                }
+                        if (peekPendingEventProcessingState.IsComplete)
+                        {
+                            bool found = pendingEventProcessingStates.TryDequeue(out var pendingEventProcessingState);
+                            Contract.Assert(
+                                found,
+                                "There should be no concurrent access to _pendingEventProcessingStates, so after peek a state should be dequeued.");
+                            Contract.Assert(
+                                peekPendingEventProcessingState == pendingEventProcessingState,
+                                "There should be no concurrent access to _pendingEventProcessingStates, so the state for peek and dequeue should be the same.");
 
-                Volatile.Write(ref _updatingPendingEventProcessingStates, 0);
-            }
+                            _lastProcessedSequencePoint = new EventSequencePoint(pendingEventProcessingState!.SequenceNumber);
+                        }
+                        else
+                        {
+                            // Top event batch on queue is not complete, no need to continue.
+                            break;
+                        }
+                    }
+
+                    Volatile.Write(ref _updatingPendingEventProcessingStates, 0);
+                });
         }
 
         /// <inheritdoc />
@@ -509,7 +506,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
         protected class SharedEventProcessingState
         {
             private int _remainingMessageCount;
-            private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+            private readonly StopwatchSlim _stopwatch = StopwatchSlim.Start();
+
+            // Counters are quite large in terms of memory and creating them lazily can save more then 2Gb of memory
+            // when the master is busy processing events.
+            private readonly Lazy<CounterCollection<ContentLocationEventStoreCounters>> _counters = new Lazy<CounterCollection<ContentLocationEventStoreCounters>>(() => new CounterCollection<ContentLocationEventStoreCounters>());
 
             /// <nodoc />
             public long SequenceNumber { get; }
@@ -521,7 +522,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
             public EventHubContentLocationEventStore Store { get; }
 
             /// <nodoc />
-            public CounterCollection<ContentLocationEventStoreCounters> EventStoreCounters { get; } = new CounterCollection<ContentLocationEventStoreCounters>();
+            public CounterCollection<ContentLocationEventStoreCounters> EventStoreCounters => _counters.Value;
 
             /// <nodoc />
             public bool IsComplete => _remainingMessageCount == 0;
@@ -544,7 +545,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
             {
                 if (Interlocked.Add(ref _remainingMessageCount, -messageCount) == 0)
                 {
-                    int duration = (int)_stopwatch.ElapsedMilliseconds;
+                    int duration = (int)_stopwatch.Elapsed.TotalMilliseconds;
                     Store.UpdatingPendingEventProcessingStates();
                     Context.LogProcessEventsOverview(EventStoreCounters, duration);
 

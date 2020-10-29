@@ -7,12 +7,13 @@ using System.ComponentModel;
 using System.Diagnostics.ContractsLight;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
+using BuildXL.Cache.ContentStore.Grpc;
 using BuildXL.Cache.ContentStore.Sessions;
-using BuildXL.Cache.ContentStore.SQLite;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.Interfaces;
 using BuildXL.Cache.MemoizationStore.Sessions;
 using BuildXL.Cache.MemoizationStore.Stores;
+using BuildXL.Cache.Roxis.Client;
 using BuildXL.Utilities;
 using static BuildXL.Utilities.FormattableStringEx;
 using AbsolutePath = BuildXL.Cache.ContentStore.Interfaces.FileSystem.AbsolutePath;
@@ -20,58 +21,22 @@ using AbsolutePath = BuildXL.Cache.ContentStore.Interfaces.FileSystem.AbsolutePa
 namespace BuildXL.Cache.MemoizationStoreAdapter
 {
     /// <summary>
-    /// The Cache Factory for an on-disk Cache implementation based on MemoizationStore.
+    /// Cache Factory for BuildXL as a cache user for dev machines
     /// </summary>
     /// <remarks>
+    /// This is the class responsible for creating the BuildXL to Cache adapter in the Selfhost builds. It configures
+    /// the cache on the BuildXL process.
+    /// 
     /// Current limitations while we flesh things out:
     /// 1) APIs around tracking named sessions are not implemented
     /// </remarks>
     public class MemoizationStoreCacheFactory : ICacheFactory
     {
-        private const bool WaitForLruOnShutdown = true;
         private const string DefaultStreamFolder = "streams";
 
         /// <summary>
         /// Configuration for <see cref="MemoizationStoreCacheFactory"/>.
         /// </summary>
-        /// <remarks>
-        /// MemoizationStoreCacheFactory JSON CONFIG DATA
-        /// {
-        ///     "Assembly":"BuildXL.Cache.MemoizationStoreAdapter",
-        ///     "Type":"BuildXL.Cache.MemoizationStoreAdapter.MemoizationStoreCacheFactory",
-        ///     "CacheId":"{0}",
-        ///     "MaxCacheSizeInMB":{1},
-        ///     "MaxStrongFingerprints":{2},
-        ///     "CacheRootPath":"{3}",
-        ///     "CacheLogPath":"{4}",
-        ///     "SingleInstanceTimeoutInSeconds":"{5}",
-        ///     "ApplyDenyWriteAttributesOnContent":"{6}",
-        ///     "UseStreamCAS":"{7}",
-        ///     "BackupLKGCache":{8},
-        ///     "CheckCacheIntegrityOnStartup":{9}
-        ///     "SingleInstanceTimeoutInSeconds":{10}
-        ///     "SynchronizationMode":{11},
-        ///     "LogFlushIntervalSeconds":{12}
-        ///     "StreamCAS": {
-        ///          "MaxCacheSizeInMB":{13},
-        ///          "MaxStrongFingerprints":{14},
-        ///          "CacheRootPath":"{15}",
-        ///          "SingleInstanceTimeoutInSeconds":"{16}",
-        ///          "ApplyDenyWriteAttributesOnContent":"{17}",
-        ///     },
-        ///     "EnableContentServer":{18},
-        ///     "EmptyFileHashShortcutEnabled":{19},
-        ///     "CheckLocalFiles":{20},
-        ///     "CacheName":"{21}",
-        ///     "GrpcPort":{22},
-        ///     "ScenarioName":"{23}",
-        ///     "RetryIntervalSeconds":{24},
-        ///     "RetryCount":{25},
-        ///     "ReplaceExistingOnPlaceFile":{26},
-        ///     "VfsCasRoot": "{27}",
-        ///     "UseVfsSymlinks": "{28}",
-        /// }
-        /// </remarks>
         public sealed class Config : CasConfig
         {
             /// <summary>
@@ -114,38 +79,10 @@ namespace BuildXL.Cache.MemoizationStoreAdapter
             public CasConfig StreamCAS { get; set; }
 
             /// <summary>
-            ///     Create a backup of the last known good cache at startup. This step has a 
-            ///     startup cost but allows better recovery in case the cache detects
-            ///     corruption at startup.
-            /// </summary>
-            [DefaultValue(false)]
-            public bool BackupLKGCache { get; set; }
-
-            /// <summary>
-            ///     The cache will check its integrity on startup. If the integrity check
-            ///     fails, the corrupt cache data is thrown out and use a LKG data backup
-            ///     is used. If a backup is unavailable the cache starts from scratch.
-            /// </summary>
-            [DefaultValue(false)]
-            public bool CheckCacheIntegrityOnStartup { get; set; }
-
-            /// <summary>
-            /// Controls the synchronization mode for writes to the database.
-            /// </summary>
-            [DefaultValue(null)]
-            public string SynchronizationMode { get; set; }
-
-            /// <summary>
             /// Duration to wait for exclusive access to the cache directory before timing out.
             /// </summary>
             [DefaultValue(0)]
             public uint LogFlushIntervalSeconds { get; set; }
-
-            /// <summary>
-            /// Whether the shortcuts for streaming, placing, and pinning the empty file are used.
-            /// </summary>
-            [DefaultValue(false)]
-            public bool EmptyFileHashShortcutEnabled { get; set; }
 
             /// <summary>
             /// Whether to check for file existence before pinning.
@@ -199,16 +136,32 @@ namespace BuildXL.Cache.MemoizationStoreAdapter
             public bool EnableMetadataServer { get; set; }
 
             /// <nodoc />
-            [DefaultValue(false)]
-            public bool UseRocksDbMemoizationStore { get; set; }
-
-            /// <nodoc />
             [DefaultValue(60 * 60)]
             public int RocksDbMemoizationStoreGarbageCollectionIntervalInSeconds { get; set; }
 
             /// <nodoc />
             [DefaultValue(500_000)]
             public int RocksDbMemoizationStoreGarbageCollectionMaximumNumberOfEntriesToKeep { get; set; }
+
+            /// <nodoc />
+            [DefaultValue(false)]
+            public bool RoxisEnabled { get; set; }
+
+            /// <nodoc />
+            [DefaultValue("")]
+            public string RoxisMetadataStoreHost { get; set; }
+
+            /// <nodoc />
+            [DefaultValue(-1)]
+            public int RoxisMetadataStorePort { get; set; }
+
+            /// <nodoc />
+            [DefaultValue(null)]
+            public GrpcEnvironmentOptions GrpcEnvironmentOptions { get; set; }
+
+            /// <nodoc />
+            [DefaultValue(null)]
+            public GrpcCoreClientOptions GrpcCoreClientOptions { get; set; }
 
             /// <nodoc />
             public Config()
@@ -329,7 +282,7 @@ namespace BuildXL.Cache.MemoizationStoreAdapter
 
                 var localCache = cacheConfig.UseStreamCAS
                     ? CreateLocalCacheWithStreamPathCas(cacheConfig, logger)
-                    : CreateLocalCacheWithSingleCas(cacheConfig, logger);
+                    : CreateGrpcCache(cacheConfig, logger);
 
                 var statsFilePath = new AbsolutePath(logPath.Path + ".stats");
                 if (!string.IsNullOrEmpty(cacheConfig.VfsCasRoot))
@@ -406,7 +359,26 @@ namespace BuildXL.Cache.MemoizationStoreAdapter
 
         private static MemoizationStoreConfiguration GetInProcMemoizationStoreConfiguration(AbsolutePath cacheRoot, Config config, CasConfig configCore)
         {
-            if (config.UseRocksDbMemoizationStore)
+            if (config.RoxisEnabled)
+            {
+                var roxisClientConfiguration = new RoxisClientConfiguration();
+
+                if (!string.IsNullOrEmpty(config.RoxisMetadataStoreHost))
+                {
+                    roxisClientConfiguration.GrpcHost = config.RoxisMetadataStoreHost;
+                }
+
+                if (config.RoxisMetadataStorePort > 0)
+                {
+                    roxisClientConfiguration.GrpcPort = config.RoxisMetadataStorePort;
+                }
+
+                return new RoxisMemoizationDatabaseConfiguration()
+                {
+                    MetadataClientConfiguration = roxisClientConfiguration,
+                };
+            }
+            else
             {
                 return new RocksDbMemoizationStoreConfiguration() {
                     Database = new RocksDbContentLocationDatabaseConfiguration(cacheRoot / "RocksDbMemoizationStore") {
@@ -419,66 +391,45 @@ namespace BuildXL.Cache.MemoizationStoreAdapter
                     },
                 };
             }
-            else
-            {
-                var memoConfig = new SQLiteMemoizationStoreConfiguration(cacheRoot)
-                {
-                    MaxRowCount = config.MaxStrongFingerprints,
-                    SingleInstanceTimeoutSeconds = (int)configCore.SingleInstanceTimeoutInSeconds,
-                    WaitForLruOnShutdown = WaitForLruOnShutdown
-                };
-
-                memoConfig.Database.BackupDatabase = config.BackupLKGCache;
-                memoConfig.Database.VerifyIntegrityOnStartup = config.CheckCacheIntegrityOnStartup;
-
-                if (!string.IsNullOrEmpty(config.SynchronizationMode))
-                {
-                    memoConfig.Database.SyncMode = (SynchronizationMode)Enum.Parse(typeof(SynchronizationMode), config.SynchronizationMode, ignoreCase: true);
-                }
-
-                return memoConfig;
-            }
         }
 
-        private static MemoizationStore.Interfaces.Caches.ICache CreateLocalCacheWithSingleCas(Config config, DisposeLogger logger)
+        private static MemoizationStore.Interfaces.Caches.ICache CreateGrpcCache(Config config, DisposeLogger logger)
         {
-            if (config.EnableContentServer && config.EnableMetadataServer)
-            {
-                Contract.Assert(config.RetryIntervalSeconds >= 0);
-                Contract.Assert(config.RetryCount >= 0);
+            Contract.Requires(config.RetryIntervalSeconds >= 0);
+            Contract.Requires(config.RetryCount >= 0);
 
-                var rpcConfiguration = new ServiceClientRpcConfiguration(config.GrpcPort);
-                var serviceClientConfiguration = new ServiceClientContentStoreConfiguration(config.CacheName, rpcConfiguration, config.ScenarioName)
+            var serviceClientRpcConfiguration = new ServiceClientRpcConfiguration() {
+                GrpcCoreClientOptions = config.GrpcCoreClientOptions,
+            };
+            if (config.GrpcPort > 0)
+            {
+                serviceClientRpcConfiguration.GrpcPort = config.GrpcPort;
+            }
+
+            ServiceClientContentStoreConfiguration serviceClientContentStoreConfiguration = null;
+            if (config.EnableContentServer) {
+                new ServiceClientContentStoreConfiguration(config.CacheName, serviceClientRpcConfiguration, config.ScenarioName)
                 {
                     RetryIntervalSeconds = (uint)config.RetryIntervalSeconds,
                     RetryCount = (uint)config.RetryCount,
+                    GrpcEnvironmentOptions = config.GrpcEnvironmentOptions,
                 };
+            }
 
-                return LocalCache.CreateRpcCache(logger, serviceClientConfiguration);
+            if (config.EnableContentServer && config.EnableMetadataServer)
+            {
+                return LocalCache.CreateRpcCache(logger, serviceClientContentStoreConfiguration);
             }
             else
             {
                 Contract.Assert(!config.EnableMetadataServer, "It is not supported to use a Metadata server without a Content server");
 
-                LocalCacheConfiguration localCacheConfiguration;
-                if (config.EnableContentServer)
-                {
-                    localCacheConfiguration = LocalCacheConfiguration.CreateServerEnabled(
-                        config.GrpcPort,
-                        config.CacheName,
-                        config.ScenarioName,
-                        config.RetryIntervalSeconds,
-                        config.RetryCount);
-                }
-                else
-                {
-                    localCacheConfiguration = LocalCacheConfiguration.CreateServerDisabled();
-                }
+                var memoizationStoreConfiguration = GetInProcMemoizationStoreConfiguration(new AbsolutePath(config.CacheRootPath), config, GetCasConfig(config));
 
                 return LocalCache.CreateUnknownContentStoreInProcMemoizationStoreCache(logger,
                     new AbsolutePath(config.CacheRootPath),
-                    GetInProcMemoizationStoreConfiguration(new AbsolutePath(config.CacheRootPath), config, GetCasConfig(config)),
-                    localCacheConfiguration,
+                    memoizationStoreConfiguration,
+                    new LocalCacheConfiguration(serviceClientContentStoreConfiguration),
                     configurationModel: CreateConfigurationModel(GetCasConfig(config)),
                     clock: null,
                     checkLocalFiles: config.CheckLocalFiles);

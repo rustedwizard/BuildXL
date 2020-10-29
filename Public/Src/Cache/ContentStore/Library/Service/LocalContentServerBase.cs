@@ -30,6 +30,8 @@ using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Cache.ContentStore.Utils;
 using Grpc.Core;
 using GrpcEnvironment = BuildXL.Cache.ContentStore.Service.Grpc.GrpcEnvironment;
+using BuildXL.Cache.ContentStore.Grpc;
+using BuildXL.Utilities.ParallelAlgorithms;
 
 namespace BuildXL.Cache.ContentStore.Service
 {
@@ -54,8 +56,6 @@ namespace BuildXL.Cache.ContentStore.Service
         where TSession : IContentSession
         where TStore : IStartupShutdown
     {
-        private const int DefaultGrpcThreadPoolSize = 70;
-
         private const string Name = nameof(LocalContentServerBase<TStore, TSession>);
         private const string CheckForExpiredSessionsName = "CheckUnusedSessions";
         private const int CheckForExpiredSessionsPeriodMinutes = 1;
@@ -76,6 +76,7 @@ namespace BuildXL.Cache.ContentStore.Service
 
         private readonly Dictionary<string, AbsolutePath> _tempFolderForStreamsByCacheName = new Dictionary<string, AbsolutePath>();
         private readonly ConcurrentDictionary<int, DisposableDirectory> _tempDirectoryForStreamsBySessionId = new ConcurrentDictionary<int, DisposableDirectory>();
+        private readonly Dictionary<string, bool> _incrementalStatisticsKeyStatus = new Dictionary<string, bool>();
 
         /// <summary>
         /// Used by <see cref="LogIncrementalStatsAsync"/> to avoid re-entrancy.
@@ -112,6 +113,8 @@ namespace BuildXL.Cache.ContentStore.Service
 
             logger.Debug($"{Name} process id {Process.GetCurrentProcess().Id}");
             logger.Debug($"{Name} constructing {nameof(ServiceConfiguration)}: {localContentServerConfiguration}");
+
+            GrpcEnvironment.Initialize(logger, localContentServerConfiguration.GrpcEnvironmentOptions, overwriteSafeOptions: true);
 
             FileSystem = fileSystem;
             Logger = logger;
@@ -279,7 +282,7 @@ namespace BuildXL.Cache.ContentStore.Service
 
                     await LoadHibernatedSessionsAsync(context);
 
-                    InitializeAndStartGrpcServer(Config.GrpcPort, BindServices(), Config.RequestCallTokensPerCompletionQueue, Config.GrpcThreadPoolSize ?? DefaultGrpcThreadPoolSize);
+                    InitializeAndStartGrpcServer(Config.GrpcPort, BindServices(), Config.RequestCallTokensPerCompletionQueue, Config.GrpcCoreServerOptions);
 
                     _serviceReadinessChecker.Ready(context);
 
@@ -289,7 +292,7 @@ namespace BuildXL.Cache.ContentStore.Service
                         message => Tracer.Debug(context, $"[{CheckForExpiredSessionsName}] message"));
 
                     _logIncrementalStatsTimer = new IntervalTimer(
-                        () => LogIncrementalStatsAsync(context),
+                        () => LogIncrementalStatsAsync(context, logAtShutdown: false),
                         Config.LogIncrementalStatsInterval);
 
                     _logMachineStatsTimer = new IntervalTimer(
@@ -305,15 +308,14 @@ namespace BuildXL.Cache.ContentStore.Service
             }
         }
 
-        private void InitializeAndStartGrpcServer(int grpcPort, ServerServiceDefinition[] definitions, int requestCallTokensPerCompletionQueue, int grpcThreadPoolSize)
+        private void InitializeAndStartGrpcServer(int grpcPort, ServerServiceDefinition[] definitions, int requestCallTokensPerCompletionQueue, GrpcCoreServerOptions? grpcCoreServerOptions)
         {
             Contract.Requires(definitions.Length != 0);
-            GrpcEnvironment.InitializeIfNeeded(numThreads: grpcThreadPoolSize);
-            _grpcServer = new Server(GrpcEnvironment.DefaultConfiguration)
+
+            GrpcEnvironment.WaitUntilInitialized();
+            _grpcServer = new Server(GrpcEnvironment.GetServerOptions(grpcCoreServerOptions))
             {
                 Ports = { new ServerPort(IPAddress.Any.ToString(), grpcPort, ServerCredentials.Insecure) },
-
-                // need a higher number here to avoid throttling: 7000 worked for initial experiments.
                 RequestCallTokensPerCompletionQueue = requestCallTokensPerCompletionQueue,
             };
 
@@ -325,50 +327,64 @@ namespace BuildXL.Cache.ContentStore.Service
             _grpcServer.Start();
         }
 
-        private async Task LogIncrementalStatsAsync(OperationContext context)
+        private Task LogIncrementalStatsAsync(OperationContext context, bool logAtShutdown)
         {
-            if (Interlocked.CompareExchange(ref _loggingIncrementalStats, 1, 0) != 0)
-            {
-                // Prevent re-entrancy so this method may be called during shutdown in addition
-                // to being called in the timer
-                return;
-            }
-
-            try
-            {
-                TraceLeakedFilePath(context);
-
-                var statistics = new Dictionary<string, long>();
-                var previousStatistics = _previousStatistics;
-
-                var stats = await GetStatsAsync(context);
-                if (stats.Succeeded)
+            return ConcurrencyHelper.RunOnceIfNeeded(
+                ref _loggingIncrementalStats,
+                async () =>
                 {
-                    var counters = stats.Value!.ToDictionaryIntegral();
-                    FillTrackingStreamStatistics(counters);
-                    foreach (var counter in counters)
+                    TraceLeakedFilePath(context);
+
+                    var statistics = new Dictionary<string, long>();
+                    var previousStatistics = _previousStatistics;
+
+                    var stats = await GetStatsAsync(context);
+                    if (stats.Succeeded)
                     {
-                        var key = counter.Key;
-                        var value = counter.Value;
-                        var incrementalValue = value;
-                        statistics[key] = value;
-
-                        if (previousStatistics != null && previousStatistics.TryGetValue(key, out var oldValue))
+                        var counters = stats.Value!.ToDictionaryIntegral();
+                        FillTrackingStreamStatistics(counters);
+                        foreach (var counter in counters)
                         {
-                            incrementalValue -= oldValue;
+                            var key = counter.Key;
+
+                            if (!logAtShutdown && !PrintStatisticsForKey(key))
+                            {
+                                continue;
+                            }
+
+                            var value = counter.Value;
+                            var incrementalValue = value;
+                            statistics[key] = value;
+
+                            if (previousStatistics != null && previousStatistics.TryGetValue(key, out var oldValue))
+                            {
+                                incrementalValue -= oldValue;
+                            }
+
+                            context.TracingContext.TraceMessage(
+                                Severity.Info,
+                                $"{key}=[{incrementalValue}]",
+                                component: Name,
+                                operation: "IncrementalStatistics");
+                            context.TracingContext.TraceMessage(Severity.Info, $"{key}=[{value}]", component: Name, operation: "PeriodicStatistics");
                         }
-
-                        context.TracingContext.TraceMessage(Severity.Info, $"{key}=[{incrementalValue}]", component: Name, operation: "IncrementalStatistics");
-                        context.TracingContext.TraceMessage(Severity.Info, $"{key}=[{value}]", component: Name, operation: "PeriodicStatistics");
                     }
-                }
 
-                _previousStatistics = statistics;
-            }
-            finally
+                    _previousStatistics = statistics;
+                },
+                funcIsRunningResultProvider: () => Task.CompletedTask);
+        }
+
+        private bool PrintStatisticsForKey(string key)
+        {
+            if (_incrementalStatisticsKeyStatus.TryGetValue(key, out bool shouldPrint))
             {
-                Volatile.Write(ref _loggingIncrementalStats, 0);
+                return shouldPrint;
             }
+
+            shouldPrint = Config.IncrementalStatsCounterNames.Any(name => key.EndsWith(name));
+            _incrementalStatisticsKeyStatus[key] = shouldPrint;
+            return shouldPrint;
         }
 
         private void TraceLeakedFilePath(OperationContext context)
@@ -539,7 +555,7 @@ namespace BuildXL.Cache.ContentStore.Service
             // Don't trace statistics if configured and only if startup was successful.
             if (Tracer.EnableTraceStatisticsAtShutdown && StartupCompleted)
             {
-                await LogIncrementalStatsAsync(context);
+                await LogIncrementalStatsAsync(context, logAtShutdown: false);
             }
 
             // Stop the session expiration timer.

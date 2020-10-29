@@ -3,13 +3,15 @@
 
 using System;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.Monitor.App.Scheduling;
+using BuildXL.Cache.Monitor.Library.Rules;
 using Kusto.Data.Common;
 using static BuildXL.Cache.Monitor.App.Analysis.Utilities;
 
 namespace BuildXL.Cache.Monitor.App.Rules.Kusto
 {
-    internal class OperationFailureCheckRule : KustoRuleBase
+    internal class OperationFailureCheckRule : MultipleStampRuleBase
     {
         public class Check
         {
@@ -36,11 +38,20 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
                 Error = 5,
                 Fatal = 50,
             };
+
+            /// <summary>
+            /// Must be a valid KQL string that can be put right after a
+            /// 
+            ///  | where {string here}
+            ///
+            /// Certain descriptive statistics are provided. See the actual query for more information.
+            /// </summary>
+            public string Constraint { get; set; } = "true";
         }
 
-        public class Configuration : KustoRuleConfiguration
+        public class Configuration : MultiStampRuleConfiguration
         {
-            public Configuration(KustoRuleConfiguration kustoRuleConfiguration, Check check)
+            public Configuration(MultiStampRuleConfiguration kustoRuleConfiguration, Check check)
                 : base(kustoRuleConfiguration)
             {
                 Check = check;
@@ -53,7 +64,8 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
 
         private readonly Configuration _configuration;
 
-        public override string Identifier => $"{nameof(OperationFailureCheckRule)};{_configuration.Check.Name}:{_configuration.StampId}";
+        /// <inheritdoc />
+        public override string Identifier => $"{nameof(OperationFailureCheckRule)};{_configuration.Check.Name}:{_configuration.Environment}";
 
         public OperationFailureCheckRule(Configuration configuration)
             : base(configuration)
@@ -62,12 +74,14 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
         }
 
 #pragma warning disable CS0649
-        private class Result
+        internal class Result
         {
+            public string Component = string.Empty;
             public string Operation = string.Empty;
             public string ExceptionType = string.Empty;
             public long Count;
             public long Machines;
+            public string Stamp = string.Empty;
         }
 #pragma warning restore CS0649
 
@@ -75,59 +89,25 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
         {
             var now = _configuration.Clock.UtcNow;
 
-            var query = string.Empty;
-            if (_configuration.CacheTableName == Constants.OldTableName)
-            {
-                query = $@"
+            var query  = $@"
                     let end = now();
                     let start = end - {CslTimeSpanLiteral.AsCslString(_configuration.LookbackPeriod)};
-                    table(""{_configuration.CacheTableName}"")
+                    table('{_configuration.CacheTableName}')
                     | where PreciseTimeStamp between (start .. end)
-                    | where Stamp == ""{_configuration.Stamp}""
-                    | where Service == ""{Constants.ServiceName}"" or Service == ""{Constants.MasterServiceName}""
-                    | where Message has ""{_configuration.Check.Match} stop ""
-                    | where Message !has ""result=[Success"" // Looking only at failures
-                    | where Message !has ""Critical error occurred"" // Critical errors are handled by a different rule
-                    | project PreciseTimeStamp, Machine, Message
-                    | parse Message with CorrelationId:string "" "" Operation:string "" stop "" * ""result=["" Result:string ""]."" *
-                    | where Result != ""OperationCancelled""
-                    | extend Operation=extract(""^((\\w+).(\\w+)).*"", 1, Operation) // Prune unnecessary parameters
-                    | parse Result with ""Error=["" * ""] Diagnostics=["" Diagnostics:string ""]""
-                    | parse Diagnostics with ExceptionType:string "": "" *
-                    | extend Result=iif(isnull(Diagnostics) or isempty(Diagnostics), Result, """")
-                    | extend Operation=iif(isnull(Operation) or isempty(Operation), ""Unknown"", Operation)
-                    | extend ExceptionType=iif(isnull(ExceptionType) or isempty(ExceptionType), ""Unknown"", ExceptionType)
+                    | where Operation == '{_configuration.Check.Match}' and isnotempty(Duration)
+                    | where Result == '{Constants.ResultCode.Faiilure}' // Looking only at failures
+                    | where {_configuration.Check.Constraint}
+                    | project PreciseTimeStamp, Machine, Message, CorrelationId, Stamp, Operation, Component
+                    | parse Message with * 'result=[' Result:string '].' *
+                    | parse Result with 'Error=[' * '] Diagnostics=[' Diagnostics:string ']'
+                    | parse Diagnostics with ExceptionType:string ': ' *
+                    | extend Result=iif(isnull(Diagnostics) or isempty(Diagnostics), Result, '')
+                    | extend Operation=iif(isnull(Operation) or isempty(Operation), 'Unknown', Operation)
+                    | extend ExceptionType=iif(isnull(ExceptionType) or isempty(ExceptionType), 'Unknown', ExceptionType)
                     | project-away Message
-                    | summarize Count=count(), Machines=dcount(Machine, 2) by Operation, ExceptionType
+                    | summarize Count=count(), Machines=dcount(Machine, 2) by Component, Operation, ExceptionType, Stamp
                     | where not(isnull(Machines))
                     | sort by Machines desc, Count desc";
-            }
-            else
-            {
-                query = $@"
-                    let end = now();
-                    let start = end - {CslTimeSpanLiteral.AsCslString(_configuration.LookbackPeriod)};
-                    table(""{_configuration.CacheTableName}"")
-                    | where PreciseTimeStamp between (start .. end)
-                    | where Stamp == ""{_configuration.Stamp}""
-                    | where Service == ""{Constants.ServiceName}"" or Service == ""{Constants.MasterServiceName}""
-                    | where Message has ""{_configuration.Check.Match} stop ""
-                    | where Message !has ""result=[Success"" // Looking only at failures
-                    | where Message !has ""Critical error occurred"" // Critical errors are handled by a different rule
-                    | project PreciseTimeStamp, Machine, Message, CorrelationId
-                    | parse Message with Operation:string "" stop "" * ""result=["" Result:string ""]."" *
-                    | where Result != ""OperationCancelled""
-                    | extend Operation=extract(""^((\\w+).(\\w+)).*"", 1, Operation) // Prune unnecessary parameters
-                    | parse Result with ""Error=["" * ""] Diagnostics=["" Diagnostics:string ""]""
-                    | parse Diagnostics with ExceptionType:string "": "" *
-                    | extend Result=iif(isnull(Diagnostics) or isempty(Diagnostics), Result, """")
-                    | extend Operation=iif(isnull(Operation) or isempty(Operation), ""Unknown"", Operation)
-                    | extend ExceptionType=iif(isnull(ExceptionType) or isempty(ExceptionType), ""Unknown"", ExceptionType)
-                    | project-away Message
-                    | summarize Count=count(), Machines=dcount(Machine, 2) by Operation, ExceptionType
-                    | where not(isnull(Machines))
-                    | sort by Machines desc, Count desc";
-            }
 
             var results = await QueryKustoAsync<Result>(context, query);
 
@@ -135,8 +115,9 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
             {
                 BiThreshold(result.Count, result.Machines, _configuration.Check.CountThresholds, _configuration.Check.MachinesThresholds, (severity, countThreshold, machinesThreshold) =>
                 {
-                    Emit(context, $"Errors_Operation_{_configuration.Check.Name}_{result.Operation}", severity,
-                        $"`{result.Machines}` machine(s) had `{result.Count}` errors (`{result.ExceptionType}`) in operation `{result.Operation}`",
+                    Emit(context, $"Errors_Operation_{_configuration.Check.Name}_{result.Component}.{result.Operation}", Severity.Info,
+                        $"`{result.Machines}` machine(s) had `{result.Count}` errors (`{result.ExceptionType}`) in operation `{result.Component}.{result.Operation}`",
+                        stamp: result.Stamp,
                         eventTimeUtc: now);
                 });
             }

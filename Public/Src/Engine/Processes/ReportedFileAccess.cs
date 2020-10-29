@@ -187,7 +187,7 @@ namespace BuildXL.Processes
         }
 
         /// <nodoc/>
-        public ReportedFileAccess CreateWithPath(string path, AbsolutePath manifestPath)
+        public ReportedFileAccess CreateWithPathAndAttributes(string path, AbsolutePath manifestPath, FlagsAndAttributes flagsAndAttributes)
         {
             return new ReportedFileAccess(
                 Operation,
@@ -200,7 +200,7 @@ namespace BuildXL.Processes
                 DesiredAccess,
                 ShareMode,
                 CreationDisposition,
-                FlagsAndAttributes,
+                flagsAndAttributes,
                 manifestPath,
                 path,
                 EnumeratePattern,
@@ -231,7 +231,7 @@ namespace BuildXL.Processes
         public bool Equals(ReportedFileAccess other)
         {
             return ManifestPath == other.ManifestPath &&
-                   string.Equals(Path, other.Path, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(Path, other.Path, OperatingSystemHelper.PathComparison) &&
                    RequestedAccess == other.RequestedAccess &&
                    Status == other.Status &&
                    Process == other.Process &&
@@ -242,7 +242,7 @@ namespace BuildXL.Processes
                    ShareMode == other.ShareMode &&
                    CreationDisposition == other.CreationDisposition &&
                    FlagsAndAttributes == other.FlagsAndAttributes &&
-                   string.Equals(EnumeratePattern, other.EnumeratePattern, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(EnumeratePattern, other.EnumeratePattern, OperatingSystemHelper.PathComparison) &&
                    Method == other.Method;
         }
 
@@ -448,6 +448,15 @@ namespace BuildXL.Processes
         public bool IsDirectoryCreation() => 
             Operation == ReportedFileOperation.CreateDirectory || 
             Operation == ReportedFileOperation.KAuthCreateDir;
+
+        /// <summary>
+        /// Whether this access represents a directory creation, and the directory was effectively created
+        /// </summary>
+        public bool IsDirectoryEffectivelyCreated() =>
+            // For the MacOS case, only effectively created directories are reported
+            Operation == ReportedFileOperation.KAuthCreateDir ||
+            // For the Windows case, this is the case when the return code is zero
+            (Operation == ReportedFileOperation.CreateDirectory && Error == 0);
 
         /// <summary>
         /// Whether this access represents a directory removal
@@ -759,8 +768,8 @@ namespace BuildXL.Processes
             unchecked
             {
                 return HashCodeHelper.Combine(
-                    string.IsNullOrEmpty(Path) ? ManifestPath.GetHashCode() : StringComparer.OrdinalIgnoreCase.GetHashCode(Path),
-                    string.IsNullOrEmpty(EnumeratePattern) ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(EnumeratePattern),
+                    string.IsNullOrEmpty(Path) ? ManifestPath.GetHashCode() : OperatingSystemHelper.PathComparer.GetHashCode(Path),
+                    string.IsNullOrEmpty(EnumeratePattern) ? 0 : OperatingSystemHelper.PathComparer.GetHashCode(EnumeratePattern),
                     Process != null ? (int)Process.ProcessId : 0,
                     (int)RequestedAccess,
                     (int)Status,

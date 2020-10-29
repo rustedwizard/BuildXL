@@ -103,6 +103,15 @@ interface DownloadSettings {
 /** We represent a passthrough environment variable with the value unit */ 
 type PassthroughEnvironmentVariable = Unit;
 
+/** An environment variable can be defined to have a value of the following types */
+type EnvironmentData = string | number | Path | PathFragment | CompoundEnvironmentData | Directory;
+
+/** A compound environment variable value. The separator defaults to ';' if not defined */
+interface CompoundEnvironmentData {
+    separator?: string; 
+    contents: EnvironmentData[];
+}
+
 /**
  * Resolver for MSBuild project-level build execution, utilizing the MsBuild static graph API to
  * find MSBuild files and convert them to a pip graph
@@ -188,11 +197,11 @@ interface MsBuildResolver extends ResolverBase, UntrackingSettings {
      * Note: if this field is not specified any change in an environment variable will potentially cause
      * cache misses for all pips. This is because there is no way to know which variables were actually used during the build.
      * Therefore, it is recommended to specify the environment explicitly.
-     * The value can be either a string or a PassthroughEnvironmentVariable, the latter representing that the associated variable will be exposed
+     * The value can be either EnvironmentData or a PassthroughEnvironmentVariable, the latter representing that the associated variable will be exposed
      * but its value won't be considered part of the build inputs for tracking purposes. This means that any change in the value of the 
      * variable won't cause a rebuild.
      */
-    environment?: Map<string, (PassthroughEnvironmentVariable | string)>;
+    environment?: Map<string, (PassthroughEnvironmentVariable | EnvironmentData)>;
 
     /**
      * Global properties to use for all projects.
@@ -268,7 +277,7 @@ interface MsBuildResolver extends ResolverBase, UntrackingSettings {
 /**
  * Resolver for Rush project-level build execution
  */
-interface RushResolver extends JavaScriptResolver {
+interface RushResolver extends JavaScriptResolverWithExecutionSemantics {
     kind: "Rush";
 
     /**
@@ -292,13 +301,31 @@ interface RushResolver extends JavaScriptResolver {
 /**
  * Resolver for Yarn project-level build execution
  */
-interface YarnResolver extends JavaScriptResolver {
+interface YarnResolver extends JavaScriptResolverWithExecutionSemantics {
     kind: "Yarn";
 
     /**
      * The location of yarn. If not provided, BuildXL will try to look for it under PATH.
      */
     yarnLocation?: File;
+}
+
+/**
+ * Resolver for Lage project-level build execution
+ */
+interface LageResolver extends JavaScriptResolver {
+    kind: "Lage";
+
+    /**
+     * The script command names to execute.
+     */
+    execute?: string[];
+
+    /**
+     * The location of NPM.  If not provided, BuildXL will try to look for it under PATH.
+     *  Npm is used to get Lage during graph construction.
+     */
+    npmLocation?: File;
 }
 
 /**
@@ -321,11 +348,12 @@ interface JavaScriptResolver extends ResolverBase, UntrackingSettings {
      * Note: if this field is not specified any change in an environment variable will potentially cause
      * cache misses for all pips. This is because there is no way to know which variables were actually used during the build.
      * Therefore, it is recommended to specify the environment explicitly.
-     * The value can be either a string or a PassthroughEnvironmentVariable, the latter representing that the associated variable will be exposed
+     * The value can be either EnvironmentData or a PassthroughEnvironmentVariable, the latter representing that the associated variable will be exposed
      * but its value won't be considered part of the build inputs for tracking purposes. This means that any change in the value of the 
      * variable won't cause a rebuild.
      */
-    environment?: Map<string, (PassthroughEnvironmentVariable | string)>;
+    environment?: Map<string, (PassthroughEnvironmentVariable | EnvironmentData)> 
+                | { [name:string]: (PassthroughEnvironmentVariable | EnvironmentData) };
 
     /**
      * For debugging purposes. If this field is true, the JSON representation of the project graph file is not deleted.
@@ -345,20 +373,6 @@ interface JavaScriptResolver extends ResolverBase, UntrackingSettings {
     additionalOutputDirectories?: (Path | RelativePath)[];
 
     /**
-     * The list of command script names to execute on each project. 
-     * Dependencies across commands can be specified. If a simple string is provided in the list, the command with that name will depend 
-     * on the command that precedes it on the list, or if it is the first one, on the same command of all its project dependencies.
-     * For example: if project A defines commands: ["build", "test"] and project A declares B and C as project dependencies, then 
-     * the build command of A will depend on the build command of both B and C. The test command of A will depend on the build command of A.
-     * Additionally, finer grained dependencies can be specified using a JavaScriptCommand. In this case, a list of dependencies for each command
-     * can be explicitly provided, indicating whether the dependency is on a command on the same project (local) or on a command on all the project 
-     * dependencies (project). The specified order in the list is irrelevant for JavaScriptCommands.
-     * If not provided, ["build"] is used.
-     * Any command specified here that doesn't have a corresponding script is ignored.
-     */
-    execute?: (string | JavaScriptCommand)[];
-
-    /**
      * Defines a collection of custom JavaScript commands that can later be used as part of 'execute'.
      */
     customCommands?: JavaScriptCustomCommand[];
@@ -375,6 +389,32 @@ interface JavaScriptResolver extends ResolverBase, UntrackingSettings {
      * Defaults to false.
      */
     writingToStandardErrorFailsExecution?: boolean;
+
+    /**
+     * When set, writes under each project node_modules folder is blocked.
+     * Defaults to false.
+     */
+    blockWritesUnderNodeModules?: boolean;
+}
+
+/**
+ * The list of commands to execute can be specified with finer-grained detail
+ */
+interface JavaScriptResolverWithExecutionSemantics extends JavaScriptResolver
+{
+    /**
+     * The list of command script names to execute on each project. 
+     * Dependencies across commands can be specified. If a simple string is provided in the list, the command with that name will depend 
+     * on the command that precedes it on the list, or if it is the first one, on the same command of all its project dependencies.
+     * For example: if project A defines commands: ["build", "test"] and project A declares B and C as project dependencies, then 
+     * the build command of A will depend on the build command of both B and C. The test command of A will depend on the build command of A.
+     * Additionally, finer grained dependencies can be specified using a JavaScriptCommand. In this case, a list of dependencies for each command
+     * can be explicitly provided, indicating whether the dependency is on a command on the same project (local) or on a command on all the project 
+     * dependencies (project). The specified order in the list is irrelevant for JavaScriptCommands.
+     * If not provided, ["build"] is used.
+     * Any command specified here that doesn't have a corresponding script is ignored.
+     */
+    execute?: (string | JavaScriptCommand)[];   
 }
 
 /**
@@ -569,14 +609,22 @@ interface UntrackingSettings {
     untrackedFiles?: File[];
 
     /**
-     * Individual directories to flag as untracked
+     * Individual directories to flag as untracked.
+     * A relative path is interpreted as relative to the corresponding project root
      */
-    untrackedDirectories?: Directory[];
+    untrackedDirectories?: (Directory | RelativePath)[];
 
     /**
-     * Cones (directories and its recursive content) to flag as untracked
+     * Cones (directories and its recursive content) to flag as untracked.
+     * A relative path is interpreted as relative to the corresponding project root
      */
-    untrackedDirectoryScopes?: Directory[];
+    untrackedDirectoryScopes?: (Directory | RelativePath)[];
+
+    /**
+     * Cones (directories and its recursive content) to flag as untracked for all projects in the build.
+     * The relative path is interepreted relative to each available project
+     */
+    untrackedGlobalDirectoryScopes?: RelativePath[];
 }
 
 interface NuGetConfiguration extends ToolConfiguration {
@@ -595,4 +643,4 @@ interface MsBuildResolverDefaults {
 
 }
 
-type Resolver = DScriptResolver | NuGetResolver | DownloadResolver | MsBuildResolver | NinjaResolver | CMakeResolver | RushResolver | YarnResolver;
+type Resolver = DScriptResolver | NuGetResolver | DownloadResolver | MsBuildResolver | NinjaResolver | CMakeResolver | RushResolver | YarnResolver | LageResolver;

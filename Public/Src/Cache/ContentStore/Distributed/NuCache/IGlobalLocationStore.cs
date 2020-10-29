@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Collections.Generic;
+using System.Diagnostics.ContractsLight;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
@@ -73,126 +74,5 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         /// <nodoc />
         CounterCollection<GlobalStoreCounters> Counters { get; }
-    }
-
-    /// <nodoc />
-    public class PutBlobResult : BoolResult
-    {
-        /// <nodoc />
-        public ContentHash Hash { get; }
-
-        /// <nodoc />
-        public long BlobSize { get; }
-
-        /// <nodoc />
-        public bool AlreadyInRedis { get; }
-
-        /// <nodoc />
-        public long? NewCapacityInRedis { get; }
-
-        /// <nodoc />
-        public string? RedisKey { get; }
-
-        /// <nodoc />
-        public PutBlobResult(ContentHash hash, long blobSize, bool alreadyInRedis = false, long? newCapacity = null, string? redisKey = null)
-        {
-            Hash = hash;
-            BlobSize = blobSize;
-            AlreadyInRedis = alreadyInRedis;
-            NewCapacityInRedis = newCapacity;
-            RedisKey = redisKey;
-        }
-
-        /// <nodoc />
-        public PutBlobResult(ContentHash hash, long blobSize, string errorMessage)
-            : base(errorMessage)
-        {
-            Hash = hash;
-            BlobSize = blobSize;
-        }
-
-        /// <nodoc />
-        public PutBlobResult(ResultBase other, string message, ContentHash hash, long blobSize)
-            : base(other, message)
-        {
-            Hash = hash;
-            BlobSize = blobSize;
-        }
-
-        /// <nodoc />
-        public PutBlobResult(ResultBase other, string message)
-            : base(other, message)
-        {
-        }
-
-        /// <inheritdoc />
-        public override string ToString()
-        {
-            string baseResult = $"Hash=[{Hash.ToShortString()}], BlobSize=[{BlobSize}]";
-            if (Succeeded)
-            {
-                if (AlreadyInRedis)
-                {
-                    return $"{baseResult}, AlreadyInRedis=[{AlreadyInRedis}]";
-                }
-
-                return $"{baseResult}. AlreadyInRedis=[False], RedisKey=[{RedisKey}], NewCapacity=[{NewCapacityInRedis}].";
-            }
-
-            return $"{baseResult}. {ErrorMessage}";
-        }
-    }
-
-    /// <nodoc />
-    public class GetBlobResult : BoolResult
-    {
-        /// <nodoc />
-        public ContentHash Hash { get; }
-
-        /// <summary>
-        /// True if the blob is found.
-        /// </summary>
-        public bool Found => Blob != null;
-
-        /// <nodoc />
-        public byte[]? Blob { get; }
-
-        /// <nodoc />
-        public GetBlobResult(ContentHash hash, byte[]? blob)
-        {
-            Hash = hash;
-            Blob = blob;
-        }
-
-        /// <nodoc />
-        public GetBlobResult(string errorMessage, string? diagnostics = null)
-            : base(errorMessage, diagnostics)
-        {
-
-        }
-
-        /// <nodoc />
-        public GetBlobResult(ResultBase other, string message)
-            : base(other, message)
-        {
-        }
-
-        /// <nodoc />
-        public GetBlobResult(ResultBase other, string message, ContentHash hash)
-            : base(other, message)
-        {
-            Hash = hash;
-        }
-
-        /// <inheritdoc />
-        public override string ToString()
-        {
-            if (Succeeded)
-            {
-                return $"Hash=[{Hash.ToShortString()}], Found={Found}";
-            }
-
-            return base.ToString();
-        }
     }
 }

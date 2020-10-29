@@ -55,16 +55,16 @@ namespace ContentStoreTest.Distributed.Sessions
 
             var settings = CreateSettings();
 
-            return new DistributedContentStore<AbsolutePath>(
+            return new DistributedContentStore(
                 localMachineLocation,
                 rootPath,
-                (contentStoreSettings, distributedStore) =>
+                (distributedStore) =>
                     new FileSystemContentStore(
                         FileSystem,
                         SystemClock.Instance,
                         rootPath,
                         configurationModel,
-                        settings: contentStoreSettings,
+                        settings: ContentStoreSettings.DefaultSettings,
                         distributedStore: distributedStore),
                 storeFactory,
                 settings: settings,

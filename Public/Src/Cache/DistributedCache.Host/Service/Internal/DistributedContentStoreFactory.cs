@@ -4,7 +4,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -14,22 +13,24 @@ using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
 using BuildXL.Cache.ContentStore.Distributed.Redis;
 using BuildXL.Cache.ContentStore.Distributed.Sessions;
 using BuildXL.Cache.ContentStore.Distributed.Stores;
-using BuildXL.Cache.ContentStore.Distributed.Utilities;
-using BuildXL.Cache.ContentStore.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
+using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Sessions;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
-using BuildXL.Cache.ContentStore.Utils;
+using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Cache.Host.Configuration;
 using BuildXL.Cache.MemoizationStore.Distributed.Stores;
 using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
 using Microsoft.Practices.TransientFaultHandling;
-using static BuildXL.Cache.Host.Service.Internal.ConfigurationHelper;
+using BandwidthConfiguration = BuildXL.Cache.ContentStore.Distributed.BandwidthConfiguration;
+using static BuildXL.Utilities.ConfigurationHelper;
+using BuildXL.Cache.ContentStore.Interfaces.Utils;
 
 namespace BuildXL.Cache.Host.Service.Internal
 {
@@ -47,7 +48,7 @@ namespace BuildXL.Cache.Host.Service.Internal
 
         private readonly DistributedContentSettings _distributedSettings;
         private readonly DistributedCacheServiceArguments _arguments;
-        private readonly DistributedContentCopier<AbsolutePath> _copier;
+        private readonly DistributedContentCopier _copier;
 
         /// <summary>
         /// This uses a Lazy because not having it breaks the local service use-case (i.e. running ContentStoreApp
@@ -68,9 +69,8 @@ namespace BuildXL.Cache.Host.Service.Internal
             _arguments = arguments;
             _distributedSettings = arguments.Configuration.DistributedContentSettings;
             _keySpace = string.IsNullOrWhiteSpace(_arguments.Keyspace) ? ContentLocationStoreFactory.DefaultKeySpace : _arguments.Keyspace;
-            _fileSystem = new PassThroughFileSystem(_logger);
+            _fileSystem = arguments.FileSystem;
             _secretRetriever = new DistributedCacheSecretRetriever(arguments);
-            var bandwidthCheckedCopier = new BandwidthCheckedCopier(_arguments.Copier, BandwidthChecker.Configuration.FromDistributedContentSettings(_distributedSettings), _logger);
 
             _orderedResolvedCacheSettings = ResolveCacheSettingsInPrecedenceOrder(arguments);
             Contract.Assert(_orderedResolvedCacheSettings.Count != 0);
@@ -78,26 +78,25 @@ namespace BuildXL.Cache.Host.Service.Internal
             RedisContentLocationStoreConfiguration = CreateRedisConfiguration();
             _distributedContentStoreSettings = CreateDistributedStoreSettings(_arguments, RedisContentLocationStoreConfiguration);
 
-            _copier = new DistributedContentCopier<AbsolutePath>(
+            _copier = new DistributedContentCopier(
                 _distributedContentStoreSettings,
                 _fileSystem,
-                fileCopier: bandwidthCheckedCopier,
-                fileExistenceChecker: _arguments.Copier,
-                _arguments.CopyRequester,
-                _arguments.PathTransformer,
-                _arguments.Overrides.Clock
+                fileCopier: _arguments.Copier,
+                copyRequester: _arguments.CopyRequester,
+                _arguments.Overrides.Clock,
+                _logger
             );
 
             _redisMemoizationStoreFactory = new Lazy<RedisMemoizationStoreFactory>(() => CreateRedisCacheFactory());
         }
 
-        private static List<ResolvedNamedCacheSettings> ResolveCacheSettingsInPrecedenceOrder(DistributedCacheServiceArguments arguments)
+        internal static List<ResolvedNamedCacheSettings> ResolveCacheSettingsInPrecedenceOrder(DistributedCacheServiceArguments arguments)
         {
             var localCasSettings = arguments.Configuration.LocalCasSettings;
             var cacheSettingsByName = localCasSettings.CacheSettingsByCacheName;
 
             Dictionary<string, string> cacheNamesByDrive =
-                cacheSettingsByName.ToDictionary(x => Path.GetPathRoot(x.Value.CacheRootPath), x => x.Key, StringComparer.OrdinalIgnoreCase);
+                cacheSettingsByName.ToDictionary(x => new AbsolutePath(x.Value.CacheRootPath).GetPathRoot(), x => x.Key, StringComparer.OrdinalIgnoreCase);
 
             var result = new List<ResolvedNamedCacheSettings>();
 
@@ -110,7 +109,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                         name: cacheName,
                         settings: cacheSettings,
                         resolvedCacheRootPath: resolvedCacheRootPath,
-                        machineLocation: arguments.PathTransformer.GetLocalMachineLocation(resolvedCacheRootPath)));
+                        machineLocation: arguments.Copier.GetLocalMachineLocation(resolvedCacheRootPath)));
             }
 
             // Add caches specified in drive preference order
@@ -165,18 +164,41 @@ namespace BuildXL.Cache.Host.Service.Internal
                 UseBinManager = _distributedSettings.UseBinManager || _distributedSettings.ProactiveCopyUsePreferredLocations,
                 PreferredLocationsExpiryTime = TimeSpan.FromMinutes(_distributedSettings.PreferredLocationsExpiryTimeMinutes),
                 PrimaryMachineLocation = OrderedResolvedCacheSettings[0].MachineLocation,
-                AdditionalMachineLocations = OrderedResolvedCacheSettings.Skip(1).Select(r => r.MachineLocation).ToArray(),
                 MachineListPrioritizeDesignatedLocations = _distributedSettings.PrioritizeDesignatedLocationsOnCopies,
                 MachineListDeprioritizeMaster = _distributedSettings.DeprioritizeMasterOnCopies,
-                TouchContentHashLists = _distributedSettings.TouchContentHashLists
+                TouchContentHashLists = _distributedSettings.TouchContentHashLists,
             };
 
+            ApplyIfNotNull(_distributedSettings.BlobOperationLimitCount, v => redisContentLocationStoreConfiguration.BlobOperationLimitCount = v);
+            ApplyIfNotNull(_distributedSettings.BlobOperationLimitSpanSeconds, v => redisContentLocationStoreConfiguration.BlobOperationLimitSpan = TimeSpan.FromSeconds(v));
+            ApplyIfNotNull(_distributedSettings.UseSeparateConnectionForRedisBlobs, v => redisContentLocationStoreConfiguration.UseSeparateConnectionForRedisBlobs = v);
+
+            // Stop passing additional stores when fully transitioned to unified mode
+            // since all drives appear under the same machine id
+            if (_distributedSettings.GetMultiplexMode() != MultiplexMode.Unified)
+            {
+                redisContentLocationStoreConfiguration.AdditionalMachineLocations = OrderedResolvedCacheSettings.Skip(1).Select(r => r.MachineLocation).ToArray();
+            }
+
             ApplyIfNotNull(_distributedSettings.ThrottledEvictionIntervalMinutes, v => redisContentLocationStoreConfiguration.ThrottledEvictionInterval = TimeSpan.FromMinutes(v));
+
+            // Redis-related configuration.
             ApplyIfNotNull(_distributedSettings.RedisConnectionErrorLimit, v => redisContentLocationStoreConfiguration.RedisConnectionErrorLimit = v);
             ApplyIfNotNull(_distributedSettings.RedisReconnectionLimitBeforeServiceRestart, v => redisContentLocationStoreConfiguration.RedisReconnectionLimitBeforeServiceRestart = v);
-            ApplyIfNotNull(_distributedSettings.TraceRedisFailures, v => redisContentLocationStoreConfiguration.TraceRedisFailures = v);
-            ApplyIfNotNull(_distributedSettings.TraceRedisTransientFailures, v => redisContentLocationStoreConfiguration.TraceRedisTransientFailures = v);
+            ApplyIfNotNull(_distributedSettings.DefaultRedisOperationTimeoutInSeconds, v => redisContentLocationStoreConfiguration.OperationTimeout = TimeSpan.FromSeconds(v));
             ApplyIfNotNull(_distributedSettings.MinRedisReconnectInterval, v => redisContentLocationStoreConfiguration.MinRedisReconnectInterval = v);
+            ApplyIfNotNull(_distributedSettings.CancelBatchWhenMultiplexerIsClosed, v => redisContentLocationStoreConfiguration.CancelBatchWhenMultiplexerIsClosed = v);
+
+            if (_distributedSettings.RedisExponentialBackoffRetryCount != null)
+            {
+                var exponentialBackoffConfiguration = new ExponentialBackoffConfiguration(
+                    _distributedSettings.RedisExponentialBackoffRetryCount.Value,
+                    minBackoff: IfNotNull(_distributedSettings.RedisExponentialBackoffMinIntervalInSeconds, v => TimeSpan.FromSeconds(v)),
+                    maxBackoff: IfNotNull(_distributedSettings.RedisExponentialBackoffMaxIntervalInSeconds, v => TimeSpan.FromSeconds(v)),
+                    deltaBackoff: IfNotNull(_distributedSettings.RedisExponentialBackoffDeltaIntervalInSeconds, v => TimeSpan.FromSeconds(v))
+                    );
+                redisContentLocationStoreConfiguration.ExponentialBackoffConfiguration = exponentialBackoffConfiguration;
+            }
 
             ApplyIfNotNull(_distributedSettings.ReplicaCreditInMinutes, v => redisContentLocationStoreConfiguration.ContentLifetime = TimeSpan.FromMinutes(v));
             ApplyIfNotNull(_distributedSettings.MachineRisk, v => redisContentLocationStoreConfiguration.MachineRisk = v);
@@ -188,8 +210,10 @@ namespace BuildXL.Cache.Host.Service.Internal
             ApplyIfNotNull(_distributedSettings.EvictionMinAgeMinutes, v => redisContentLocationStoreConfiguration.EvictionMinAge = TimeSpan.FromMinutes(v));
             ApplyIfNotNull(_distributedSettings.RetryWindowSeconds, v => redisContentLocationStoreConfiguration.RetryWindow = TimeSpan.FromSeconds(v));
 
-            ApplyIfNotNull(_distributedSettings.RedisGetBlobTimeoutMilliseconds, v => redisContentLocationStoreConfiguration.GetBlobTimeout = TimeSpan.FromMilliseconds(v));
-            ApplyIfNotNull(_distributedSettings.RedisGetCheckpointStateTimeoutInSeconds, v => redisContentLocationStoreConfiguration.GetCheckpointStateTimeout = TimeSpan.FromSeconds(v));
+            ApplyIfNotNull(_distributedSettings.Unsafe_MasterThroughputCheckMode, v => redisContentLocationStoreConfiguration.MasterThroughputCheckMode = v);
+            ApplyIfNotNull(_distributedSettings.Unsafe_EventHubCursorPosition, v => redisContentLocationStoreConfiguration.EventHubCursorPosition = v);
+            ApplyIfNotNull(_distributedSettings.RedisGetBlobTimeoutMilliseconds, v => redisContentLocationStoreConfiguration.BlobTimeout = TimeSpan.FromMilliseconds(v));
+            ApplyIfNotNull(_distributedSettings.RedisGetCheckpointStateTimeoutInSeconds, v => redisContentLocationStoreConfiguration.ClusterRedisOperationTimeout = TimeSpan.FromSeconds(v));
 
             redisContentLocationStoreConfiguration.ReputationTrackerConfiguration.Enabled = _distributedSettings.IsMachineReputationEnabled;
 
@@ -219,7 +243,18 @@ namespace BuildXL.Cache.Host.Service.Internal
 
                 ApplyIfNotNull(
                     _distributedSettings.FullRangeCompactionIntervalMinutes,
-                    v => dbConfig.FullRangeCompactionInterval = TimeSpan.FromMinutes(v));
+                    v =>
+                    {
+                        if (v < 0)
+                        {
+                            throw new ArgumentException($"`{nameof(_distributedSettings.FullRangeCompactionIntervalMinutes)}` must be greater than or equal to 0");
+                        }
+
+                        if (v > 0)
+                        {
+                            dbConfig.FullRangeCompactionInterval = TimeSpan.FromMinutes(v);
+                        }
+                    });
                 ApplyIfNotNull(
                     _distributedSettings.FullRangeCompactionVariant,
                     v =>
@@ -234,6 +269,8 @@ namespace BuildXL.Cache.Host.Service.Internal
                 ApplyIfNotNull(
                     _distributedSettings.FullRangeCompactionByteIncrementStep,
                     v => dbConfig.FullRangeCompactionByteIncrementStep = v);
+
+                ApplyIfNotNull(_distributedSettings.ContentLocationDatabaseEnableDynamicLevelTargetSizes, v => dbConfig.EnableDynamicLevelTargetSizes = v);
 
                 if (_distributedSettings.ContentLocationDatabaseLogsBackupEnabled)
                 {
@@ -261,35 +298,90 @@ namespace BuildXL.Cache.Host.Service.Internal
             return cacheFactory.CreateMemoizationStore(_logger);
         }
 
-        public DistributedContentStore<AbsolutePath> CreateContentStore(ResolvedNamedCacheSettings resolvedSettings)
+        public (IContentStore topLevelStore, DistributedContentStore primaryDistributedStore) CreateTopLevelStore()
         {
-            var contentStoreSettings = FromDistributedSettings(_distributedSettings);
+            (IContentStore topLevelStore, DistributedContentStore primaryDistributedStore) result = default;
 
-            ConfigurationModel configurationModel = configurationModel
-                = new ConfigurationModel(new ContentStoreConfiguration(new MaxSizeQuota(resolvedSettings.Settings.CacheSizeQuotaString)));
+            if (_distributedSettings.GetMultiplexMode() == MultiplexMode.Legacy)
+            {
+                var multiplexedStore =
+                    CreateMultiplexedStore(settings =>
+                        CreateDistributedContentStore(settings, dls =>
+                            CreateFileSystemContentStore(settings, dls)));
+                result.topLevelStore = multiplexedStore;
+                result.primaryDistributedStore = (DistributedContentStore)multiplexedStore.PreferredContentStore;
+            }
+            else
+            {
+                var distributedStore =
+                    CreateDistributedContentStore(OrderedResolvedCacheSettings[0], dls =>
+                        CreateMultiplexedStore(settings =>
+                            CreateFileSystemContentStore(settings, dls)));;
+                result.topLevelStore = distributedStore;
+                result.primaryDistributedStore = distributedStore;
+            }
 
+            return result;
+        }
+
+        public DistributedContentStore CreateDistributedContentStore(
+            ResolvedNamedCacheSettings resolvedSettings,
+            Func<IDistributedLocationStore, IContentStore> innerStoreFactory)
+        {
             _logger.Debug("Creating a distributed content store");
 
             var contentStore =
-                new DistributedContentStore<AbsolutePath>(
+                new DistributedContentStore(
                     resolvedSettings.MachineLocation,
                     resolvedSettings.ResolvedCacheRootPath,
-                    (checkLocal, distributedStore) =>
-                        ContentStoreFactory.CreateContentStore(_fileSystem, resolvedSettings.ResolvedCacheRootPath,
-                            contentStoreSettings: contentStoreSettings, distributedStore: distributedStore, configurationModel: configurationModel),
+                    distributedStore => innerStoreFactory(distributedStore),
                     _redisMemoizationStoreFactory.Value,
                     _distributedContentStoreSettings,
                     distributedCopier: _copier,
-                    clock: _arguments.Overrides.Clock,
-                    contentStoreSettings: contentStoreSettings);
+                    clock: _arguments.Overrides.Clock);
 
             _logger.Debug("Created Distributed content store.");
             return contentStore;
         }
 
+        public IContentStore CreateFileSystemContentStore(ResolvedNamedCacheSettings resolvedCacheSettings, IDistributedLocationStore distributedStore)
+        {
+            var contentStoreSettings = FromDistributedSettings(_distributedSettings);
+
+            ConfigurationModel configurationModel
+                = new ConfigurationModel(new ContentStoreConfiguration(new MaxSizeQuota(resolvedCacheSettings.Settings.CacheSizeQuotaString)));
+
+            return ContentStoreFactory.CreateContentStore(_fileSystem, resolvedCacheSettings.ResolvedCacheRootPath,
+                        contentStoreSettings: contentStoreSettings, distributedStore: distributedStore, configurationModel: configurationModel);
+        }
+
+        public MultiplexedContentStore CreateMultiplexedStore(Func<ResolvedNamedCacheSettings, IContentStore> createContentStore)
+        {
+            var cacheConfig = _arguments.Configuration;
+            var distributedSettings = cacheConfig.DistributedContentSettings;
+            var drivesWithContentStore = new Dictionary<string, IContentStore>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var resolvedCacheSettings in OrderedResolvedCacheSettings)
+            {
+                _logger.Debug($"Using [{resolvedCacheSettings.Settings.CacheRootPath}]'s settings: {resolvedCacheSettings.Settings}");
+
+                drivesWithContentStore[resolvedCacheSettings.Drive] = createContentStore(resolvedCacheSettings);
+            }
+
+            if (string.IsNullOrEmpty(cacheConfig.LocalCasSettings.PreferredCacheDrive))
+            {
+                var knownDrives = string.Join(",", OrderedResolvedCacheSettings.Select(cacheSetting => cacheSetting.Drive));
+                throw new ArgumentException($"Preferred cache drive is missing, which can indicate an invalid configuration. Known drives={knownDrives}");
+            }
+
+            return new MultiplexedContentStore(drivesWithContentStore, cacheConfig.LocalCasSettings.PreferredCacheDrive,
+                // None legacy mode attempts operation on all stores
+                tryAllSessions: distributedSettings.GetMultiplexMode() != MultiplexMode.Legacy);
+        }
+
         private static DistributedContentStoreSettings CreateDistributedStoreSettings(
             DistributedCacheServiceArguments arguments,
-            RedisContentLocationStoreConfiguration redisContentLocationStoreConfiguration)
+            RedisMemoizationStoreConfiguration redisContentLocationStoreConfiguration)
         {
             var distributedSettings = arguments.Configuration.DistributedContentSettings;
 
@@ -297,7 +389,8 @@ namespace BuildXL.Cache.Host.Service.Internal
             if (distributedSettings.IsPinBetterEnabled)
             {
                 ApplyIfNotNull(distributedSettings.PinMinUnverifiedCount, v => pinConfiguration.PinMinUnverifiedCount = v);
-                ApplyIfNotNull(distributedSettings.StartCopyWhenPinMinUnverifiedCountThreshold, v => pinConfiguration.StartCopyWhenPinMinUnverifiedCountThreshold = v);
+                ApplyIfNotNull(distributedSettings.StartCopyWhenPinMinUnverifiedCountThreshold, v => pinConfiguration.AsyncCopyOnPinThreshold = v);
+                ApplyIfNotNull(distributedSettings.AsyncCopyOnPinThreshold, v => pinConfiguration.AsyncCopyOnPinThreshold = v);
                 ApplyIfNotNull(distributedSettings.MaxIOOperations, v => pinConfiguration.MaxIOOperations = v);
             }
 
@@ -308,8 +401,9 @@ namespace BuildXL.Cache.Host.Service.Internal
                 MaxConcurrentCopyOperations = distributedSettings.MaxConcurrentCopyOperations,
                 PinConfiguration = pinConfiguration,
                 RetryIntervalForCopies = distributedSettings.RetryIntervalForCopies,
+                BandwidthConfigurations = FromDistributedSettings(distributedSettings.BandwidthConfigurations),
                 MaxRetryCount = distributedSettings.MaxRetryCount,
-                TimeoutForProactiveCopies = TimeSpan.FromMinutes(distributedSettings.TimeoutForProactiveCopiesMinutes),
+                ProactiveCopyIOGateTimeout = TimeSpan.FromSeconds(distributedSettings.ProactiveCopyIOGateTimeoutSeconds),
                 ProactiveCopyMode = (ProactiveCopyMode)Enum.Parse(typeof(ProactiveCopyMode), distributedSettings.ProactiveCopyMode),
                 PushProactiveCopies = distributedSettings.PushProactiveCopies,
                 ProactiveCopyOnPut = distributedSettings.ProactiveCopyOnPut,
@@ -323,6 +417,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                 LocationStoreBatchSize = distributedSettings.RedisBatchPageSize,
                 RestrictedCopyReplicaCount = distributedSettings.RestrictedCopyReplicaCount,
                 CopyAttemptsWithRestrictedReplicas = distributedSettings.CopyAttemptsWithRestrictedReplicas,
+                PeriodicCopyTracingInterval = TimeSpan.FromMinutes(distributedSettings.PeriodicCopyTracingIntervalMinutes),
                 AreBlobsSupported = redisContentLocationStoreConfiguration.AreBlobsSupported,
                 MaxBlobSize = redisContentLocationStoreConfiguration.MaxBlobSize,
                 DelayForProactiveReplication = TimeSpan.FromSeconds(distributedSettings.ProactiveReplicationDelaySeconds),
@@ -340,12 +435,75 @@ namespace BuildXL.Cache.Host.Service.Internal
             }
 
             ApplyIfNotNull(distributedSettings.MaximumConcurrentPutAndPlaceFileOperations, v => distributedContentStoreSettings.MaximumConcurrentPutAndPlaceFileOperations = v);
+            ApplyEnumIfNotNull<SemaphoreOrder>(distributedSettings.OrderForCopies, v => distributedContentStoreSettings.OrderForCopies = v);
+            ApplyEnumIfNotNull<SemaphoreOrder>(distributedSettings.OrderForProactiveCopies, v => distributedContentStoreSettings.OrderForCopies = v);
 
             arguments.Overrides.Override(distributedContentStoreSettings);
 
             ConfigurationPrinter.TraceConfiguration(distributedContentStoreSettings, arguments.Logger);
 
             return distributedContentStoreSettings;
+        }
+
+        private static IReadOnlyList<BandwidthConfiguration> FromDistributedSettings(Configuration.BandwidthConfiguration[] settings)
+        {
+            return settings?.Select(bc => fromDistributedConfiguration(bc)).ToArray() ?? new BandwidthConfiguration[0];
+
+            static BandwidthConfiguration fromDistributedConfiguration(Configuration.BandwidthConfiguration configuration)
+            {
+                var result = new BandwidthConfiguration()
+                {
+                    Interval = TimeSpan.FromSeconds(configuration.IntervalInSeconds), RequiredBytes = configuration.RequiredBytes,
+                };
+
+                ApplyIfNotNull(configuration.ConnectionTimeoutInSeconds, v => result.ConnectionTimeout = TimeSpan.FromSeconds(v));
+                ApplyIfNotNull(configuration.InvalidateOnTimeoutError, v => result.InvalidateOnTimeoutError = v);
+
+                return result;
+            }
+        }
+
+        internal static IContentStore CreateLocalContentStore(
+            DistributedContentSettings settings,
+            DistributedCacheServiceArguments arguments,
+            ResolvedNamedCacheSettings resolvedSettings,
+            IDistributedLocationStore distributedStore = null)
+        {
+            settings = settings ?? DistributedContentSettings.CreateDisabled();
+            var contentStoreSettings = FromDistributedSettings(settings);
+
+            ConfigurationModel configurationModel
+                = new ConfigurationModel(new ContentStoreConfiguration(new MaxSizeQuota(resolvedSettings.Settings.CacheSizeQuotaString)));
+
+            var localStore = ContentStoreFactory.CreateContentStore(arguments.FileSystem, resolvedSettings.ResolvedCacheRootPath,
+                            contentStoreSettings: contentStoreSettings, distributedStore: distributedStore, configurationModel: configurationModel);
+
+            if (settings.BackingGrpcPort != null)
+            {
+                var serviceClientRpcConfiguration = new ServiceClientRpcConfiguration(settings.BackingGrpcPort.Value)
+                {
+                    GrpcCoreClientOptions = settings.GrpcCopyClientGrpcCoreClientOptions,
+                };
+
+                var retryCount = arguments.Configuration.LocalCasSettings.CasClientSettings.RetryIntervalSecondsOnFailServiceCalls;
+                var retryIntervalInSeconds = arguments.Configuration.LocalCasSettings.CasClientSettings.RetryCountOnFailServiceCalls;
+                var serviceClientConfiguration =
+                    new ServiceClientContentStoreConfiguration(resolvedSettings.Name, serviceClientRpcConfiguration, settings.BackingScenario)
+                    {
+                        RetryCount = retryCount,
+                        RetryIntervalSeconds = retryIntervalInSeconds,
+                        GrpcEnvironmentOptions = arguments.Configuration.LocalCasSettings.ServiceSettings.GrpcEnvironmentOptions
+                    };
+
+                var backingStore = new ServiceClientContentStore(
+                    arguments.Logger,
+                    arguments.FileSystem,
+                    serviceClientConfiguration);
+
+                return new MultiLevelContentStore(localStore, backingStore);
+            }
+
+            return localStore;
         }
 
         private static ContentStoreSettings FromDistributedSettings(DistributedContentSettings settings)
@@ -364,6 +522,11 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             ApplyIfNotNull(settings.SilentOperationDurationThreshold, v => result.SilentOperationDurationThreshold = TimeSpan.FromSeconds(v));
             ApplyIfNotNull(settings.SilentOperationDurationThreshold, v => DefaultTracingConfiguration.DefaultSilentOperationDurationThreshold = TimeSpan.FromSeconds(v));
+            ApplyIfNotNull(settings.DefaultPendingOperationTracingIntervalInMinutes, v => DefaultTracingConfiguration.DefaultPendingOperationTracingInterval = TimeSpan.FromMinutes(v));
+            ApplyIfNotNull(settings.ReserveSpaceTimeoutInMinutes, v => result.ReserveTimeout = TimeSpan.FromMinutes(v));
+
+            ApplyIfNotNull(settings.UseAsynchronousFileStreamOptionByDefault, v => FileSystemDefaults.UseAsynchronousFileStreamOptionByDefault = v);
+
             return result;
         }
 
@@ -384,7 +547,7 @@ namespace BuildXL.Cache.Host.Service.Internal
         }
 
         private async Task ApplySecretSettingsForLlsAsync(
-            RedisContentLocationStoreConfiguration configuration,
+            RedisMemoizationStoreConfiguration configuration,
             AbsolutePath localCacheRoot,
             RocksDbContentLocationDatabaseConfiguration dbConfig)
         {
@@ -424,6 +587,9 @@ namespace BuildXL.Cache.Host.Service.Internal
             ApplyIfNotNull(
                 _distributedSettings.RestoreCheckpointIntervalMinutes,
                 value => checkpointConfiguration.RestoreCheckpointInterval = TimeSpan.FromMinutes(value));
+            ApplyIfNotNull(
+                _distributedSettings.RestoreCheckpointTimeoutMinutes,
+                value => checkpointConfiguration.RestoreCheckpointTimeout = TimeSpan.FromMinutes(value));
 
             ApplyIfNotNull(
                 _distributedSettings.UpdateClusterStateIntervalSeconds,
@@ -444,8 +610,13 @@ namespace BuildXL.Cache.Host.Service.Internal
             configuration.ReconciliationMaxRemoveHashesCycleSize = _distributedSettings.ReconciliationMaxRemoveHashesCycleSize;
             configuration.ReconciliationMaxRemoveHashesAddPercentage = _distributedSettings.ReconciliationMaxRemoveHashesAddPercentage;
 
+            ApplyIfNotNull(_distributedSettings.DistributedContentConsumerOnly, value => configuration.DistributedContentConsumerOnly = value);
             ApplyIfNotNull(_distributedSettings.UseIncrementalCheckpointing, value => configuration.Checkpoint.UseIncrementalCheckpointing = value);
             ApplyIfNotNull(_distributedSettings.IncrementalCheckpointDegreeOfParallelism, value => configuration.Checkpoint.IncrementalCheckpointDegreeOfParallelism = value);
+
+            ApplyIfNotNull(_distributedSettings.UseRedisPreventThreadTheftFeature, value => configuration.UsePreventThreadTheftFeature = value);
+            ApplyIfNotNull(_distributedSettings.RedisMemoizationDatabaseOperationTimeoutInSeconds, value => configuration.MemoizationOperationTimeout = TimeSpan.FromSeconds(value));
+            ApplyIfNotNull(_distributedSettings.RedisMemoizationSlowOperationCancellationTimeoutInSeconds, value => configuration.MemoizationSlowOperationCancellationTimeout = TimeSpan.FromSeconds(value));
 
             configuration.RedisGlobalStoreConnectionString = ((PlainTextSecret)GetRequiredSecret(secrets, _distributedSettings.GlobalRedisSecretName)).Secret;
             if (_distributedSettings.SecondaryGlobalRedisSecretName != null)
@@ -514,7 +685,8 @@ namespace BuildXL.Cache.Host.Service.Internal
                 eventHubName: _distributedSettings.EventHubName,
                 eventHubConnectionString: ((PlainTextSecret)GetRequiredSecret(secrets, _distributedSettings.EventHubSecretName)).Secret,
                 consumerGroupName: _distributedSettings.EventHubConsumerGroupName,
-                epoch: _keySpace + _distributedSettings.EventHubEpoch);
+                epoch: _keySpace + _distributedSettings.EventHubEpoch,
+                ignoreEpoch: _distributedSettings.Unsafe_IgnoreEpoch ?? false);
 
             dbConfig.Epoch = eventStoreConfiguration.Epoch;
 

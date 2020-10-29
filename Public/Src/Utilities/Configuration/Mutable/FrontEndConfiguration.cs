@@ -28,8 +28,8 @@ namespace BuildXL.Utilities.Configuration.Mutable
             Contract.Assume(pathRemapper != null);
 
             ProfileScript = template.ProfileScript;
-            ProfileReportDestination = template.ProfileReportDestination.HasValue ? (AbsolutePath?)pathRemapper.Remap(template.ProfileReportDestination.Value) : null;
-            FileToFileReportDestination = template.FileToFileReportDestination.HasValue ? (AbsolutePath?)pathRemapper.Remap(template.FileToFileReportDestination.Value) : null;
+            ProfileReportDestination = pathRemapper.Remap(template.ProfileReportDestination);
+            FileToFileReportDestination = pathRemapper.Remap(template.FileToFileReportDestination);
 
             EnableIncrementalFrontEnd = template.EnableIncrementalFrontEnd;
             EnableEvaluationThrottling = template.EnableEvaluationThrottling; 
@@ -43,6 +43,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             ThreadPoolMinThreadCountMultiplier = template.ThreadPoolMinThreadCountMultiplier;
             MaxTypeCheckingConcurrency = template.MaxTypeCheckingConcurrency;
             DisableLanguagePolicyAnalysis = template.DisableLanguagePolicyAnalysis;
+            DisableIsObsoleteCheckDuringConversion = template.DisableIsObsoleteCheckDuringConversion;
             NameResolutionSemantics = template.NameResolutionSemantics;
             PreserveFullNames = template.PreserveFullNames;
             DisableCycleDetection = template.DisableCycleDetection;
@@ -126,6 +127,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public bool? DisableLanguagePolicyAnalysis { get; set; }
+
+        /// <inheritdoc />
+        public bool? DisableIsObsoleteCheckDuringConversion { get; set; }
 
         /// <inheritdoc/>
         public NameResolutionSemantics? NameResolutionSemantics { get; set; }

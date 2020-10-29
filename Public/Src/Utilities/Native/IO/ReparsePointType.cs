@@ -16,12 +16,12 @@ namespace BuildXL.Native.IO
 
         /// <nodoc />
         DirectorySymlink = 2,
-        
+
         /// <nodoc />
         UnixSymlink = 3,
 
         /// <nodoc />
-        MountPoint = 4,
+        Junction = 4,
 
         /// <nodoc />
         NonActionable = 5

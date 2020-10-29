@@ -79,6 +79,16 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         public bool AreBlobsSupported => BlobExpiryTimeMinutes > 0 && MaxBlobCapacity > 0 && MaxBlobSize > 0;
 
         /// <summary>
+        /// The span of time that will delimit the operation count limit for blob operations.
+        /// </summary>
+        public TimeSpan BlobOperationLimitSpan { get; set; } = TimeSpan.FromMinutes(1);
+
+        /// <summary>
+        /// The amount of blob operations that we allow to go to Redis in a given period of time.
+        /// </summary>
+        public long BlobOperationLimitCount { get; set; } = 600;
+
+        /// <summary>
         /// The number of consecutive redis connection errors that will trigger reconnection.
         /// </summary>
         /// <remarks>
@@ -92,15 +102,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         /// </summary>
         public int RedisReconnectionLimitBeforeServiceRestart { get; set; } = int.MaxValue;
 
-        /// <summary>
-        /// Whether to trace failures in redis access layer.
-        /// </summary>
-        public bool TraceRedisFailures { get; set; } = false;
+        /// <nodoc />
+        public static TimeSpan DefaultOperationTimeout { get; } = TimeSpan.FromMinutes(10);
 
         /// <summary>
-        /// Whether to trace transient failures in redis access layer.
+        /// A defensive timeout for all redis operations (except blob operations that had its own (shorter) timeout).
         /// </summary>
-        public bool TraceRedisTransientFailures { get; set; } = false;
+        public TimeSpan OperationTimeout { get; set; } = DefaultOperationTimeout;
 
         /// <summary>
         /// Gets a minimal time between reconnecting to a redis instance.
@@ -108,13 +116,36 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         public TimeSpan MinRedisReconnectInterval { get; set; } = TimeSpan.FromMinutes(1);
 
         /// <summary>
-        /// Timeout for GetBlob operations.
+        /// Whether to cancel existing batches when a connection multiplexer used for creating it is closed.
         /// </summary>
-        public TimeSpan GetBlobTimeout { get; set; } = Timeout.InfiniteTimeSpan;
+        public bool CancelBatchWhenMultiplexerIsClosed { get; set; } = false;
 
         /// <summary>
-        /// Timeout for getting checkpoint information from redis.
+        /// Whether to treat <see cref="ObjectDisposedException"/> in <see cref="RedisDatabaseAdapter"/> as a transient error and retry the operation or not.
         /// </summary>
-        public TimeSpan GetCheckpointStateTimeout { get; set; } = TimeSpan.FromMinutes(5);
+        public bool TreatObjectDisposedExceptionAsTransient { get; set; } = false;
+
+        /// <summary>
+        /// An optional retry count that will be used for creating retry policy with fixed time interval between retries (of 1 second).
+        /// </summary>
+        /// <remarks>
+        /// This configuration is added here for completeness sake and should not be used in production environment because exponential backoff retry strategy usually gives better results.
+        /// </remarks>
+        public int? RetryCount { get; set; } = null;
+
+        /// <summary>
+        /// An optional configuration for exponential backoff retry policy.
+        /// </summary>
+        public ExponentialBackoffConfiguration ExponentialBackoffConfiguration { get; set; } = null;
+
+        /// <summary>
+        /// Timeout for GetBlob/PutBlob operations.
+        /// </summary>
+        public TimeSpan BlobTimeout { get; set; } = TimeSpan.FromSeconds(1);
+
+        /// <summary>
+        /// Timeout for getting .
+        /// </summary>
+        public TimeSpan ClusterRedisOperationTimeout { get; set; } = TimeSpan.FromMinutes(5);
     }
 }

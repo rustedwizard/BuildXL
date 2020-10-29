@@ -8,6 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Interfaces.Extensions;
@@ -28,187 +29,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         internal static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         internal const string EpochStartCursorFieldName = "EpochStartCursor";
-
-        /// <summary>
-        /// SetRangeBumpExpiryScript(string key, long sizeOffset, byte[] size, long keepAliveTime, long currentTime)
-        /// </summary>
-        private const string SetRangeBumpExpiryScript = @"
-redis.call(""SETRANGE"", KEYS[1], ARGV[1], ARGV[2]);
-local t = tonumber(ARGV[4]);
-local currentExpiry = redis.call(""TTL"", KEYS[1]);
-local currentExpiryTime = t + currentExpiry;
-if (currentExpiry < 0 or currentExpiryTime < tonumber(ARGV[3])) then
-    redis.call(""EXPIREAT"", KEYS[1], ARGV[3]);
-end";
-
-        /// <summary>
-        /// GetAndUpdateExpiry(string key, long keepAliveTime, long currentTime)
-        /// </summary>
-        private const string GetAndUpdateExpiry = @"
-local getValue = redis.call(""GET"", KEYS[1]);
-if (getValue ~= nil) then 
-    local t = tonumber(ARGV[2]);
-    local currentExpiry = redis.call(""TTL"", KEYS[1]);
-    local currentExpiryTime = t + currentExpiry;
-    if (currentExpiry < 0 or currentExpiryTime < tonumber(ARGV[1])) then
-         redis.call(""EXPIREAT"", KEYS[1], ARGV[1]);
-    end
-end
-return getValue;
-";
-
-        /// <summary>
-        /// SetExpiry(string key, long keepAliveTime, long currentTime)
-        /// </summary>
-        private const string SetExpiryScript = @"
-local currentExpiry = redis.call(""TTL"", KEYS[1]);
-local t = tonumber(ARGV[2]);
-local currentExpiryTime = t + currentExpiry;
-if (currentExpiry < 0 or currentExpiryTime < tonumber(ARGV[1])) then
-    return redis.call(""EXPIREAT"", KEYS[1], ARGV[1]);
-end
-return 0;
-";
-
-        /// <summary>
-        /// TouchOrSetLocationRecordsScript(string key, byte[] size, long machineIdWithSizeOffset, long keepAliveTime, long currentTime)
-        /// Returns 0 if the key exists, 1 if the key was added.
-        /// </summary>
-        internal static readonly string TouchOrSetLocationRecordScript = @"
-local size = ARGV[1];
-local machineIdWithSizeOffset = ARGV[2];
-local keepAliveTime = ARGV[3];
-local currentTime = ARGV[4];
-
--- Get current expiry. TTL call returns -2 if key doesn't exist and -1 if expiry is unset
-local currentExpiry = redis.call(""TTL"", KEYS[1]);
-
--- Calculate suggested expiry
-local t = tonumber(currentTime);
-local currentExpiryTime = t + currentExpiry;
-
--- If key doesn't exist, re-add the content location record.
--- Location record follows this structure: [size][location bitmask]
-if (currentExpiry == -2) then
-    redis.call(""SETRANGE"", KEYS[1], 0, size);
-    redis.call(""SETBIT"", KEYS[1], machineIdWithSizeOffset, 1);
-    redis.call(""EXPIREAT"", KEYS[1], keepAliveTime);
-    return 1;
-end
-
--- If current expiry is either unset or older than suggested expiry, update it
-if (currentExpiry == -1 or currentExpiryTime < tonumber(keepAliveTime)) then
-    redis.call(""EXPIREAT"", KEYS[1], keepAliveTime);
-end
-
-return 0;
-";
-
-        /// <summary>
-        /// Returns an array with content's eviction information: { safeToEvict, remoteLastAccessTime, replicaCount }.
-        /// safeToEvict is -1 when true, 1 when content does not fulfill requirements (matching last-access time and replica count if flag is set).
-        /// </summary>
-        private static readonly string TryTrimWithLastAccessTimeCheck = @"
-local redisExpiry = redis.call(""TTL"", KEYS[1]);
-if (redisExpiry > 0) then
-    local currentTime = tonumber(ARGV[1]);
-    local localAccessTime = tonumber(ARGV[2]);
-    local contentHashBumpTime = tonumber(ARGV[3]);
-    local targetRange = tonumber(ARGV[4]);
-    local machineId = tonumber(ARGV[5]);
-    local minReplicaCountToSafeEvict = tonumber(ARGV[6]);
-    local minReplicaCountToImmediateEvict = tonumber(ARGV[7]);
-
-    local redisAccessTime = currentTime + redisExpiry - contentHashBumpTime;
-    local locations = redis.call(""BITCOUNT"", KEYS[1], 8, -1);
-
-    -- If content is untracked, able to evict immediately
-    if (locations == 0) then
-        redis.call(""DEL"", KEYS[1]);
-        return { -1, redisAccessTime, locations };
-    end
-
-    if (locations >= minReplicaCountToImmediateEvict) then
-        redis.call(""SETBIT"", KEYS[1], machineId, 0);
-        return { -1, redisAccessTime, locations };
-    end
-
-    local lowerBound = redisAccessTime - targetRange;
-
-    -- If touched in the datacenter after local last-access time, unable to safely evict.
-    if (localAccessTime <= lowerBound) then
-        return { 1, redisAccessTime, locations };
-    end
-
-    -- If minReplicaCount is set, unable to safely evict if content isn't sufficiently replicated.
-    -- minReplicaCount is unset after the first pass, implying that content is aging out.
-    if (minReplicaCountToSafeEvict > 0) then
-        if (locations < minReplicaCountToSafeEvict) then
-            return { 1, redisAccessTime, locations };
-        end
-    end
-
-    -- If the last replica available is being considered for eviction, safe to remove the key.
-    if (locations == 1) then
-        redis.call(""DEL"", KEYS[1]);
-    end
-
-    -- Content is safe to evict and is unregistered.
-    redis.call(""SETBIT"", KEYS[1], machineId, 0);
-    return { -1, redisAccessTime, locations };
-end
-return { -1, -1, -1 };
-";
-
-        /// <summary>
-        /// SetBitIfExistAndRemoveIfNoLocationsLuaScript(string key, bool setBit, long offset)
-        /// If the key exists then the value will be set. If setting bit results in empty bitmask, key is removed.
-        /// </summary>
-        private static readonly string SetBitIfExistAndRemoveIfEmptyBitMaskLuaScript = @"
-if (redis.call(""EXISTS"", KEYS[1]) == 1) then
-    local setResult = redis.call(""SETBIT"", KEYS[1], ARGV[1], ARGV[2]);
-    if (ARGV[2] ~= true) then
-        -- Check set bits starting from index 8 (file size is 8 bytes, taking up indexes 0-7) to the end of bitmask
-        local locations = redis.call(""BITCOUNT"", KEYS[1], 8, -1);
-        if (locations == 0) then
-            redis.call(""DEL"", KEYS[1]);
-        end
-    end
-    return setResult;
-else
-    return -1;
-end";
-
-        /// <summary>
-        /// IncrementBumpExpiryIfBelowOrEqualValue(string key, long comparisonValue, TimeSpan timeToLiveSeconds, long requestedIncrement)
-        /// </summary>
-        private static readonly string IncrementBumpExpiryIfBelowOrEqualValue = @"
-local requestedIncrement = tonumber(ARGV[3]);
-local comparisonValue = tonumber(ARGV[1]);
-local retrievedValue = redis.call(""GET"", KEYS[1]);
-local currentValue = 0;
-local priorValue = 0;
-if (tonumber(retrievedValue) ~= nil) then
-    priorValue = tonumber(retrievedValue);
-end
-
--- Constrain requestedIncrement to only modify value to be between range [0, comparisonValue]
-if (requestedIncrement >= 0) then
-    requestedIncrement = math.max(0, math.min(comparisonValue - priorValue, requestedIncrement));
-else
-    requestedIncrement = math.max(-priorValue, requestedIncrement);
-end
-
-if (requestedIncrement ~= 0) then
-    currentValue = redis.call(""INCRBY"", KEYS[1], requestedIncrement);
-    if (priorValue == 0) then
-        redis.call(""EXPIRE"", KEYS[1], ARGV[2]);
-    end
-else
-    currentValue = priorValue;
-end
-
-return { requestedIncrement, currentValue }";
 
         /// <summary>
         /// (int slotNumber) AddCheckpoint(string checkpointsKey, string checkpointId, long sequenceNumber, long checkpointCreationTime, string machineName, int maxSlotCount)
@@ -269,6 +89,11 @@ return { requestedIncrement, currentValue }";
             /// Updates the final exception from the redis batch to the consumers' task.
             /// </summary>
             void SetFailure(Exception exception);
+
+            /// <summary>
+            /// Updates the final result from the redis batch on the consumers' task.
+            /// </summary>
+            void SetCancelled();
         }
 
         /// <inheritdoc />
@@ -298,22 +123,26 @@ return { requestedIncrement, currentValue }";
                 // SetResult causes a task's continuation to run in the same thread that can cause issues
                 // because a continuation of BatchExecutionTask could be a synchronous continuation as well.
                 await Task.Yield();
-                FinalTaskResult.SetResult(taskResult);
+                FinalTaskResult.TrySetResult(taskResult);
+            }
+
+            public void SetCancelled()
+            {
+                FinalTaskResult.TrySetCanceled();
             }
 
             public void SetFailure(Exception exception)
             {
-                FinalTaskResult.SetException(exception);
+                FinalTaskResult.TrySetException(exception);
             }
         }
 
         private readonly List<IRedisOperationAndResult> _redisOperations = new List<IRedisOperationAndResult>();
-        private readonly string _databaseName;
 
-        public string DatabaseName => _databaseName;
+        public string DatabaseName { get; }
 
         /// <nodoc />
-        public RedisBatch(RedisOperation operation, string keySpace, string databaseName) => (Operation, KeySpace, _databaseName) = (operation, keySpace, databaseName);
+        public RedisBatch(RedisOperation operation, string keySpace, string databaseName) => (Operation, KeySpace, DatabaseName) = (operation, keySpace, databaseName);
 
         /// <inheritdoc />
         public RedisOperation Operation { get; }
@@ -339,7 +168,7 @@ return { requestedIncrement, currentValue }";
             AddOperation(key, operation).FireAndForget(context, batch: this, operationName);
         }
 
-        /// <inheritdoc />
+        /// <nodoc />
         public async Task<(int machineId, bool isAdded)> GetOrAddMachineAsync(string clusterStateKey, string machineLocation, DateTime currentTime)
         {
             var redisOperation =
@@ -382,7 +211,7 @@ return { requestedIncrement, currentValue }";
             return result;
         }
 
-        /// <inheritdoc />
+        /// <nodoc />
         public async Task<(int maxMachineId, Dictionary<MachineId, MachineLocation> unknownMachines)> GetUnknownMachinesAsync(
             string clusterStateKey,
             int maxKnownMachineId)
@@ -447,14 +276,6 @@ return { requestedIncrement, currentValue }";
             var closedMachinesData = (byte[])arrayResult[2] ?? CollectionUtilities.EmptyArray<byte>();
             var closedMachineIdSet = new BitMachineIdSet(closedMachinesData, 0);
             return (priorState, inactiveMachineIdSet, closedMachineIdSet);
-        }
-
-        /// <inheritdoc />
-        public Task StringSetBitAsync(string key, long offset, bool bitValue)
-        {
-            var redisOperation = new RedisOperationAndResult<bool>(batch => batch.StringSetBitAsync(key, offset, bitValue));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
         }
 
         /// <inheritdoc />
@@ -564,15 +385,7 @@ return { requestedIncrement, currentValue }";
         {
             return originalKey.StartsWith(KeySpace) ? originalKey.Substring(KeySpace.Length) : originalKey;
         }
-
-        /// <inheritdoc />
-        public Task<TimeSpan?> KeyTimeToLiveAsync(string key)
-        {
-            var redisOperation = new RedisOperationAndResult<TimeSpan?>(batch => batch.KeyTimeToLiveAsync(key));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
+        
         /// <inheritdoc />
         public Task<bool> KeyDeleteAsync(string key)
         {
@@ -580,15 +393,7 @@ return { requestedIncrement, currentValue }";
             _redisOperations.Add(redisOperation);
             return redisOperation.FinalTaskResult.Task;
         }
-
-        /// <inheritdoc />
-        public Task<bool> SetAddAsync(string key, RedisValue value)
-        {
-            var redisOperation = new RedisOperationAndResult<bool>(batch => batch.SetAddAsync(key, value));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
+        
         /// <inheritdoc />
         public Task<long> SetAddAsync(string key, RedisValue[] values)
         {
@@ -603,141 +408,6 @@ return { requestedIncrement, currentValue }";
             var redisOperation = new RedisOperationAndResult<RedisValue[]>(batch => batch.SetMembersAsync(key));
             _redisOperations.Add(redisOperation);
             return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public Task<bool> SetRemoveAsync(RedisKey key, RedisValue value)
-        {
-            var redisOperation = new RedisOperationAndResult<bool>(batch => batch.SetRemoveAsync(key, value));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public Task<long> SetRemoveAsync(RedisKey key, RedisValue[] values)
-        {
-            var redisOperation = new RedisOperationAndResult<long>(batch => batch.SetRemoveAsync(key, values));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public Task<long> SetLengthAsync(RedisKey key, CommandFlags commandFlags = CommandFlags.None)
-        {
-            var redisOperation = new RedisOperationAndResult<long>(batch => batch.SetLengthAsync(key, commandFlags));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public Task<RedisResult> SetBitIfExistAndRemoveIfEmptyBitMaskAsync(string key, long offset, bool bitValue)
-        {
-            var redisOperation =
-                new RedisOperationAndResult<RedisResult>(
-                    batch =>
-                        batch.ScriptEvaluateAsync(SetBitIfExistAndRemoveIfEmptyBitMaskLuaScript, new RedisKey[] { key }, new RedisValue[] { offset, bitValue }));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public async Task<RedisIncrementResult> TryStringIncrementBumpExpiryIfBelowOrEqualValueAsync(string key, uint comparisonValue, TimeSpan timeToLive, long incrementCount = 1)
-        {
-            var redisOperation =
-                new RedisOperationAndResult<RedisResult>(
-                    batch =>
-                        batch.ScriptEvaluateAsync(IncrementBumpExpiryIfBelowOrEqualValue, new RedisKey[] { key }, new RedisValue[] { comparisonValue, (long)timeToLive.TotalSeconds, incrementCount }));
-            _redisOperations.Add(redisOperation);
-            var result = await redisOperation.FinalTaskResult.Task;
-            long[] arrayResult = (long[])result;
-            return new RedisIncrementResult(appliedIncrement: arrayResult[0], incrementedValue: arrayResult[1]);
-        }
-
-        /// <inheritdoc />
-        public Task<RedisResult> StringSetRangeAndBumpExpiryAsync(
-            string key,
-            long rangeOffset,
-            byte[] range,
-            DateTime newExpiryTimeUtc,
-            DateTime currentTimeUtc)
-        {
-            long expiryTime = GetUnixTimeSecondsFromDateTime(newExpiryTimeUtc);
-            long unixCurrentTime = GetUnixTimeSecondsFromDateTime(currentTimeUtc);
-            var redisOperation =
-                new RedisOperationAndResult<RedisResult>(
-                    batch =>
-                        batch.ScriptEvaluateAsync(SetRangeBumpExpiryScript, new RedisKey[] { key }, new RedisValue[] { rangeOffset, range, expiryTime, unixCurrentTime }));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public Task<RedisResult> StringGetAndUpdateExpiryAsync(string key, DateTime keepAliveTime, DateTime currentTime)
-        {
-            long unixExpiry = GetUnixTimeSecondsFromDateTime(keepAliveTime);
-            long unixCurrentTime = GetUnixTimeSecondsFromDateTime(currentTime);
-            var redisOperation =
-                new RedisOperationAndResult<RedisResult>(
-                    batch =>
-                        batch.ScriptEvaluateAsync(GetAndUpdateExpiry, new RedisKey[] { key }, new RedisValue[] { unixExpiry, unixCurrentTime }));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public Task<RedisResult> SetExpiryAsync(string key, DateTime keepAliveTime, DateTime currentTime)
-        {
-            long unixExpiry = GetUnixTimeSecondsFromDateTime(keepAliveTime);
-            long unixCurrentTime = GetUnixTimeSecondsFromDateTime(currentTime);
-            var redisOperation =
-                new RedisOperationAndResult<RedisResult>(
-                    batch =>
-                        batch.ScriptEvaluateAsync(SetExpiryScript, new RedisKey[] { key }, new RedisValue[] { unixExpiry, unixCurrentTime }));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public Task<RedisResult> TouchOrSetLocationRecordAsync(string key, byte[] sizeInBytes, long locationIdWithSizeOffset, DateTime keepAliveTime, DateTime currentTime)
-        {
-            long unixExpiry = GetUnixTimeSecondsFromDateTime(keepAliveTime);
-            long unixCurrentTime = GetUnixTimeSecondsFromDateTime(currentTime);
-            var redisOperation =
-                new RedisOperationAndResult<RedisResult>(
-                    batch =>
-                        batch.ScriptEvaluateAsync(TouchOrSetLocationRecordScript, new RedisKey[] { key }, new RedisValue[] { sizeInBytes, locationIdWithSizeOffset, unixExpiry, unixCurrentTime }));
-            _redisOperations.Add(redisOperation);
-            return redisOperation.FinalTaskResult.Task;
-        }
-
-        /// <inheritdoc />
-        public async Task<RedisLastAccessTimeResult> TryTrimWithLastAccessTimeCheckAsync(
-            string key,
-            DateTime currentTime,
-            DateTime localAccessTime,
-            TimeSpan contentHashBumpTime,
-            TimeSpan targetRange,
-            long machineId,
-            int minReplicaCountForSafeEviction,
-            int minReplicaCountForImmediateEviction)
-        {
-            long unixCurrentTime = GetUnixTimeSecondsFromDateTime(currentTime);
-            long unixLocalAccessTime = GetUnixTimeSecondsFromDateTime(localAccessTime);
-            long contentHashBumpTimeSeconds = (long)contentHashBumpTime.TotalSeconds;
-            long targetRangeSeconds = (long)targetRange.TotalSeconds;
-            var redisOperation =
-                new RedisOperationAndResult<RedisResult>(
-                    batch =>
-                        batch.ScriptEvaluateAsync(
-                            TryTrimWithLastAccessTimeCheck,
-                            new RedisKey[] { key },
-                            new RedisValue[] { unixCurrentTime, unixLocalAccessTime, contentHashBumpTimeSeconds, targetRangeSeconds, machineId, minReplicaCountForSafeEviction, minReplicaCountForImmediateEviction }));
-            _redisOperations.Add(redisOperation);
-            var result = await redisOperation.FinalTaskResult.Task;
-            long[] arrayResult = (long[])result;
-            bool safeToEvict = arrayResult[0] < 0;
-            DateTime lastAccessTime = arrayResult[1] > 0 ? UnixEpoch.AddSeconds(arrayResult[1]) : DateTime.MinValue;
-            return new RedisLastAccessTimeResult(safeToEvict, lastAccessTime, arrayResult[2]);
         }
 
         /// <inheritdoc />
@@ -849,13 +519,13 @@ return { requestedIncrement, currentValue }";
         }
 
         /// <inheritdoc />
-        public Task ExecuteBatchOperationAndGetCompletion(Context context, IDatabase database)
+        public async Task ExecuteBatchOperationAndGetCompletion(Context context, IDatabase database, CancellationToken token)
         {
             if (_redisOperations.Count == 0)
             {
-                return Task.FromResult(0);
+                return;
             }
-
+            
             IBatch batch = database.CreateBatch();
             var taskToTrack = new List<Task>(_redisOperations.Count);
             foreach (IRedisOperationAndResult operation in _redisOperations)
@@ -871,7 +541,9 @@ return { requestedIncrement, currentValue }";
             }
 
             batch.Execute();
-            return Task.WhenAll(taskToTrack);
+
+            // The following call with throw an exception if token triggers before the completion of the tasks.
+            await TaskUtilities.WhenAllWithCancellationAsync(taskToTrack, token);
         }
 
         /// <inheritdoc />
@@ -886,6 +558,15 @@ return { requestedIncrement, currentValue }";
             foreach (IRedisOperationAndResult operation in _redisOperations)
             {
                 operation.SetFailure(exception);
+            }
+        }
+
+        /// <inheritdoc />
+        public void NotifyConsumersOfCancellation()
+        {
+            foreach (IRedisOperationAndResult operation in _redisOperations)
+            {
+                operation.SetCancelled();
             }
         }
 
@@ -912,7 +593,7 @@ return { requestedIncrement, currentValue }";
         public static void FireAndForget(this Task task, Context context, IRedisBatch batch, [CallerMemberName]string operation = null)
         {
             string extraMessage = string.IsNullOrEmpty(batch.DatabaseName) ? string.Empty : $"Database={batch.DatabaseName}";
-            task.FireAndForget(context, operation, failureSeverity: Severity.Debug, extraMessage: extraMessage);
+            task.FireAndForget(context, operation, failureSeverity: Severity.Diagnostic, extraMessage: extraMessage);
         }
     }
 }

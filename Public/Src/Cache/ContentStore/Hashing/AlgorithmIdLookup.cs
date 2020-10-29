@@ -15,12 +15,11 @@ namespace BuildXL.Cache.ContentStore.Hashing
         private static readonly IReadOnlyDictionary<HashType, byte> AlgorithmIdByHashType = new Dictionary<HashType, byte>
             {
                 {HashType.Vso0, VsoHash.VsoAlgorithmId},
-                {HashType.DedupChunk, ChunkDedupIdentifier.ChunkAlgorithmId},
-                {HashType.DedupNode, NodeDedupIdentifier.NodeAlgorithmId},
-
-                // DedupNodeOrChunk will always end with DedupChunk or DedupNode algorithm IDs. Default to DedupChunk.
-                {HashType.DedupNodeOrChunk, ChunkDedupIdentifier.ChunkAlgorithmId},
-                {HashType.Murmur,  MurmurHashInfo.MurmurAlgorithmId}
+                {HashType.DedupSingleChunk, ChunkDedupIdentifier.ChunkAlgorithmId},
+                {HashType.DedupNode, (byte)NodeAlgorithmId.Node64K},
+                {HashType.Dedup64K, (byte)NodeAlgorithmId.Node64K},
+                {HashType.Dedup1024K, (byte)NodeAlgorithmId.Node1024K},
+                {HashType.Murmur, MurmurHashInfo.MurmurAlgorithmId}
             };
 
         /// <summary>
@@ -44,8 +43,10 @@ namespace BuildXL.Cache.ContentStore.Hashing
             return contentHash.HashType switch
             {
                 HashType.Vso0 => hashTag == AlgorithmIdLookup.Find(HashType.Vso0),
-                HashType.DedupNodeOrChunk => hashTag == AlgorithmIdLookup.Find(HashType.DedupNode) ||
-                                             hashTag == AlgorithmIdLookup.Find(HashType.DedupChunk),
+                HashType.Dedup64K => hashTag == AlgorithmIdLookup.Find(HashType.DedupNode) ||
+                                     hashTag == AlgorithmIdLookup.Find(HashType.DedupSingleChunk),
+                HashType.Dedup1024K => hashTag == AlgorithmIdLookup.Find(HashType.Dedup1024K) ||
+                                       hashTag == AlgorithmIdLookup.Find(HashType.DedupSingleChunk),
                 HashType.Murmur => hashTag == AlgorithmIdLookup.Find(HashType.Murmur),
                 _ => throw new ArgumentException($"{contentHash.HashType} is not a tagged hash.")
             };

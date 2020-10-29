@@ -29,7 +29,6 @@ export namespace DropDaemon {
             importFrom("BuildXL.Utilities").Native.dll,
             importFrom("BuildXL.Utilities").Storage.dll,
             importFrom("BuildXL.Tools").ServicePipDaemon.dll,
-
             importFrom("ArtifactServices.App.Shared").pkg,
             importFrom("ArtifactServices.App.Shared.Cache").pkg,
             importFrom("Drop.App.Core").pkg,
@@ -83,19 +82,27 @@ export namespace DropDaemon {
         // options: toolTemplate,
         // });
 
+    const specs = [
+        f`Tool.DropDaemonRunner.dsc`,
+        f`Tool.DropDaemonRunnerOfficeShim.dsc`,
+        f`Tool.DropDaemonInterfaces.dsc`,
+        f`Tool.DropDaemonCloudBuildHelper.dsc`,
+        {file: f`LiteralFiles/package.dsc.literal`, targetFileName: a`package.dsc`},
+        {file: f`LiteralFiles/package.config.dsc.literal`, targetFileName: a`package.config.dsc`},
+        {
+            file: f`LiteralFiles/Tool.DropDaemonTool.dsc.literal`,
+            targetFileName: a`Tool.DropDaemonTool.dsc`,
+        }];
+
+    @@public
+    export const evaluationOnlyDeployment: Deployment.Definition = !BuildXLSdk.isDropToolingEnabled ? undefined : {
+        contents: specs
+    };
+
     @@public
     export const deployment: Deployment.Definition = !BuildXLSdk.isDropToolingEnabled ? undefined : {
         contents: [
-            f`Tool.DropDaemonRunner.dsc`,
-            f`Tool.DropDaemonRunnerOfficeShim.dsc`,
-            f`Tool.DropDaemonInterfaces.dsc`,
-            f`Tool.DropDaemonCloudBuildHelper.dsc`,
-            {file: f`LiteralFiles/package.dsc.literal`, targetFileName: a`package.dsc`},
-            {file: f`LiteralFiles/package.config.dsc.literal`, targetFileName: a`package.config.dsc`},
-            {
-                file: f`LiteralFiles/Tool.DropDaemonTool.dsc.literal`,
-                targetFileName: a`Tool.DropDaemonTool.dsc`,
-            },
+            ...specs,
             {
                 subfolder: "bin",
                 contents: [
@@ -104,4 +111,9 @@ export namespace DropDaemon {
             },
         ],
     };
+
+    @@public
+    export function selectDeployment(evaluationOnly: boolean) : Deployment.Definition {
+        return evaluationOnly? evaluationOnlyDeployment : deployment;
+    }
 }

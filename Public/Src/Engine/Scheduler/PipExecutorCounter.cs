@@ -959,10 +959,10 @@ namespace BuildXL.Scheduler
         TryCreateSymlinkDuration,
 
         /// <summary>
-        /// The time spent to create symlink for file materialization.
+        /// The time spent to create a reparse point for file materialization.
         /// </summary>
         [CounterType(CounterType.Stopwatch)]
-        TryMaterializeSymlinkDuration,
+        TryMaterializeReparsePointDuration,
 
         /// <summary>
         /// The number of real filesystem directory enumerations.
@@ -1254,6 +1254,29 @@ namespace BuildXL.Scheduler
         /// </summary>
         [CounterType(CounterType.Stopwatch)]
         ComputeCompositeSharedOpaqueContentDuration,
+
+        /// <summary>
+        /// Number of times the VM or VmCommandProxy caused failures during Sandboxed Process Pip execution.
+        /// </summary>
+        VmExecutionRetriesCount,
+
+        /// <summary>
+        /// Number of times non-existent directory probes for paths under opaque directories
+        /// re-classified as existing directory probes.
+        /// </summary>
+        NonexistentDirectoryProbesReclassifiedAsExistingDirectoryProbe,
+
+        /// <summary>
+        /// Time spent enumerating output directory when materializing outputs.
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        FileContentManagerEnumerateOutputDirectoryMaterializeOutputs,
+
+        /// <summary>
+        /// Time spent enumerating output directory when hashing artifacts.
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        FileContentManagerEnumerateOutputDirectoryHashArtifacts,
     }
 
     /// <summary>

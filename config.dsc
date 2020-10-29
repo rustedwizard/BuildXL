@@ -45,7 +45,7 @@ config({
             // but when it fails to download (e.g. from a share) the build is aborted. Consider making the failure non-blocking.
             configuration: {
                 toolUrl: "https://dist.nuget.org/win-x86-commandline/v4.9.4/NuGet.exe",
-                hash: "17E8C8C0CDCCA3A6D1EE49836847148C4623ACEA5E6E36E10B691DA7FDC4C39200"
+                hash: "VSO0:17E8C8C0CDCCA3A6D1EE49836847148C4623ACEA5E6E36E10B691DA7FDC4C39200"
             },
 
             repositories: importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal
@@ -81,8 +81,6 @@ config({
                 { id: "Microsoft.NETFramework.ReferenceAssemblies.net462", version: "1.0.0-alpha-5" },
                 { id: "Microsoft.NETFramework.ReferenceAssemblies.net472", version: "1.0.0-alpha-5" },
 
-                { id: "EntityFramework", version: "6.0.0" },
-
                 { id: "System.Diagnostics.DiagnosticSource", version: "4.5.0" },
                 { id: "System.Diagnostics.DiagnosticSource", version: "4.0.0-beta-23516", alias: "System.Diagnostics.DiagnosticsSource.ForEventHub"},
 
@@ -97,7 +95,6 @@ config({
                     dependentPackageIdsToIgnore: ["SQLitePCLRaw.bundle_green", "System.Composition"],
                 },
                 { id: "Microsoft.CodeAnalysis.CSharp.Workspaces", version: "3.5.0" },
-                { id: "Microsoft.CodeAnalysis.VisualBasic.Workspaces", version: "3.5.0" },
 
                 // Old code analysis libraries, for tests only
                 { id: "Microsoft.CodeAnalysis.Common", version: "2.10.0", alias: "Microsoft.CodeAnalysis.Common.Old" },
@@ -155,7 +152,7 @@ config({
                 // RocksDb
                 { id: "RocksDbSharp", version: "6.10.2-b20200625.3", alias: "RocksDbSharpSigned" },
                 { id: "RocksDbNative", version: "6.10.2-b20200625.3" },
-                
+
                 { id: "JsonDiffPatch.Net", version: "2.1.0" },
 
                 // Event hubs
@@ -171,6 +168,13 @@ config({
                 { id: "System.IdentityModel.Tokens.Jwt", version: "5.2.2",
                     dependentPackageIdsToSkip: ["Newtonsoft.Json"] },
 
+                // Key Vault
+                { id: "Azure.Security.KeyVault.Secrets", version: "4.0.3" },
+                { id: "Azure.Identity", version: "1.1.1" },
+                { id: "Microsoft.Identity.Client", version: "4.16.1" },
+                { id: "Azure.Core", version: "1.3.0" },
+
+
                 // Package sets
                 ...importFile(f`config.nuget.vssdk.dsc`).pkgs,
                 ...importFile(f`config.nuget.aspNetCore.dsc`).pkgs,
@@ -179,10 +183,8 @@ config({
                 ...importFile(f`config.microsoftInternal.dsc`).pkgs,
 
                 { id: "WindowsAzure.Storage", version: "9.3.3", alias: "WindowsAzure.Storage" },
-                { id: "Microsoft.Data.OData", version: "5.8.4" },
                 { id: "Microsoft.Data.Services.Client", version: "5.8.2" },
                 { id: "System.Spatial", version: "5.8.2" },
-                { id: "Microsoft.Data.Edm", version: "5.8.2" },
 
                 // xUnit
                 { id: "xunit.abstractions", version: "2.0.3" },
@@ -203,7 +205,7 @@ config({
                 { id: "Microsoft.NET.Test.Sdk", version: "15.9.0" },
                 { id: "Microsoft.CodeCoverage", version: "15.9.0" },
 
-                { id: "Microsoft.IdentityModel.Clients.ActiveDirectory", version: "5.2.6",
+                { id: "Microsoft.IdentityModel.Clients.ActiveDirectory", version: "5.2.6", /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
                     dependentPackageIdsToSkip: ["Xamarin.Android.Support.CustomTabs", "Xamarin.Android.Support.v7.AppCompat"] },
                 { id: "System.Private.Uri", version: "4.3.2" },
 
@@ -249,8 +251,6 @@ config({
                 { id: "ILRepack", version: "2.0.16" },
 
                 // VS language service
-                { id: "Desktop.Analyzers", version: "1.1.0" },
-                { id: "Microsoft.AnalyzerPowerPack", version: "1.0.1" },
                 { id: "System.Runtime.Analyzers", version: "1.0.1" },
                 { id: "System.Runtime.InteropServices.Analyzers", version: "1.0.1" },
                 { id: "System.Security.Cryptography.Hashing.Algorithms.Analyzers", version: "1.1.0" },
@@ -280,11 +280,11 @@ config({
                     dependentPackageIdsToSkip: ["System.Memory"]},
 
                 // Buffers and Memory
-                { id: "System.Buffers", version: "4.5.1" }, // A different version, because StackExchange.Redis uses it.
-                { id: "System.Memory", version: "4.5.4", dependentPackageIdsToSkip: ["System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors"] },
-                { id: "System.Runtime.CompilerServices.Unsafe", version: "4.7.0" },
-                { id: "System.IO.Pipelines", version: "4.7.0", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
-                { id: "System.Numerics.Vectors", version: "4.5.0" },
+                { id: "System.Buffers", version: "4.5.1" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */ // A different version, because StackExchange.Redis uses it.
+                { id: "System.Memory", version: "4.5.4", dependentPackageIdsToSkip: ["System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors"] }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
+                { id: "System.Runtime.CompilerServices.Unsafe", version: "4.7.0" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
+                { id: "System.IO.Pipelines", version: "4.7.2", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
+                { id: "System.Numerics.Vectors", version: "4.5.0" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
 
                 // Extra dependencies to make MSBuild work
                 { id: "Microsoft.VisualStudio.Setup.Configuration.Interop", version: "1.16.30"},
@@ -319,8 +319,6 @@ config({
                 { id: "Microsoft.IO.RecyclableMemoryStream", version: "1.2.2" },
                 { id: "Microsoft.Azure.KeyVault", version: "3.0.1"},
                 { id: "Microsoft.Azure.KeyVault.WebKey", version: "3.0.1"},
-
-                { id: "Microsoft.NETCore.Windows.ApiSets", version: "1.0.1" },
 
                 // Kusto SDK (for full framework)
                 { id: "Microsoft.Azure.Kusto.Data", version: "6.1.8" },
@@ -367,15 +365,19 @@ config({
                 { id: "Microsoft.Azure.Management.Monitor.Fluent", version: "1.33.0" },
                 { id: "Microsoft.Azure.Management.Monitor", version: "0.25.0-preview" },
 
+                // FsCheck
+                { id: "FsCheck", version: "2.14.3" },
+                { id: "FSharp.Core", version: "4.2.3" },
+
                 // ANTLR
                 { id: "Antlr4.Runtime.Standard", version: "4.7.2" },
 
                 // Runtime dependencies for Linux
-                { 
-                    id: "runtime.linux-x64.BuildXL", 
-                    version: "0.0.31",
-                    osSkip: importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal 
-                        ? [] 
+                {
+                    id: "runtime.linux-x64.BuildXL",
+                    version: "0.0.41",
+                    osSkip: importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal
+                        ? []
                         : [ "win", "macOS", "unix" ]
                 }
             ],
@@ -449,20 +451,20 @@ config({
                 // NodeJs
                 {
                     moduleName: "NodeJs.win-x64",
-                    url: "https://nodejs.org/dist/v13.3.0/node-v13.3.0-win-x64.zip",
-                    hash: "VSO0:B390393D971687DC5486F5F443ABA914807B9F7DFFD5FD1512F7B6234F2BE2FC00",
+                    url: "https://nodejs.org/dist/v14.10.0/node-v14.10.0-win-x64.zip",
+                    hash: "VSO0:5497357F4FAE626A8C9FF7D7357E1E2306B7474F7C0E1B43FE40F607D06C920600",
                     archiveType: "zip",
                 },
                 {
                     moduleName: "NodeJs.osx-x64",
-                    url: "https://nodejs.org/dist/v13.3.0/node-v13.3.0-darwin-x64.tar.gz",
-                    hash: "VSO0:71B123A9120E24D3AB783D277A3649AFB56C97DDB7E79C9568625D51FF29D8CD00",
+                    url: "https://nodejs.org/dist/v14.10.0/node-v14.10.0-darwin-x64.tar.gz",
+                    hash: "VSO0:7C30F46229712426F277F0A0C218746DE89C55F8A6F118C478309C7D3F6BFDA600",
                     archiveType: "tgz",
                 },
                 {
                     moduleName: "NodeJs.linux-x64",
-                    url: "https://nodejs.org/dist/v13.3.0/node-v13.3.0-linux-x64.tar.gz",
-                    hash: "VSO0:4B63D2FDE488809E395B5E6CC0490C65A0AE7BB05C02FC9A1CD641B1C81539AC00",
+                    url: "https://nodejs.org/dist/v14.10.0/node-v14.10.0-linux-x64.tar.gz",
+                    hash: "VSO0:8A920F82F3AE829194EEE5212DF41146971C2277D95ABB3F9D7DB70A4D0089DA00",
                     archiveType: "tgz",
                 },
                 // Rush tests need an LTS (older) version of NodeJs
@@ -486,7 +488,7 @@ config({
         defaultQualifier: {
             configuration: "debug",
             targetFramework: "netcoreapp3.1",
-            targetRuntime: 
+            targetRuntime:
                 Context.getCurrentHost().os === "win" ? "win-x64" :
                 Context.getCurrentHost().os === "macOS" ? "osx-x64" : "linux-x64",
         },

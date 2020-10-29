@@ -75,6 +75,13 @@ volatile LONG g_msTimeInAddClosedList = 0;
 volatile LONG g_msTimeInRemoveClosedList = 0;
 #endif // #if MEASURE_DETOURED_NT_CLOSE_IMPACT
 
+#if MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+volatile ULONGLONG g_shouldResolveReparsePointCacheHitCount;
+volatile ULONGLONG g_reparsePointTargetCacheHitCount;
+volatile ULONGLONG g_resolvedPathsCacheHitCout;
+#endif // MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+
+
 extern "C" {
     NTSTATUS NTAPI NtQueryDirectoryFile(
         _In_     HANDLE                 FileHandle,
@@ -223,6 +230,7 @@ PManifestChildProcessesToBreakAwayFromJob g_manifestChildProcessesToBreakAwayFro
 unordered_set<std::wstring, CaseInsensitiveStringHasher, CaseInsensitiveStringComparer>* g_processNamesToBreakAwayFromJob = nullptr;
 PManifestTranslatePathsStrings g_manifestTranslatePathsStrings;
 vector<TranslatePathTuple*>* g_pManifestTranslatePathTuples = nullptr;
+unordered_set<std::wstring>* g_pManifestTranslatePathLookupTable = nullptr;
 
 PManifestInternalDetoursErrorNotificationFileString g_manifestInternalDetoursErrorNotificationFileString;
 LPCTSTR g_internalDetoursErrorNotificationFile = nullptr;
@@ -507,7 +515,7 @@ InternalCreateDetouredProcess(
     if (LogProcessDetouringStatus())
     {
         ReportProcessDetouringStatus(
-            ProcessDetouringStatus_Starting,
+            ProcessDetouringStatus::ProcessDetouringStatus_Starting,
             lpApplicationName,
             lpCommandLine,
             needsInjection,
@@ -632,7 +640,7 @@ InternalCreateDetouredProcess(
     if (LogProcessDetouringStatus())
     {
         ReportProcessDetouringStatus(
-            ProcessDetouringStatus_Done,
+            ProcessDetouringStatus::ProcessDetouringStatus_Done,
             lpApplicationName,
             lpCommandLine,
             needsInjection,
@@ -800,7 +808,7 @@ static CreateDetouredProcessStatus CreateProcessAttributes(
         if (LogProcessDetouringStatus())
         {
             ReportProcessDetouringStatus(
-                ProcessDetouringStatus_Done,
+                ProcessDetouringStatus::ProcessDetouringStatus_Done,
                 L"",
                 (LPWSTR)lpcwCommandLine,
                 0,
@@ -831,7 +839,7 @@ static CreateDetouredProcessStatus CreateProcessAttributes(
         if (LogProcessDetouringStatus())
         {
             ReportProcessDetouringStatus(
-                ProcessDetouringStatus_Done,
+                ProcessDetouringStatus::ProcessDetouringStatus_Done,
                 L"",
                 (LPWSTR)lpcwCommandLine,
                 0,
@@ -861,7 +869,7 @@ static CreateDetouredProcessStatus CreateProcessAttributes(
             if (LogProcessDetouringStatus())
             {
                 ReportProcessDetouringStatus(
-                    ProcessDetouringStatus_Done,
+                    ProcessDetouringStatus::ProcessDetouringStatus_Done,
                     L"",
                     (LPWSTR)lpcwCommandLine,
                     0,
@@ -1028,6 +1036,15 @@ static bool DllProcessDetach()
     Dbg(L"Time removing from closed list: %d ms.", g_msTimeInRemoveClosedList);
 #endif // MEASURE_DETOURED_NT_CLOSE_IMPACT
 
+#if MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+    if (!IgnoreFullReparsePointResolving())
+    {
+        Dbg(L"Intial resolver result cache hit count for PID(%d) and PPID(%d): %ld", g_shouldResolveReparsePointCacheHitCount, g_currentProcessId, g_parentProcessId);
+    }
+    Dbg(L"ReparsePoint target resolver cache hit count for PID(%d) and PPID(%d): %ld", g_reparsePointTargetCacheHitCount, g_currentProcessId, g_parentProcessId);
+    Dbg(L"Resolved paths cache hit count for PID(%d) and PPID(%d): %ld", g_resolvedPathsCacheHitCout, g_currentProcessId, g_parentProcessId);
+#endif // MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+
     return TRUE;
 }
 
@@ -1042,6 +1059,11 @@ static bool DllProcessDetach()
     if (g_pManifestTranslatePathTuples != nullptr)
     {
         delete g_pManifestTranslatePathTuples;
+    }
+
+    if (g_pManifestTranslatePathLookupTable != nullptr)
+    {
+        delete g_pManifestTranslatePathLookupTable;
     }
 
     if (g_pDetouredProcessInjector != nullptr)
@@ -1117,6 +1139,7 @@ static bool DllProcessAttach()
 
     g_processNamesToBreakAwayFromJob = new unordered_set<std::wstring, CaseInsensitiveStringHasher, CaseInsensitiveStringComparer>();
     g_pManifestTranslatePathTuples = new vector<TranslatePathTuple*>();
+    g_pManifestTranslatePathLookupTable = new unordered_set<std::wstring>();
     g_pDetouredProcessInjector = new DetouredProcessInjector(g_manifestGuid);
 
     int error;
@@ -1356,6 +1379,7 @@ static bool DllProcessAttach()
 
     g_processNamesToBreakAwayFromJob = new unordered_set<std::wstring, CaseInsensitiveStringHasher, CaseInsensitiveStringComparer>();
     g_pManifestTranslatePathTuples = new vector<TranslatePathTuple*>();
+    g_pManifestTranslatePathLookupTable = new unordered_set<std::wstring>();
     g_pDetouredProcessInjector = new DetouredProcessInjector(g_manifestGuid);
 
     return true;

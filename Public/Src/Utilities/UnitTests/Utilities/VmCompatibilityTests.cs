@@ -86,7 +86,7 @@ namespace Test.BuildXL.Utilities
                     // Let's say that we have a junction from 'D:\dbs\BuildXLUserProfile' to the real user profile 'C:\Users\CBA-123'.
                     // When evaluated, 'C:\Users\CBA-123' will be a path in the host, and not in the VM. If it is a directory symlink,
                     // then 'C:\Users\CBA-123' will be the one in the VM, which obviously won't exist.
-                    XAssert.AreEqual(ReparsePointType.MountPoint, mayBeReparsePointType.Result);
+                    XAssert.AreEqual(ReparsePointType.Junction, mayBeReparsePointType.Result);
                 }
             });
 
@@ -233,7 +233,24 @@ namespace Test.BuildXL.Utilities
                 }
             });
         }
-        
+
+        [Fact(Skip = "Tested in CI/CB test. Enable this test once VmCommandProxy is deployed to CB from CB test.")]
+        public void DnsGetHostNameReturnsExpectedHostName()
+        {
+            EnsureRunInVm(() =>
+            {
+                try
+                {
+                    var entry = System.Net.Dns.GetHostEntry(VmConstants.Host.IpAddress);
+                    XAssert.AreEqual(VmConstants.Host.Name.ToUpperInvariant(), entry.HostName.ToUpperInvariant());
+                }
+                catch (Exception e)
+                {
+                    XAssert.Fail(e.ToString());
+                }
+            });
+        }
+
         private void EnsureRunInVm(Action verify)
         {
             if (VmSpecialEnvironmentVariables.IsRunningInVm)

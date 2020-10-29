@@ -12,6 +12,7 @@ namespace App {
         assemblyName: "ContentStoreApp",
         sources: globR(d`.`,"*.cs"),
         skipDocumentationGeneration: true,
+        assemblyBindingRedirects: BuildXLSdk.cacheBindingRedirects(),
         appConfig: f`App.Config`,
         references: [
             ...(BuildXLSdk.isDotNetCoreBuild ? [
@@ -21,6 +22,8 @@ namespace App {
             ]
             ),
             ...kustoPackages,
+            ...getSerializationPackages(true),
+            ...getGrpcPackages(true),
             UtilitiesCore.dll,
             Grpc.dll,
             Hashing.dll,
@@ -30,12 +33,12 @@ namespace App {
             importFrom("BuildXL.Cache.MemoizationStore").Distributed.dll,
             importFrom("BuildXL.Cache.DistributedCache.Host").Service.dll,
             importFrom("BuildXL.Cache.DistributedCache.Host").Configuration.dll,
+            importFrom("BuildXL.Utilities").dll,
 
-            importFrom("Grpc.Core").pkg,
-            importFrom("Grpc.Core.Api").pkg,
-            importFrom("Google.Protobuf").pkg,
             importFrom("Microsoft.IdentityModel.Clients.ActiveDirectory").pkg,
             importFrom("Newtonsoft.Json").pkg,
+
+            importFrom("BuildXL.Utilities").dll,
 
             ManagedSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
 

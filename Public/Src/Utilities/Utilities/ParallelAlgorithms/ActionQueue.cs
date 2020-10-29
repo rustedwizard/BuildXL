@@ -44,6 +44,27 @@ namespace BuildXL.Utilities.ParallelAlgorithms
         }
 
         /// <summary>
+        /// Runs the delegate asynchronously for all items and returns the completion
+        /// </summary>
+        public Task<TResult[]> SelectAsync<T, TResult>(IEnumerable<T> items, Func<T, int, Task<TResult>> body)
+        {
+            var tasks = new List<Task<TResult>>();
+
+            int index = 0;
+            foreach (var item in items)
+            {
+                var itemIndex = index;
+                tasks.Add(RunAsync(() =>
+                {
+                    return body(item, itemIndex);
+                }));
+                index++;
+            }
+
+            return Task.WhenAll(tasks);
+        }
+
+        /// <summary>
         /// Runs the delegate asynchronously and returns the completion
         /// </summary>
         public Task<T> RunAsync<T>(Func<T> func)
@@ -86,18 +107,18 @@ namespace BuildXL.Utilities.ParallelAlgorithms
         {
             var taskSource = TaskSourceSlim.Create<T>();
 
-            m_actionBlock.Post(() =>
+            m_actionBlock.Post(async () =>
             {
                 try
                 {
                     var task = runAsync();
                     taskSource.LinkToTask(task);
-                    return task;
+                    await task;
                 }
                 catch (Exception ex)
                 {
+                    // Still need to call TrySetException, because runAsync may fail synchronously.
                     taskSource.TrySetException(ex);
-                    return Task.CompletedTask;
                 }
             });
 

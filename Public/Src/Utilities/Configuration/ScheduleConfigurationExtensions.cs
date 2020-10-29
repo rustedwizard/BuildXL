@@ -23,5 +23,23 @@ namespace BuildXL.Utilities.Configuration
         /// Defaults to 500
         /// </remarks>
         public static int MinimumTotalAvailableRamMb(this IScheduleConfiguration scheduleConfiguration) => scheduleConfiguration.MinimumTotalAvailableRamMb ?? 500;
+
+        /// <summary>
+        /// <see cref="IScheduleConfiguration.DelayedCacheLookupMinMultiplier"/>
+        /// </summary>
+        public static bool DelayedCacheLookupEnabled(this IScheduleConfiguration scheduleConfiguration) => scheduleConfiguration.DelayedCacheLookupMinMultiplier.HasValue && !EngineEnvironmentSettings.DisableDelayedCacheLookup;
+
+        /// <summary>
+        /// <see cref="IScheduleConfiguration.ManageMemoryMode"/>
+        /// </summary>
+        /// <remarks>
+        /// Defaults to <see cref="ManageMemoryMode.CancellationRam"/>
+        /// </remarks>
+        public static ManageMemoryMode GetManageMemoryMode(this IScheduleConfiguration scheduleConfiguration) => scheduleConfiguration.ManageMemoryMode ?? ManageMemoryMode.CancellationRam;
+
+        /// <summary>
+        /// <see cref="IScheduleConfiguration.MaxWorkersPerModule"/>
+        /// </summary>
+        public static bool ModuleAffinityEnabled(this IScheduleConfiguration scheduleConfiguration) => scheduleConfiguration.MaxWorkersPerModule > 0;
     }
 }

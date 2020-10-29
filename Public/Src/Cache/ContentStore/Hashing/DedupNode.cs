@@ -45,7 +45,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// <remarks>Limited to put a cap on the amount of work the server must do for a single request.</remarks>
         public const int MaxDirectChildrenPerNode = 512;
 
-        private static readonly IContentHasher NodeHasher = DedupChunkHashInfo.Instance.CreateContentHasher();
+        private static readonly IContentHasher NodeHasher = DedupSingleChunkHashInfo.Instance.CreateContentHasher();
 
         /// <summary>
         /// The type of this node.
@@ -121,7 +121,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
         private static void AssertChunkSize(ulong chunkSize)
         {
-            if (chunkSize > ((1 << (3 * 8)) - 1))
+            if (chunkSize > ((1 << (3 * 8)) - 1)) // ~16 MB max size allowed.
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(chunkSize),
@@ -132,7 +132,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
         private static void AssertNodeSize(ulong nodeSize)
         {
-            if (nodeSize > (((ulong)1 << (7 * 8)) - 1))
+            if (nodeSize > (((ulong)1 << (7 * 8)) - 1)) // ~72 PB max size allowed.
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(nodeSize),

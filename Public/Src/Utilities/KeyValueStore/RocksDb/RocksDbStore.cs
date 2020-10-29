@@ -105,6 +105,36 @@ namespace BuildXL.Engine.Cache.KeyValueStores
             /// Disables automatic background compactions.
             /// </summary>
             public bool DisableAutomaticCompactions { get; set; }
+
+            /// <summary>
+            /// Disabled by default due to performance impact.
+            /// 
+            /// Disable the write ahead log to reduce disk IO. The write ahead log is used to recover the store on 
+            /// crashes, so a crash will lose some writes. Writes will be made in-memory only until the write buffer
+            /// size is reached and then they will be flushed to storage files.
+            /// 
+            /// See: https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log
+            /// </summary>
+            public bool EnableWriteAheadLog { get; set; }
+
+            /// <summary>
+            /// Disabled by default due to performance impact.
+            /// 
+            /// The DB won't wait for fsync return before acknowledging the write as successful. This affects
+            /// correctness, because a write may be ACKd before it is actually on disk, but it is much faster.
+            /// </summary>
+            public bool EnableFSync { get; set; }
+
+            /// <summary>
+            /// Enable dynamic level target sizes.
+            /// 
+            /// This helps keep space amplification at a factor of ~1.111 by manipulating the level sizes dynamically.
+            /// 
+            /// See: https://rocksdb.org/blog/2015/07/23/dynamic-level.html
+            /// See: https://rockset.com/blog/how-we-use-rocksdb-at-rockset/ (under Dynamic Level Target Sizes)
+            /// See: https://github.com/facebook/rocksdb/wiki/Leveled-Compaction#level_compaction_dynamic_level_bytes-is-true
+            /// </summary>
+            public bool LeveledCompactionDynamicLevelTargetSizes { get; set; }
         }
 
         /// <summary>
@@ -277,18 +307,8 @@ namespace BuildXL.Engine.Cache.KeyValueStores
                 //    it produces a dramatic performance drop otherwise.
 
                 m_defaults.WriteOptions = new WriteOptions()
-                    // Disable the write ahead log to reduce disk IO. The write ahead log
-                    // is used to recover the store on crashes, so a crash will lose some writes.
-                    // Writes will be made in-memory only until the write buffer size
-                    // is reached and then they will be flushed to storage files.
-                    .DisableWal(1)
-                    // This option is off by default, but just making sure that the C# wrapper
-                    // doesn't change anything. The idea is that the DB won't wait for fsync to
-                    // return before acknowledging the write as successful. This affects
-                    // correctness, because a write may be ACKd before it is actually on disk,
-                    // but it is much faster.
-                    .SetSync(false);
-
+                    .DisableWal(arguments.EnableWriteAheadLog ? 0 : 1)
+                    .SetSync(arguments.EnableFSync);
 
                 var blockBasedTableOptions = new BlockBasedTableOptions()
                     // Use a bloom filter to help reduce read amplification on point lookups. 10 bits per key yields a
@@ -314,7 +334,8 @@ namespace BuildXL.Engine.Cache.KeyValueStores
                     .SetCompression(Compression.Lz4)
 #endif
                     .SetBlockBasedTableFactory(blockBasedTableOptions)
-                    .SetPrefixExtractor(SliceTransform.CreateNoOp());
+                    .SetPrefixExtractor(SliceTransform.CreateNoOp())
+                    .SetLevelCompactionDynamicLevelBytes(arguments.LeveledCompactionDynamicLevelTargetSizes);
 
                 m_columns = new Dictionary<string, ColumnFamilyInfo>();
 

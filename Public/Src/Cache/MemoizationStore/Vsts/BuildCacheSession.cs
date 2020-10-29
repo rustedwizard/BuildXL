@@ -53,6 +53,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiry"/></param>
         /// <param name="eagerFingerprintIncorporationInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleInterval"/></param>
         /// <param name="eagerFingerprintIncorporationBatchSize"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleBatchSize"/></param>
+        /// <param name="manuallyExtendContentLifetime">Whether to manually extend content lifetime when doing incorporate calls</param>
         public BuildCacheSession(
             IAbsFileSystem fileSystem,
             string name,
@@ -60,7 +61,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             string cacheNamespace,
             Guid cacheId,
             IContentHashListAdapter contentHashListAdapter,
-            IContentSession backingContentSession,
+            IBackingContentSession backingContentSession,
             int maxFingerprintSelectorsToFetch,
             TimeSpan minimumTimeToKeepContentHashLists,
             TimeSpan rangeOfTimeToKeepContentHashLists,
@@ -74,7 +75,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             bool enableEagerFingerprintIncorporation,
             TimeSpan inlineFingerprintIncorporationExpiry,
             TimeSpan eagerFingerprintIncorporationInterval,
-            int eagerFingerprintIncorporationBatchSize)
+            int eagerFingerprintIncorporationBatchSize,
+            bool manuallyExtendContentLifetime)
             : base(
                 fileSystem,
                 name,
@@ -96,7 +98,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 enableEagerFingerprintIncorporation,
                 inlineFingerprintIncorporationExpiry,
                 eagerFingerprintIncorporationInterval,
-                eagerFingerprintIncorporationBatchSize)
+                eagerFingerprintIncorporationBatchSize,
+                manuallyExtendContentLifetime)
         {
         }
 
@@ -108,16 +111,17 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             CancellationToken cts,
             UrgencyHint urgencyHint)
         {
-            return AddOrGetContentHashListCall.RunAsync(Tracer.MemoizationStoreTracer, new OperationContext(context, cts), strongFingerprint, async () =>
+            return new OperationContext(context, cts).PerformOperationAsync(
+                Tracer.MemoizationStoreTracer,
+                async () =>
                 {
                     // TODO: Split this out into separate implementations for WriteThrough vs. WriteBehind (bug 1365340)
                     if (WriteThroughContentSession == null)
                     {
-                        // Guaranteed content is currently only available for BlobSessions. (bug 144396)
                         ContentAvailabilityGuarantee guarantee =
-                            BackingContentSession is BlobContentSession
-                                ? ContentAvailabilityGuarantee.AllContentBackedByCache
-                                : ContentAvailabilityGuarantee.NoContentBackedByCache;
+                            ManuallyExtendContentLifetime
+                                ? ContentAvailabilityGuarantee.NoContentBackedByCache
+                                : ContentAvailabilityGuarantee.AllContentBackedByCache;
 
                         return await AddOrGetContentHashListAsync(
                             context,
@@ -203,7 +207,11 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                         $"Lost the AddOrUpdate race {addLimit} times against unbacked values. Returning as though the add succeeded for now.");
                     await TrackFingerprintAsync(context, strongFingerprint, rawExpiration).ConfigureAwait(false);
                     return new AddOrGetContentHashListResult(new ContentHashListWithDeterminism(null, CacheDeterminism.None));
-                });
+
+                },
+                traceOperationStarted: true,
+                extraStartMessage: $"StrongFingerprint=({strongFingerprint}) {contentHashListWithDeterminism.ToTraceString()}",
+                extraEndMessage: _ => $"StrongFingerprint=({strongFingerprint}) {contentHashListWithDeterminism.ToTraceString()}");
         }
 
         private async Task<bool> CheckNeedToUpdateExistingValueAsync(

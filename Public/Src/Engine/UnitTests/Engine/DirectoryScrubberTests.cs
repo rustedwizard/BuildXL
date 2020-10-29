@@ -57,7 +57,7 @@ namespace Test.BuildXL.Engine
         {
             string rootDirectory = Path.Combine(TemporaryDirectory, nameof(ScrubFilesAndDirectories));
             string a = WriteFile(Path.Combine(rootDirectory, "1", "1", "out.txt"));
-            var inBuild = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Path.GetDirectoryName(a) };
+            var inBuild = new HashSet<string>(OperatingSystemHelper.PathComparer) { Path.GetDirectoryName(a) };
             Scrubber.RemoveExtraneousFilesAndDirectories(
                 isPathInBuild: path => inBuild.Contains(path),
                 pathsToScrub: new[] { Path.GetDirectoryName(a) },
@@ -83,7 +83,7 @@ namespace Test.BuildXL.Engine
             string h = WriteFile(Path.Combine(rootDirectory, "5", "6", "out.txt"));
             string i = WriteFile(Path.Combine(rootDirectory, "5", "out.txt"));
 
-            var inBuild = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { c, d, Path.GetDirectoryName(f) };
+            var inBuild = new HashSet<string>(OperatingSystemHelper.PathComparer) { c, d, Path.GetDirectoryName(f) };
 
             Scrubber.RemoveExtraneousFilesAndDirectories(
                 pathsToScrub: new[] { rootDirectory },
@@ -131,7 +131,7 @@ namespace Test.BuildXL.Engine
             string h = WriteFile(Path.Combine(scrubbableMountPath, "D", "E", "h"));
             string i = WriteFile(Path.Combine(scrubbableMountPath, "D", "F", "i"));
             string j = WriteFile(Path.Combine(nestedScrubbableMountPath, "D", "j"));
-            var inBuild = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Path.Combine(scrubbableMountPath, "D", "E"), g1 };
+            var inBuild = new HashSet<string>(OperatingSystemHelper.PathComparer) { Path.Combine(scrubbableMountPath, "D", "E"), g1 };
 
             Scrubber.RemoveExtraneousFilesAndDirectories(
                 path => inBuild.Contains(path),
@@ -277,7 +277,7 @@ namespace Test.BuildXL.Engine
             string rootDirectory = Path.Combine(TemporaryDirectory, nameof(ScrubFilesAndDirectories));
             string a = WriteFile(Path.Combine(rootDirectory, "a", "b", "c", "out.txt"));
 
-            var inBuild = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { };
+            var inBuild = new HashSet<string>(OperatingSystemHelper.PathComparer) { };
 
             Scrubber.RemoveExtraneousFilesAndDirectories(
                 path => inBuild.Contains(path),
@@ -330,7 +330,7 @@ namespace Test.BuildXL.Engine
 
             var numDeleted = Scrubber.DeleteFiles(files.ToArray(), testHook: testHook);
             XAssert.IsTrue(m_cancellationTokenSource.IsCancellationRequested);
-            XAssert.Equals(FileDeletionsAllowed, numDeleted);
+            XAssert.IsTrue(numDeleted >= FileDeletionsAllowed);
         }
 
         [Fact]
@@ -415,7 +415,7 @@ namespace Test.BuildXL.Engine
                         nonDeletableRootDirectories: CollectionUtilities.EmptyArray<string>());
 
             XAssert.IsFalse(File.Exists(fileUnderTarget));
-            XAssert.Equals(OperatingSystemHelper.IsMacOS, !Directory.Exists(fullSymlinkPath));
+            XAssert.AreEqual(OperatingSystemHelper.IsMacOS, !Directory.Exists(fullSymlinkPath));
         }
 
         [FactIfSupported(requiresSymlinkPermission: true)]
@@ -491,8 +491,8 @@ namespace Test.BuildXL.Engine
                     nonDeletableRootDirectories: CollectionUtilities.EmptyArray<string>());
 
                 XAssert.IsFalse(File.Exists(fileUnderSymlinkDir));
-                XAssert.Equals(!OperatingSystemHelper.IsMacOS, Directory.Exists(realDirectory));
-                XAssert.Equals(!OperatingSystemHelper.IsMacOS, Directory.Exists(symlinkDirectory));
+                XAssert.AreEqual(!OperatingSystemHelper.IsMacOS, Directory.Exists(realDirectory));
+                XAssert.AreEqual(!OperatingSystemHelper.IsMacOS, Directory.Exists(symlinkDirectory));
             }
             finally 
             {
@@ -666,7 +666,7 @@ namespace Test.BuildXL.Engine
         {
             var exe = FileArtifact.CreateSourceFile(AbsolutePath.Create(env.Context.PathTable, @"\\dummyPath\DummyFile.exe"));
 
-            var processBuilder = ProcessBuilder.Create(env.PathTable, env.PipDataBuilderPool.GetInstance());
+            var processBuilder = ProcessBuilder.Create(env.PathTable, env.PipDataBuilderPool.GetInstance(), new ConfigurationImpl());
             processBuilder.Executable = exe;
             processBuilder.AddInputFile(exe);
             if (tag != null)

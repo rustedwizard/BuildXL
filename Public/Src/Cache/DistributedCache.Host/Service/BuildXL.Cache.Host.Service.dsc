@@ -13,6 +13,7 @@ namespace Service {
             ...importFrom("BuildXL.Cache.ContentStore").getSerializationPackages(true),
 
             importFrom("BuildXL.Cache.ContentStore").Library.dll,
+            importFrom("BuildXL.Cache.ContentStore").Grpc.dll,
             importFrom("BuildXL.Cache.ContentStore").Distributed.dll,
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
             importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
@@ -26,6 +27,10 @@ namespace Service {
 
             importFrom("BuildXL.Utilities").dll,
             importFrom("BuildXL.Utilities").Branding.dll,
+            importFrom("BuildXL.Utilities").Collections.dll,
+            importFrom("BuildXL.Utilities").Native.dll,
+
+            importFrom("BuildXL.Cache.Roxis").Client.dll,
 
             importFrom("BuildXL.Cache.Logging").Library.dll,
             importFrom("WindowsAzure.Storage").pkg,
@@ -35,6 +40,7 @@ namespace Service {
 
             ...addIf(BuildXLSdk.isFullFramework,
                 NetFx.System.Web.dll,
+                NetFx.System.Net.Http.dll,
                 NetFx.System.Xml.dll
             ),
         ],

@@ -64,7 +64,8 @@ namespace Test.DScript.Ast.Scheduling
             ModuleDefinition moduleDefinition,
             TResolverSettings resolverSettings,
             IEnumerable<KeyValuePair<string, string>> userDefinedEnvironment,
-            IEnumerable<string> userDefinedPassthroughVariables);
+            IEnumerable<string> userDefinedPassthroughVariables,
+            IEnumerable<TProject> allProjects);
 
         /// <summary>
         /// Starts the addition of projects
@@ -102,7 +103,7 @@ namespace Test.DScript.Ast.Scheduling
 
             using (var controller = CreateFrontEndHost(GetDefaultCommandLine(), frontEndFactory, moduleRegistry, AbsolutePath.Invalid, out _, out _, requestedQualifiers))
             {
-                resolverSettings.ComputeEnvironment(out var trackedEnv, out var passthroughVars, out _);
+                resolverSettings.ComputeEnvironment(FrontEndContext.PathTable, out var trackedEnv, out var passthroughVars, out _);
 
                 var pipConstructor = CreateProjectToPipConstructor(
                     FrontEndContext,
@@ -110,7 +111,8 @@ namespace Test.DScript.Ast.Scheduling
                     m_testModule,
                     resolverSettings,
                     trackedEnv,
-                    passthroughVars);
+                    passthroughVars,
+                    projects);
 
                 var schedulingResults = new Dictionary<TProject, (bool, string, Process)>();
 

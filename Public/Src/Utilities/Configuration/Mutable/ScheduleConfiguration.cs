@@ -29,8 +29,11 @@ namespace BuildXL.Utilities.Configuration.Mutable
             UseHistoricalRamUsageInfo = true;
             ForceUseEngineInfoFromCache = false;
 
-            // It is well-known that CPU-bound tasks should be oversubscribed with 1.25 times the number of logical cores.
-            MaxProcesses = Environment.ProcessorCount * 5 / 4;
+            // In the past, we decided to use 1.25 * logicalCores to determine the concurrency for the process pips. 
+            // However, at that time, cachelookup, materialization, and other non-execute steps were all taking a slot from that. 
+            // As each major step runs in its own queue with a separate concurrency limit, we decided to revise using 1.25 multiplier.
+            // After doing A/B testing on thousands of builds, using 1 instead of 1.25 multiplier decreases the load on the machine and improves the perf.
+            MaxProcesses = Environment.ProcessorCount;
             MaxIO = Math.Max(1, Environment.ProcessorCount / 4);
             MaxLightProcesses = 1000;
 
@@ -74,11 +77,14 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
             UnsafeDisableSharedOpaqueEmptyDirectoryScrubbing = false;
             InputChanges = AbsolutePath.Invalid;
+            UpdateFileContentTableByScanningChangeJournal = true;
 
             EnableSetupCostWhenChoosingWorker = true;
             EnableLessAggresiveMemoryProjection = false;
-            ManageMemoryMode = ManageMemoryMode.CancellationRam;
             MaxRetriesDueToRetryableFailures = 5;
+
+            PluginLocations = new List<AbsolutePath>();
+            TreatAbsentDirectoryAsExistentUnderOpaque = true;
         }
 
         /// <nodoc />
@@ -144,6 +150,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             UnsafeLazySODeletion = template.UnsafeLazySODeletion;
             UseFixedApiServerMoniker = template.UseFixedApiServerMoniker;
             InputChanges = pathRemapper.Remap(template.InputChanges);
+            UpdateFileContentTableByScanningChangeJournal = template.UpdateFileContentTableByScanningChangeJournal;
             CacheOnly = template.CacheOnly;
             EnableSetupCostWhenChoosingWorker = template.EnableSetupCostWhenChoosingWorker;
             MaxSealDirs = template.MaxSealDirs;
@@ -155,6 +162,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MaxRetriesDueToRetryableFailures = template.MaxRetriesDueToRetryableFailures;
             EnableLessAggresiveMemoryProjection = template.EnableLessAggresiveMemoryProjection;
             ManageMemoryMode = template.ManageMemoryMode;
+            EnablePlugin = template.EnablePlugin;
+            PluginLocations = pathRemapper.Remap(template.PluginLocations);
+            TreatAbsentDirectoryAsExistentUnderOpaque = template.TreatAbsentDirectoryAsExistentUnderOpaque;
+            MaxWorkersPerModule = template.MaxWorkersPerModule;
         }
 
         /// <inheritdoc />
@@ -376,9 +387,28 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public bool EnableEmptyingWorkingSet { get; set; }
 
         /// <inheritdoc />
-        public ManageMemoryMode ManageMemoryMode { get; set; }
+        public ManageMemoryMode? ManageMemoryMode { get; set; }
 
         /// <inheritdoc />
         public bool? DisableCompositeOpaqueFilters { get; set; }
+
+        /// <inheritdoc />
+        public bool? EnablePlugin { get; set; }
+
+        /// <nodoc />
+        [SuppressMessage("Microsoft.Usage", "CA2227:CollectionPropertiesShouldBeReadOnly")]
+        public List<AbsolutePath> PluginLocations { get; set; }
+
+        /// <inheritdoc />
+        IReadOnlyList<AbsolutePath> IScheduleConfiguration.PluginLocations => PluginLocations;
+
+        /// <inheritdoc />
+        public bool TreatAbsentDirectoryAsExistentUnderOpaque { get; set; }
+
+        /// <inheritdoc />
+        public int MaxWorkersPerModule { get; set; }
+
+        /// <inheritdoc />
+        public bool UpdateFileContentTableByScanningChangeJournal { get; set; }
     }
 }

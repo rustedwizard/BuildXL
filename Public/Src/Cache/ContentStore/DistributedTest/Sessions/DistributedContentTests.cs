@@ -4,44 +4,50 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
-using BuildXL.Cache.ContentStore.Distributed.Redis;
+using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
 using BuildXL.Cache.ContentStore.Distributed.Sessions;
 using BuildXL.Cache.ContentStore.Distributed.Stores;
+using BuildXL.Cache.ContentStore.Distributed.Utilities;
 using BuildXL.Cache.ContentStore.Extensions;
 using BuildXL.Cache.ContentStore.FileSystem;
-using BuildXL.Cache.ContentStore.Stores;
-using BuildXL.Cache.ContentStore.Synchronization;
-using BuildXL.Cache.ContentStore.Tracing.Internal;
-using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Hashing;
+using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Sessions;
 using BuildXL.Cache.ContentStore.Interfaces.Stores;
-using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest.Results;
 using BuildXL.Cache.ContentStore.InterfacesTest.Time;
+using BuildXL.Cache.ContentStore.Service.Grpc;
+using BuildXL.Cache.ContentStore.Sessions;
+using BuildXL.Cache.ContentStore.Stores;
+using BuildXL.Cache.ContentStore.Synchronization;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Cache.ContentStore.UtilitiesCore;
+using BuildXL.Cache.ContentStore.Utils;
+using BuildXL.Cache.Host.Service.Internal;
 using ContentStoreTest.Distributed.ContentLocation;
+using ContentStoreTest.Extensions;
 using ContentStoreTest.Test;
 using FluentAssertions;
 using Xunit;
 using Xunit.Abstractions;
-using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
-using ContentStoreTest.Extensions;
-using BuildXL.Cache.ContentStore.Distributed.Utilities;
-using System.Diagnostics.ContractsLight;
 
 namespace ContentStoreTest.Distributed.Sessions
 {
     public abstract class DistributedContentTests : TestBase
     {
-        protected static readonly CancellationToken Token = CancellationToken.None;
+        // It is very important to use "cancellable" cancellation token instance.
+        // This fact can be used by the system and change the behavior based on it.
+        protected static readonly CancellationToken Token = new CancellationTokenSource().Token;
+
         protected static readonly ContentStoreConfiguration Config = ContentStoreConfiguration.CreateWithMaxSizeQuotaMB(50);
         protected bool UseGrpcServer;
 
@@ -49,7 +55,7 @@ namespace ContentStoreTest.Distributed.Sessions
 
         protected abstract (IContentStore store, IStartupShutdown server) CreateStore(
             Context context,
-            IAbsolutePathFileCopier fileCopier,
+            IRemoteFileCopier fileCopier,
             DisposableDirectory testDirectory,
             int index,
             int iteration,
@@ -61,19 +67,34 @@ namespace ContentStoreTest.Distributed.Sessions
             public readonly Context Context;
             public readonly Context[] StoreContexts;
             public readonly TestFileCopier TestFileCopier;
-            public readonly IAbsolutePathFileCopier FileCopier;
+            public readonly IRemoteFileCopier FileCopier;
             public readonly IList<DisposableDirectory> Directories;
             public IList<IContentSession> Sessions { get; protected set; }
             public readonly IList<IContentStore> Stores;
             public readonly IList<IStartupShutdown> Servers;
+            public readonly int[] Ports;
             public readonly int Iteration;
 
             public TestContext(TestContext other)
-                : this(other.Context, other.FileCopier, other.Directories, other.Stores.Select((store, i) => (store, other.Servers[i])).ToList(), other.Iteration, other._traceStoreStatistics)
+                : this(
+                      other.Context,
+                      other.FileCopier,
+                      other.Directories,
+                      other.Stores.Select((store, i) => (store, other.Servers[i])).ToList(),
+                      other.Iteration,
+                      other.Ports,
+                      other._traceStoreStatistics)
             {
             }
 
-            public TestContext(Context context, IAbsolutePathFileCopier fileCopier, IList<DisposableDirectory> directories, IList<(IContentStore store, IStartupShutdown server)> stores, int iteration, bool traceStoreStatistics = false)
+            public TestContext(
+                Context context,
+                IRemoteFileCopier fileCopier,
+                IList<DisposableDirectory> directories,
+                IList<(IContentStore store, IStartupShutdown server)> stores,
+                int iteration,
+                int[] ports,
+                bool traceStoreStatistics = false)
             {
                 _traceStoreStatistics = traceStoreStatistics;
                 Context = context;
@@ -84,12 +105,13 @@ namespace ContentStoreTest.Distributed.Sessions
                 Stores = stores.Select(s => s.store).ToList();
                 Servers = stores.Select(s => s.server ?? s.store).ToList();
                 Iteration = iteration;
+                Ports = ports;
 
-                if (TestFileCopier != null)
+                if (TestFileCopier != null && Stores.Count > 1)
                 {
                     for (int i = 0; i < Stores.Count; i++)
                     {
-                        var distributedStore = (DistributedContentStore<AbsolutePath>)GetDistributedStore(i);
+                        var distributedStore = (DistributedContentStore)GetDistributedStore(i);
                         TestFileCopier.CopyHandlersByLocation[distributedStore.LocalMachineLocation] = distributedStore;
                         TestFileCopier.PushHandlersByLocation[distributedStore.LocalMachineLocation] = distributedStore;
                         TestFileCopier.DeleteHandlersByLocation[distributedStore.LocalMachineLocation] = distributedStore;
@@ -108,7 +130,7 @@ namespace ContentStoreTest.Distributed.Sessions
                 return new Context(Context, new Guid(idBytes));
             }
 
-            public virtual async Task StartupAsync(ImplicitPin implicitPin, int? storeToStartupLast)
+            public virtual async Task StartupAsync(ImplicitPin implicitPin, int? storeToStartupLast, string buildId = null)
             {
                 var startupResults = await TaskSafetyHelpers.WhenAll(Servers.Select(async (server, index) =>
                 {
@@ -124,12 +146,17 @@ namespace ContentStoreTest.Distributed.Sessions
 
                 if (storeToStartupLast.HasValue)
                 {
-                    var finalStartup = await Servers[storeToStartupLast.Value].StartupAsync(StoreContexts[storeToStartupLast.Value]).ShouldBeSuccessAsync();
+                    var finalStartup = await Servers[storeToStartupLast.Value].StartupAsync(StoreContexts[storeToStartupLast.Value]).ShouldBeSuccess();
                 }
 
-                Sessions = Stores.Select((store, id) => store.CreateSession(Context, "store" + id, implicitPin).Session).ToList();
+                Sessions = Stores.Select((store, id) => store.CreateSession(Context, GetSessionName(id, buildId), implicitPin).Session).ToList();
                 await TaskSafetyHelpers.WhenAll(Sessions.Select(async (session, index) => await session.StartupAsync(StoreContexts[index])));
             }
+
+            protected static string GetSessionName(int id, string buildId) =>
+                buildId == null || id == 0 // Master should not be part of the build.
+                        ? $"store{id}"
+                        : $"store{id}{Constants.BuildIdPrefix}{buildId}";
 
             public virtual async Task ShutdownAsync()
             {
@@ -193,10 +220,51 @@ namespace ContentStoreTest.Distributed.Sessions
 
             public static implicit operator OperationContext(TestContext context) => new OperationContext(context);
 
-            public virtual DistributedContentSession<AbsolutePath> GetDistributedSession(int idx)
+            public virtual IContentSession GetSession(int idx)
             {
-                var session = Sessions[idx];
-                return (DistributedContentSession<AbsolutePath>)session;
+                return Sessions[idx];
+            }
+
+            public virtual DistributedContentSession GetDistributedSession(int idx, bool primary = true)
+            {
+                return GetTypedSession<DistributedContentSession>(idx, primary);
+            }
+
+            internal FileSystemContentSession GetFileSystemSession(int idx, bool primary = true)
+            {
+                return GetTypedSession<FileSystemContentSession>(idx, primary);
+            }
+
+            private TSession GetTypedSession<TSession>(int idx, bool primary)
+            {
+                var session = GetSession(idx);
+                while (!(session is TSession))
+                {
+                    var nextSession = UnwrapSession(session, primary);
+                    if (nextSession == session)
+                    {
+                        break;
+                    }
+
+                    session = nextSession;
+                }
+
+                return (TSession)session;
+            }
+
+            private static IContentSession UnwrapSession(IContentSession session, bool primary)
+            {
+                if (session is MultiplexedContentSession multiplexSession)
+                {
+                    var primarySession = multiplexSession.PreferredContentSession;
+                    session = (IContentSession)(primary ? primarySession : multiplexSession.SessionsByCacheRoot.Values.Where(s => s != primarySession).First());
+                }
+                else if (session is DistributedContentSession distributedSession)
+                {
+                    session = distributedSession.Inner;
+                }
+
+                return session;
             }
 
             public LocalLocationStore GetLocalLocationStore(int idx) =>
@@ -208,9 +276,45 @@ namespace ContentStoreTest.Distributed.Sessions
             internal TransitioningContentLocationStore GetLocationStore(int idx) =>
                 ((TransitioningContentLocationStore)GetDistributedSession(idx).ContentLocationStore);
 
-            internal IContentStore GetDistributedStore(int idx)
+            public virtual DistributedContentStore GetDistributedStore(int idx, bool primary = true)
+            {
+                return GetTypedStore<DistributedContentStore>(idx, primary);
+            }
+
+            internal FileSystemContentStore GetFileSystemStore(int idx, bool primary = true)
+            {
+                return GetTypedStore<FileSystemContentStore>(idx, primary);
+            }
+
+            private TStore GetTypedStore<TStore>(int idx, bool primary)
             {
                 var store = Stores[idx];
+                while (!(store is TStore))
+                {
+                    var nextStore = UnwrapStore(store, primary);
+                    if (nextStore == store)
+                    {
+                        break;
+                    }
+
+                    store = nextStore;
+                }
+
+                return (TStore)store;
+            }
+
+            private static IContentStore UnwrapStore(IContentStore store, bool primary)
+            {
+                if (store is MultiplexedContentStore multiplexStore)
+                {
+                    var primaryStore = multiplexStore.PreferredContentStore;
+                    store = primary ? primaryStore : multiplexStore.DrivesWithContentStore.Values.Where(s => s != primaryStore).First();
+                }
+                else if (store is DistributedContentStore distributedStore)
+                {
+                    store = distributedStore.InnerContentStore;
+                }
+
                 return store;
             }
 
@@ -238,16 +342,15 @@ namespace ContentStoreTest.Distributed.Sessions
                 return GetLocationStore(GetMasterIndex());
             }
 
-            internal IContentLocationStore GetContentLocationStore(DistributedContentSession<AbsolutePath> session)
+            internal IContentLocationStore GetContentLocationStore(DistributedContentSession session)
             {
                 return session.ContentLocationStore;
             }
 
             internal Task SyncAsync(int idx)
             {
-                var store = (DistributedContentStore<AbsolutePath>)Stores[idx];
-                var localContentStore = (FileSystemContentStore)store.InnerContentStore;
-                return localContentStore.Store.SyncAsync(this);
+                var store = GetFileSystemStore(idx);
+                return store.Store.SyncAsync(this);
             }
 
             public int GetFirstWorkerIndex()
@@ -392,7 +495,7 @@ namespace ContentStoreTest.Distributed.Sessions
                 1,
                 async context =>
                 {
-                    var session = context.GetDistributedSession(0);
+                    var session = context.GetSession(0);
                     var store = (IRepairStore)context.Stores[0];
 
                     // Add random file to empty cache and update the content tracker
@@ -409,8 +512,8 @@ namespace ContentStoreTest.Distributed.Sessions
                 1,
                 async context =>
                 {
-                    var session = context.GetDistributedSession(0);
-                    var contentLocationStore = session.ContentLocationStore;
+                    var session = context.GetSession(0);
+                    var contentLocationStore = context.GetLocationStore(0);
 
                     // Because the file is unique, trimming should remove the hash from the content tracker
                     var getResult = await contentLocationStore.GetBulkAsync(context, new[] { contentHash }, CancellationToken.None, UrgencyHint.Nominal);
@@ -484,8 +587,8 @@ namespace ContentStoreTest.Distributed.Sessions
                 1,
                 async context =>
                 {
-                    var session = context.GetDistributedSession(0);
-                    var store = context.GetContentLocationStore(session);
+                    var session = context.GetSession(0);
+                    var store = context.GetLocationStore(0);
 
                     var defaultFileSize = (Config.MaxSizeQuota.Hard / 4) + 1;
 
@@ -521,9 +624,10 @@ namespace ContentStoreTest.Distributed.Sessions
                 1,
                 async context =>
                 {
-                    var session = context.GetDistributedSession(0);
+                    var session = context.GetSession(0);
+                    var locationStore = context.GetLocationStore(0);
 
-                    var locationsResult = await session.ContentLocationStore.GetBulkAsync(
+                    var locationsResult = await locationStore.GetBulkAsync(
                         context,
                         contentHashes,
                         Token,
@@ -679,7 +783,7 @@ namespace ContentStoreTest.Distributed.Sessions
                     {
                         var sessions = context.Sessions;
 
-                        var openStreamResult = await context.GetDistributedSession(0).OpenStreamAsync(context, VsoHashInfo.Instance.EmptyHash, Token);
+                        var openStreamResult = await context.GetSession(0).OpenStreamAsync(context, VsoHashInfo.Instance.EmptyHash, Token);
 
                         openStreamResult.ShouldBeSuccess();
                         Assert.Equal(0, openStreamResult.Stream.Length);
@@ -700,7 +804,7 @@ namespace ContentStoreTest.Distributed.Sessions
                     {
                         var sessions = context.Sessions;
 
-                        await context.GetDistributedSession(0).PinAsync(context, VsoHashInfo.Instance.EmptyHash, Token).ShouldBeSuccess();
+                        await context.GetSession(0).PinAsync(context, VsoHashInfo.Instance.EmptyHash, Token).ShouldBeSuccess();
 
                         Assert.Equal(0, context.TestFileCopier.FilesCopied.Count);
                     }
@@ -719,7 +823,7 @@ namespace ContentStoreTest.Distributed.Sessions
                     {
                         var sessions = context.Sessions;
 
-                        var placeFileResult = (await context.GetDistributedSession(0).PlaceFileAsync(
+                        var placeFileResult = (await context.GetSession(0).PlaceFileAsync(
                             context,
                             new[] { new ContentHashWithPath(VsoHashInfo.Instance.EmptyHash, directory.CreateRandomFileName()) },
                             FileAccessMode.Write,
@@ -743,7 +847,8 @@ namespace ContentStoreTest.Distributed.Sessions
             TestContext outerContext = null,
             bool ensureLiveness = true,
             int? storeToStartupLast = null,
-            TestFileCopier testCopier = null)
+            TestFileCopier testCopier = null,
+            string buildId = null)
         {
             var startIndex = outerContext?.Stores.Count ?? 0;
             var indexedDirectories = Enumerable.Range(0, storeCount)
@@ -759,7 +864,7 @@ namespace ContentStoreTest.Distributed.Sessions
                         testCopier.WorkingDirectory = indexedDirectories[0].Directory.Path;
                     }
 
-                    var testFileCopier = testCopier ?? outerContext?.TestFileCopier ?? new TestFileCopier()
+                    var testFileCopier = testCopier ?? outerContext?.TestFileCopier ?? new TestFileCopier(FileSystem)
                     {
                         WorkingDirectory = indexedDirectories[0].Directory.Path
                     };
@@ -767,11 +872,32 @@ namespace ContentStoreTest.Distributed.Sessions
                     context.Always($"Starting test iteration {iteration}");
 
                     var ports = UseGrpcServer ? Enumerable.Range(0, storeCount).Select(n => PortExtensions.GetNextAvailablePort()).ToArray() : new int[storeCount];
-                    IAbsolutePathFileCopier[] testFileCopiers;
-                    if (UseGrpcServer)
+
+                    IRemoteFileCopier[] testFileCopiers;
+                    if (UseGrpcServer && storeCount > 1)
                     {
                         Contract.Assert(storeCount == 2, "Currently we can only handle two stores while using gRPC, because of copiers.");
-                        testFileCopiers = Enumerable.Range(0, 2).Select(i => new GrpcFileCopier(context, ports[i == 1 ? 0 : 1], maxGrpcClientCount: 1, maxGrpcClientAgeMinutes: 1)).ToArray();
+                        var grpcCopyClientCacheConfiguration = new GrpcCopyClientCacheConfiguration()
+                        {
+                            ResourcePoolVersion = GrpcCopyClientCacheConfiguration.PoolVersion.V2,
+                            ResourcePoolConfiguration = new ResourcePoolConfiguration()
+                            {
+                                MaximumAge = TimeSpan.FromMinutes(1),
+                                MaximumResourceCount = 1,
+                            }
+                        };
+
+                        testFileCopiers = Enumerable.Range(0, 2).Select(i =>
+                        {
+                            var grpcFileCopierConfiguration = new GrpcFileCopierConfiguration()
+                            {
+                                GrpcPort = ports[i == 1 ? 0 : 1],
+                                GrpcCopyClientCacheConfiguration = grpcCopyClientCacheConfiguration,
+                                GrpcCopyClientInvalidationPolicy = GrpcFileCopierConfiguration.ClientInvalidationPolicy.OnEveryError,
+                            };
+
+                            return new GrpcFileCopier(context, grpcFileCopierConfiguration);
+                        }).ToArray();
                     }
                     else
                     {
@@ -788,9 +914,9 @@ namespace ContentStoreTest.Distributed.Sessions
                                 iteration: iteration,
                                 grpcPort: (uint)ports[directory.Index])).ToList();
 
-                    var testContext = ConfigureTestContext(new TestContext(context, testFileCopier, indexedDirectories.Select(p => p.Directory).ToList(), stores, iteration));
+                    var testContext = ConfigureTestContext(new TestContext(context, testFileCopier, indexedDirectories.Select(p => p.Directory).ToList(), stores, iteration, ports));
 
-                    await testContext.StartupAsync(implicitPin, storeToStartupLast);
+                    await testContext.StartupAsync(implicitPin, storeToStartupLast, buildId);
 
                     // This mode is meant to make sure that all machines are alive and ready to go
                     if (ensureLiveness)

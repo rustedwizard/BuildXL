@@ -11,6 +11,7 @@ namespace Test {
             skipGroups: ["Performance"], // Don't run the performance tests in our normal validation flow
             parallelBucketCount: 12,
         },
+        assemblyBindingRedirects: BuildXLSdk.cacheBindingRedirects(),
         references: [
             ...addIf(BuildXLSdk.isFullFramework,
                 NetFx.System.Data.dll,
@@ -32,7 +33,6 @@ namespace Test {
 
             importFrom("BuildXL.Utilities").dll,
             ...importFrom("BuildXL.Cache.ContentStore").redisPackages,
-            importFrom("System.Data.SQLite.Core").pkg,
             ...BuildXLSdk.bclAsyncPackages,
             ...BuildXLSdk.fluentAssertionsWorkaround,
             ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,

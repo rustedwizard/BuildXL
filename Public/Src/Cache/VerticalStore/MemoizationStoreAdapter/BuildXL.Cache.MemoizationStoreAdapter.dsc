@@ -18,6 +18,7 @@ namespace MemoizationStoreAdapter {
             ...BuildXLSdk.bclAsyncPackages,
             importFrom("BuildXL.Cache.ContentStore").UtilitiesCore.dll,
             importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
+            importFrom("BuildXL.Cache.ContentStore").Grpc.dll,
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
             importFrom("BuildXL.Cache.ContentStore").Library.dll,
             importFrom("BuildXL.Cache.ContentStore").VfsLibrary.dll,
@@ -25,6 +26,8 @@ namespace MemoizationStoreAdapter {
             importFrom("BuildXL.Cache.DistributedCache.Host").Configuration.dll,
             importFrom("BuildXL.Cache.MemoizationStore").Interfaces.dll,
             importFrom("BuildXL.Cache.MemoizationStore").Library.dll,
+            importFrom("BuildXL.Cache.MemoizationStore").Distributed.dll,
+            importFrom("BuildXL.Cache.Roxis").Client.dll,
         ],
         internalsVisibleTo: [
             "BuildXL.Cache.MemoizationStoreAdapter.Test",

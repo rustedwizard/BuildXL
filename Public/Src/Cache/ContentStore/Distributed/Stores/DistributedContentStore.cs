@@ -32,9 +32,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
     /// <summary>
     /// A store that is based on content locations for opaque file locations.
     /// </summary>
-    /// <typeparam name="T">The content locations being stored.</typeparam>
-    public class DistributedContentStore<T> : StartupShutdownBase, IContentStore, IRepairStore, IDistributedLocationStore, IStreamStore, ICopyRequestHandler, IPushFileHandler, IDeleteFileHandler, IDistributedContentCopierHost
-        where T : PathBase
+    public class DistributedContentStore : StartupShutdownBase, IContentStore, IRepairStore, IDistributedLocationStore, IStreamStore, ICopyRequestHandler, IPushFileHandler, IDeleteFileHandler, IDistributedContentCopierHost
     {
         // Used for testing.
         internal enum Counters
@@ -55,7 +53,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public MachineLocation LocalMachineLocation { get; }
 
         private readonly IContentLocationStoreFactory _contentLocationStoreFactory;
-        private readonly ContentStoreTracer _tracer = new ContentStoreTracer(nameof(DistributedContentStore<T>));
+        private readonly ContentStoreTracer _tracer = new ContentStoreTracer(nameof(DistributedContentStore));
         private readonly IClock _clock;
 
         private DateTime? _lastEvictedEffectiveLastAccessTime;
@@ -63,7 +61,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <summary>
         /// Flag for testing using local Redis instance.
         /// </summary>
-        internal bool DisposeContentStoreFactory = true;
+        internal bool DisposeContentLocationStoreFactory = true;
 
         internal IContentStore InnerContentStore { get; }
 
@@ -81,20 +79,19 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// </summary>
         private readonly TaskSourceSlim<BoolResult> _postInitializationCompletion = TaskSourceSlim.Create<BoolResult>();
 
-        private readonly DistributedContentCopier<T> _distributedCopier;
+        private readonly DistributedContentCopier _distributedCopier;
         private readonly DisposableDirectory _copierWorkingDirectory;
-        internal Lazy<Task<Result<ReadOnlyDistributedContentSession<T>>>> ProactiveCopySession;
+        internal Lazy<Task<Result<ReadOnlyDistributedContentSession>>> ProactiveCopySession;
 
         /// <nodoc />
         public DistributedContentStore(
             MachineLocation localMachineLocation,
             AbsolutePath localCacheRoot,
-            Func<ContentStoreSettings, IDistributedLocationStore, IContentStore> innerContentStoreFunc,
+            Func<IDistributedLocationStore, IContentStore> innerContentStoreFunc,
             IContentLocationStoreFactory contentLocationStoreFactory,
             DistributedContentStoreSettings settings,
-            DistributedContentCopier<T> distributedCopier,
-            IClock clock = null,
-            ContentStoreSettings contentStoreSettings = null)
+            DistributedContentCopier distributedCopier,
+            IClock clock = null)
         {
             Contract.Requires(settings != null);
 
@@ -104,10 +101,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             _distributedCopier = distributedCopier;
             _copierWorkingDirectory = new DisposableDirectory(distributedCopier.FileSystem, localCacheRoot / "Temp");
 
-            contentStoreSettings ??= ContentStoreSettings.DefaultSettings;
             _settings = settings;
 
-            InnerContentStore = innerContentStoreFunc(contentStoreSettings, this);
+            InnerContentStore = innerContentStoreFunc(this);
         }
 
         AbsolutePath IDistributedContentCopierHost.WorkingFolder => _copierWorkingDirectory.Path;
@@ -117,11 +113,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             _contentLocationStore.MachineReputationTracker.ReportReputation(location, reputation);
         }
 
-        private Task<Result<ReadOnlyDistributedContentSession<T>>> CreateCopySession(Context context)
+        private Task<Result<ReadOnlyDistributedContentSession>> CreateCopySession(Context context)
         {
             var sessionId = Guid.NewGuid();
 
-            var operationContext = OperationContext(context.CreateNested(sessionId, nameof(DistributedContentStore<T>)));
+            var operationContext = OperationContext(context.CreateNested(sessionId, nameof(DistributedContentStore)));
             return operationContext.PerformOperationAsync(_tracer,
                 async () =>
                 {
@@ -130,7 +126,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     var session = sessionResult.Session;
 
                     await session.StartupAsync(context).ThrowIfFailure();
-                    return Result.Success(session as ReadOnlyDistributedContentSession<T>);
+                    return Result.Success(session as ReadOnlyDistributedContentSession);
                 });
         }
 
@@ -139,11 +135,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         {
             var startupTask = base.StartupAsync(context);
 
-            ProactiveCopySession = new Lazy<Task<Result<ReadOnlyDistributedContentSession<T>>>>(() => CreateCopySession(context));
+            ProactiveCopySession = new Lazy<Task<Result<ReadOnlyDistributedContentSession>>>(() => CreateCopySession(context));
 
             if (_settings.SetPostInitializationCompletionAfterStartup)
             {
-                context.Debug("Linking post-initialization completion task with the result of StartupAsync.");
+                _tracer.Debug(context, "Linking post-initialization completion task with the result of StartupAsync.");
                 _postInitializationCompletion.LinkToTask(startupTask);
             }
 
@@ -153,7 +149,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <inheritdoc />
         public void PostInitializationCompleted(Context context, BoolResult result)
         {
-            context.Debug($"Setting result for post-initialization completion task to '{result}'.");
+            _tracer.Debug(context, $"Setting result for post-initialization completion task to '{result}'.");
             _postInitializationCompletion.TrySetResult(result);
         }
 
@@ -177,7 +173,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 && _contentLocationStore is TransitioningContentLocationStore tcs
                 && InnerContentStore is ILocalContentStore localContentStore)
             {
-                await ProactiveReplicationAsync(context.CreateNested(nameof(DistributedContentStore<T>)), localContentStore, tcs).ThrowIfFailure();
+                await ProactiveReplicationAsync(context.CreateNested(nameof(DistributedContentStore)), localContentStore, tcs).ThrowIfFailure();
             }
 
             return BoolResult.Success;
@@ -220,7 +216,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
         private Task<ProactiveReplicationResult> ProactiveReplicationIterationAsync(
             OperationContext context,
-            ReadOnlyDistributedContentSession<T> proactiveCopySession,
+            ReadOnlyDistributedContentSession proactiveCopySession,
             ILocalContentStore localContentStore,
             TransitioningContentLocationStore contentLocationStore)
         {
@@ -367,7 +363,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
                 if (innerSessionResult.Succeeded)
                 {
-                    var session = new ReadOnlyDistributedContentSession<T>(
+                    var session = new ReadOnlyDistributedContentSession(
                             name,
                             innerSessionResult.Session,
                             _contentLocationStore,
@@ -391,7 +387,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
                 if (innerSessionResult.Succeeded)
                 {
-                    var session = new DistributedContentSession<T>(
+                    var session = new DistributedContentSession(
                             name,
                             innerSessionResult.Session,
                             _contentLocationStore,
@@ -469,7 +465,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         {
             InnerContentStore.Dispose();
 
-            if (DisposeContentStoreFactory)
+            if (DisposeContentLocationStoreFactory)
             {
                 _contentLocationStoreFactory.Dispose();
             }
@@ -531,7 +527,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
             BoolResult waitForCompletion()
             {
-                context.Debug($"Post-initialization is not done. Waiting for it to finish...");
+                _tracer.Debug(context, $"Post-initialization is not done. Waiting for it to finish...");
                 return task.GetAwaiter().GetResult();
             }
         }
@@ -593,7 +589,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 return await innerStreamStore.StreamContentAsync(context, contentHash);
             }
 
-            return new OpenStreamResult($"{InnerContentStore} does not implement {nameof(IStreamStore)} in {nameof(DistributedContentStore<T>)}.");
+            return new OpenStreamResult($"{InnerContentStore} does not implement {nameof(IStreamStore)} in {nameof(DistributedContentStore)}.");
         }
 
         /// <inheritdoc />
@@ -611,7 +607,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 return await innerStreamStore.CheckFileExistsAsync(context, contentHash);
             }
 
-            return new FileExistenceResult(FileExistenceResult.ResultCode.Error, $"{InnerContentStore} does not implement {nameof(IStreamStore)} in {nameof(DistributedContentStore<T>)}.");
+            return new FileExistenceResult(FileExistenceResult.ResultCode.Error, $"{InnerContentStore} does not implement {nameof(IStreamStore)} in {nameof(DistributedContentStore)}.");
         }
 
         Task<DeleteResult> IDeleteFileHandler.HandleDeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions) => DeleteAsync(context, contentHash, deleteOptions);

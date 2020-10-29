@@ -5,7 +5,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.Text;
+using BuildXL.Cache.ContentStore.Grpc;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
+using GrpcConstants = BuildXL.Cache.ContentStore.Grpc.GrpcConstants;
 
 namespace BuildXL.Cache.ContentStore.Service
 {
@@ -24,7 +26,8 @@ namespace BuildXL.Cache.ContentStore.Service
             int? gzipBarrierSizeForGrpcCopies = null,
             int? proactivePushCountLimit = null,
             TimeSpan? logIncrementalStatsInterval = null,
-            TimeSpan? logMachineStatsInterval = null
+            TimeSpan? logMachineStatsInterval = null,
+            bool traceGrpcOperations = false
         )
         {
             DataRootPath = dataRootPath;
@@ -37,6 +40,7 @@ namespace BuildXL.Cache.ContentStore.Service
 
             LogIncrementalStatsInterval = logIncrementalStatsInterval ?? DefaultLogIncrementalStatsInterval;
             LogMachineStatsInterval = logMachineStatsInterval ?? DefaultLogMachineStatsInterval;
+            TraceGrpcOperations = traceGrpcOperations;
         }
 
         /// <nodoc />
@@ -53,6 +57,8 @@ namespace BuildXL.Cache.ContentStore.Service
             ProactivePushCountLimit = serviceConfiguration.ProactivePushCountLimit;
             LogMachineStatsInterval = serviceConfiguration.LogMachineStatsInterval ?? DefaultLogMachineStatsInterval;
             LogIncrementalStatsInterval = serviceConfiguration.LogIncrementalStatsInterval ?? DefaultLogIncrementalStatsInterval;
+            TraceGrpcOperations = serviceConfiguration.TraceGrpcOperation;
+            IncrementalStatsCounterNames = serviceConfiguration.IncrementalStatsCounterNames ?? new string[0];
         }
 
         /// <nodoc />
@@ -68,6 +74,8 @@ namespace BuildXL.Cache.ContentStore.Service
             ProactivePushCountLimit = serviceConfiguration.ProactivePushCountLimit;
             LogMachineStatsInterval = serviceConfiguration.LogMachineStatsInterval ?? DefaultLogMachineStatsInterval;
             LogIncrementalStatsInterval = serviceConfiguration.LogIncrementalStatsInterval ?? DefaultLogIncrementalStatsInterval;
+            TraceGrpcOperations = serviceConfiguration.TraceGrpcOperation;
+            IncrementalStatsCounterNames = serviceConfiguration.IncrementalStatsCounterNames ?? new string[0];
             return this;
         }
 
@@ -88,6 +96,14 @@ namespace BuildXL.Cache.ContentStore.Service
         /// Gets or sets the time period between logging incremental stats
         /// </summary>
         public TimeSpan LogIncrementalStatsInterval { get; set; } = DefaultLogIncrementalStatsInterval;
+
+        /// <summary>
+        /// A list of counters that will be printed as part of incremental statistics.
+        /// </summary>
+        /// <remarks>
+        /// The name should just be the counter name itself, like 'RemoteCopyFile' and not 'DistributedContentCopier.DistributedContentCopierCounters.RemoteCopyFile'.
+        /// </remarks>
+        public string[] IncrementalStatsCounterNames { get; set; } = new string[0];
 
         /// <nodoc />
         public static TimeSpan DefaultLogMachineStatsInterval { get; } = TimeSpan.FromMinutes(1);
@@ -111,6 +127,8 @@ namespace BuildXL.Cache.ContentStore.Service
         /// </remarks>
         public TimeSpan UnusedSessionHeartbeatTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
+        #region gRPC Internal Options
+
         /// <nodoc />
         public const int DefaultRequestCallTokensPerCompletionQueue = 7000;
 
@@ -123,18 +141,18 @@ namespace BuildXL.Cache.ContentStore.Service
         public int RequestCallTokensPerCompletionQueue { get; set; } = DefaultRequestCallTokensPerCompletionQueue;
 
         /// <nodoc />
-        public static readonly int DefaultGrpcPort = 7089;
+        public int GrpcPort { get; private set; } = GrpcConstants.DefaultGrpcPort;
 
         /// <nodoc />
-        public int GrpcPort { get; private set; }
+        public GrpcCoreServerOptions? GrpcCoreServerOptions { get; set; }
+
+        /// <nodoc />
+        public GrpcEnvironmentOptions? GrpcEnvironmentOptions { get; set; }
+
+        #endregion
 
         /// <nodoc />
         public int? BufferSizeForGrpcCopies { get; private set; }
-
-        /// <summary>
-        /// If true, then the unsafe version of ByteString construction is used that avoids extra copy of the byte[].
-        /// </summary>
-        public bool UseUnsafeByteStringConstruction { get; set; }
 
         /// <nodoc />
         public const int DefaultProactivePushCountLimit = 128;
@@ -156,15 +174,17 @@ namespace BuildXL.Cache.ContentStore.Service
         public string? GrpcPortFileName { get; set; } = DefaultFileName;
 
         /// <nodoc />
-        public int? GrpcThreadPoolSize { get; set; }
-
-        /// <nodoc />
         public IAbsFileSystem? FileSystem { get; set; }
 
         /// <summary>
         /// When set to true, we will shut down the quota keeper before hibernating sessions to prevent a race condition of evicting pinned content
         /// </summary>
         public bool ShutdownEvictionBeforeHibernation { get; set; }
+
+        /// <summary>
+        /// Whether to trace the operation's start and stop messages on the grpc level.
+        /// </summary>
+        public bool TraceGrpcOperations { get; set; }
 
         /// <inheritdoc />
         public override string ToString()
@@ -191,6 +211,7 @@ namespace BuildXL.Cache.ContentStore.Service
             sb.Append($", GrpcPortFileName={GrpcPortFileName}");
             sb.Append($", BufferSizeForGrpcCopies={BufferSizeForGrpcCopies}");
             sb.Append($", GzipBarrierSizeForGrpcCopies={GzipBarrierSizeForGrpcCopies}");
+            sb.Append($", TraceGrpcOperations={TraceGrpcOperations}");
 
             return sb.ToString();
         }

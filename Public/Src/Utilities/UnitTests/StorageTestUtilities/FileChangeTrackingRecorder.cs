@@ -25,8 +25,8 @@ namespace Test.BuildXL.StorageTestUtilities
         private readonly object m_lock = new object();
         private readonly bool m_verifyKnownIdentity;
 
-        public readonly HashSet<string> PathsWithTrackedExistence = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        public readonly HashSet<string> PathsWithTrackedMembership = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> PathsWithTrackedExistence = new HashSet<string>(OperatingSystemHelper.PathComparer);
+        public readonly HashSet<string> PathsWithTrackedMembership = new HashSet<string>(OperatingSystemHelper.PathComparer);
         public readonly HashSet<VersionedFileIdentity> TrackedFileIdentities = new HashSet<VersionedFileIdentity>();
 
         public FileChangeTrackingRecorder(bool verifyKnownIdentity)
@@ -83,12 +83,14 @@ namespace Test.BuildXL.StorageTestUtilities
 
         public Possible<FileChangeTrackingSet.EnumerationResult> TryEnumerateDirectoryAndTrackMembership(
             string path,
-            Action<string, FileAttributes> handleEntry)
+            Action<string, FileAttributes> handleEntry,
+            Func<string, FileAttributes, bool> shouldIncludeEntry,
+            bool supersedeWithStrongIdentity)
         {
             Contract.Requires(path != null);
             Contract.Requires(handleEntry != null);
 
-            var possibleFingerprintResult = DirectoryMembershipTrackingFingerprinter.ComputeFingerprint(path, handleEntry);
+            var possibleFingerprintResult = DirectoryMembershipTrackingFingerprinter.ComputeFingerprint(path, handleEntry, shouldIncludeEntry);
 
             if (!possibleFingerprintResult.Succeeded)
             {

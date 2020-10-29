@@ -13,6 +13,8 @@
 #include "SubstituteProcessExecution.h"
 #include "UnicodeConverter.h"
 
+#include <Pathcch.h>
+
 using std::map;
 using std::vector;
 using std::wstring;
@@ -98,9 +100,10 @@ static bool AccessReparsePointTarget(
     _In_     DWORD                 dwDesiredAccess,
     _In_     DWORD                 dwFlagsAndAttributes)
 {
+    bool hasReparsePointFlag = FlagsAndAttributesContainReparsePointFlag(dwFlagsAndAttributes);
     return IsReparsePoint(lpFileName) // File is a reparse point.
-        && (!WantsProbeOnlyAccess(dwDesiredAccess) // It's not probe-only access.
-            || !FlagsAndAttributesContainReparsePointFlag(dwFlagsAndAttributes)); // It's a probe-only access, but no reparse point flag has been passed.
+        && (!WantsDeleteOnlyAccess(dwDesiredAccess) || !hasReparsePointFlag)  // It's not deletion of reparse point.
+        && (!WantsProbeOnlyAccess(dwDesiredAccess)  || !hasReparsePointFlag); // It's not only probing reparse point.
 }
 
 /// <summary>
@@ -194,9 +197,9 @@ static void GetTargetNameFromReparseData(_In_ PREPARSE_DATA_BUFFER pReparseDataB
 }
 
 /// <summary>
-/// Get the symlink target via DeviceIoControl
+/// Get the reparse point target via DeviceIoControl
 /// </summary>
-static bool TryGetSymlinkTarget(_In_ const wstring& path, _In_ HANDLE hInput, _Inout_ wstring& target)
+static bool TryGetReparsePointTarget(_In_ const wstring& path, _In_ HANDLE hInput, _Inout_ wstring& target)
 {
     HANDLE hFile = INVALID_HANDLE_VALUE;
     DWORD lastError = GetLastError();
@@ -207,6 +210,11 @@ static bool TryGetSymlinkTarget(_In_ const wstring& path, _In_ HANDLE hInput, _I
     auto io_result = ResolvedPathCache::Instance().GetResolvedPathAndType(path);
     if (io_result != nullptr)
     {
+
+#if MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+        InterlockedIncrement(&g_reparsePointTargetCacheHitCount);
+#endif // MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+
         target = io_result->first;
         reparsePointType = io_result->second;
         if (reparsePointType == 0x0)
@@ -280,7 +288,7 @@ static bool TryGetSymlinkTarget(_In_ const wstring& path, _In_ HANDLE hInput, _I
 
 Success:
 
-    status = IgnoreFullSymlinkResolving() ? true : reparsePointType == IO_REPARSE_TAG_SYMLINK;
+    status = true;
     goto Epilogue;
 
 Error:
@@ -300,15 +308,15 @@ Epilogue:
 }
 
 /// <summary>
-/// Checks if Detours should resolve all symlinks contained in a path.
+/// Checks if Detours should resolve all reparse points contained in a path.
 /// </summary>
 /// <remarks>
 /// Given a path this function traverses it from left to right, checking if any components
-/// are of type 'reparse point'. As soon as an entry of that type is found, a positive result 
+/// are of type 'reparse point'. As soon as an entry of that type is found, a positive result
 /// is returned, indicating that the path needs further processing to properly indicate all
-/// potential symlinks as file accesses upstream.
+/// potential reparse point targets as file accesses upstream.
 /// </remarks>
-static bool ShouldResolveSymlinkChain(
+static bool ShouldResolveReparsePointsInPath(
     _In_     LPCWSTR               lpFileName,
     _In_     DWORD                 dwDesiredAccess,
     _In_     DWORD                 dwFlagsAndAttributes)
@@ -318,21 +326,24 @@ static bool ShouldResolveSymlinkChain(
         return false;
     }
 
-    if (IgnoreFullSymlinkResolving())
+    if (IgnoreFullReparsePointResolving())
     {
         return AccessReparsePointTarget(lpFileName, dwDesiredAccess, dwFlagsAndAttributes); // Trying to access reparse point target.
     }
 
     CanonicalizedPath path = CanonicalizedPath::Canonicalize(lpFileName);
 
-    // BuildXL tries to delete files using the 'FILE_FLAG_DELETE_ON_CLOSE' attribute when opening a handle then closing it, before
-    // falling back to other strategies. If we try to delete a symbolic link, it's important to not do full resolving as only the link
+    // BuildXl can delete file by opening a handle using 'FILE_FLAG_DELETE_ON_CLOSE' attribute or 'DELETE' access (Posix delete).
+    // If we try to delete a symbolic link, it's important to not do full resolving as only the link
     // itself should be deleted, not its targets.
-    bool symbolicLinkDeletion = (dwFlagsAndAttributes & FILE_FLAG_DELETE_ON_CLOSE) != 0 &&
-        (dwFlagsAndAttributes & FILE_FLAG_OPEN_REPARSE_POINT) != 0;
+    bool reparsePointDeletion =
+        ((dwDesiredAccess & DELETE) != 0 || (dwFlagsAndAttributes & FILE_FLAG_DELETE_ON_CLOSE) != 0)
+        && (dwFlagsAndAttributes & FILE_FLAG_OPEN_REPARSE_POINT) != 0;
 
-    if (symbolicLinkDeletion)
+    if (reparsePointDeletion)
     {
+        // TODO: Deciding not to traverse symlink chain based on reparse point deletion is probably not correct
+        //       because the desired access can be set to read/write, which can be used to access the target.
         ResolvedPathCache::Instance().Invalidate(path.GetPathStringWithoutTypePrefix());
         return false;
     }
@@ -340,6 +351,9 @@ static bool ShouldResolveSymlinkChain(
     auto result = ResolvedPathCache::Instance().GetResolvingCheckResult(path.GetPathStringWithoutTypePrefix());
     if (result != nullptr)
     {
+#if MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+        InterlockedIncrement(&g_shouldResolveReparsePointCacheHitCount);
+#endif // MEASURE_REPARSEPOINT_RESOLVING_IMPACT
         return *result;
     }
 
@@ -349,7 +363,7 @@ static bool ShouldResolveSymlinkChain(
     auto extension = std::make_unique<wchar_t[]>(_MAX_EXT);
 
     errno_t err = _wsplitpath_s(
-        path.GetPathStringWithoutTypePrefix(), 
+        path.GetPathStringWithoutTypePrefix(),
         drive.get(),     _MAX_DRIVE,
         directory.get(), _MAX_EXTENDED_DIR_LENGTH,
         file_name.get(), _MAX_FNAME,
@@ -357,7 +371,7 @@ static bool ShouldResolveSymlinkChain(
 
     if (err != 0)
     {
-        Dbg(L"ShouldResolveSymlinkChain: _wsplitpath_s failed, not resolving path: %d", err);
+        Dbg(L"ShouldResolveReparsePointsInPath: _wsplitpath_s failed, not resolving path: %d", err);
         return false;
     }
 
@@ -372,7 +386,7 @@ static bool ShouldResolveSymlinkChain(
         resolver.append(L"\\");
         resolver.append(next);
 
-        if (TryGetSymlinkTarget(resolver.c_str(), INVALID_HANDLE_VALUE, target))
+        if (TryGetReparsePointTarget(resolver, INVALID_HANDLE_VALUE, target))
         {
             ResolvedPathCache::Instance().InsertResolvingCheckResult(path.GetPathStringWithoutTypePrefix(), true);
             return true;
@@ -385,7 +399,7 @@ static bool ShouldResolveSymlinkChain(
     resolver.append(file_name.get());
     resolver.append(extension.get());
 
-    if (TryGetSymlinkTarget(resolver.c_str(), INVALID_HANDLE_VALUE, target))
+    if (TryGetReparsePointTarget(resolver, INVALID_HANDLE_VALUE, target))
     {
         ResolvedPathCache::Instance().InsertResolvingCheckResult(path.GetPathStringWithoutTypePrefix(), true);
         return true;
@@ -625,7 +639,7 @@ static bool TryResolveRelativeTarget(_In_ const wstring& path, _In_ const wstrin
 
             // Get the next target of the directory symlink.
             wstring target;
-            if (!TryGetSymlinkTarget(result, INVALID_HANDLE_VALUE, target))
+            if (!TryGetReparsePointTarget(result, INVALID_HANDLE_VALUE, target))
             {
                 return false;
             }
@@ -669,7 +683,7 @@ static bool TryGetNextPath(_In_ const wstring& path, _In_ HANDLE hInput, _Inout_
     wstring target;
 
     // Get the next target of a reparse point path.
-    if (!TryGetSymlinkTarget(path, hInput, target))
+    if (!TryGetReparsePointTarget(path, hInput, target))
     {
         return false;
     }
@@ -804,11 +818,11 @@ static bool IsHandleOrPathToDirectory(
     _In_     PolicyResult*         policyResult)
 {
     bool treatReparsePointAsFile =
-        !ProbeDirectorySymlinkAsDirectory()                               // It is set globally that directory symlink probe should not be treated as directory.
-        && WantsProbeOnlyAccess(dwDesiredAccess)                          // Probe-only access.
+        !ProbeDirectorySymlinkAsDirectory()                                // It is set globally that directory symlink probe should not be treated as directory.
+        && WantsProbeOnlyAccess(dwDesiredAccess)                           // Probe-only access.
         && FlagsAndAttributesContainReparsePointFlag(dwFlagsAndAttributes) // Open attribute contains reparse point flag.
-        && (policyResult == nullptr                                       // No policy is specified,
-            || !policyResult->TreatDirectorySymlinkAsDirectory());        // or policy does not mandate directory symlink to be treated as directory.
+        && (policyResult == nullptr                                        // No policy is specified,
+            || !policyResult->TreatDirectorySymlinkAsDirectory());         // or policy does not mandate directory symlink to be treated as directory.
 
     return IsHandleOrPathToDirectory(hFile, lpFileName, treatReparsePointAsFile);
 }
@@ -818,7 +832,7 @@ static bool IsHandleOrPathToDirectory(
 /// </summary>
 static bool EnforceReparsePointAccess(
     const wstring& reparsePointPath,
-    const DWORD dwDesiredAccess,
+    DWORD dwDesiredAccess,
     const DWORD dwShareMode,
     const DWORD dwCreationDisposition,
     const DWORD dwFlagsAndAttributes,
@@ -833,6 +847,17 @@ static bool EnforceReparsePointAccess(
 
     // We start with allow / ignore (no access requested) and then restrict based on read / write (maybe both, maybe neither!)
     AccessCheckResult accessCheck(RequestedAccess::None, ResultAction::Allow, ReportLevel::Ignore);
+
+    if (!IgnoreFullReparsePointResolving())
+    {
+        bool isDir = IsPathToDirectory(lpReparsePointPath, false);
+        if (isDir && !isFullyResolvedPath)
+        {
+            // Always report intermediate reparse point target results (junctions and directory symbolic links only) as probes or reads, only the fully resolved path
+            // or intermediate symbolic files are reported with the original desired access
+            dwDesiredAccess = WantsProbeOnlyAccess(dwDesiredAccess) ? dwDesiredAccess : (GENERIC_READ | FILE_READ_DATA);
+        }
+    }
 
     FileOperationContext opContext(
         contextOperationName.c_str(),
@@ -870,7 +895,7 @@ static bool EnforceReparsePointAccess(
         {
             FileReadContext readContext;
 
-            // When enforcing reparse point access, we want to make sure to report and treat any intermediate symbolic links
+            // When enforcing reparse point access, we want to make sure to report and treat any intermediate reparse points
             // in a path as file open actions and only indicate either a file or directory open action once the input is fully resolved.
             // The general design idea is:
             //
@@ -884,7 +909,7 @@ static bool EnforceReparsePointAccess(
             // │   ├── sym-A     -> A
             // │   └── sym-sym-A -> sym-A
             // │
-            // ├── sym-Versions_A_file     -> Versions/A/file 
+            // ├── sym-Versions_A_file     -> Versions/A/file
             // └── sym-Versions_sym-A_file -> Versions/sym-A/file
             //
             // Example #1: Reading a directory via symlink: Versions/sym-sym-A should report the following accesses:
@@ -907,7 +932,7 @@ static bool EnforceReparsePointAccess(
             //
             // Design Document: https://bit.ly/2XBqVWy
 
-            readContext.OpenedDirectory = IgnoreFullSymlinkResolving()
+            readContext.OpenedDirectory = IgnoreFullReparsePointResolving()
                 ? IsHandleOrPathToDirectory(INVALID_HANDLE_VALUE, lpReparsePointPath, dwDesiredAccess, dwFlagsAndAttributes, &policyResult)
                 : isFullyResolvedPath ? IsHandleOrPathToDirectory(INVALID_HANDLE_VALUE, lpReparsePointPath, false) : false;
 
@@ -943,15 +968,37 @@ static bool EnforceReparsePointAccess(
     return ret;
 }
 
+static inline bool PathContainedInPathTranslations(wstring path, bool canonicalize = false)
+{
+    if (path.empty())
+    {
+        return false;
+    }
+
+    if (canonicalize)
+    {
+        CanonicalizedPath normalized = CanonicalizedPath::Canonicalize(path.c_str());
+        path = std::wstring(normalized.GetPathStringWithoutTypePrefix());
+    }
+
+    if (path.back() == L'\\')
+    {
+        path.pop_back();
+    }
+
+    std::transform(path.begin(), path.end(), path.begin(), std::towupper);
+
+    return g_pManifestTranslatePathLookupTable->find(path) != g_pManifestTranslatePathLookupTable->end();
+}
+
 /// <summary>
-/// Resolves all symbolic links contained in a path and enforces allowed accesses for all found matches and optionally the final resolved path.
+/// Resolves all reparse points potentially contained in a path and enforces allowed accesses for all found matches and optionally the final resolved path.
 /// </summary>
 /// <remarks>
-/// This function first canonicalizes the input path, then splits it by its path components to then analyze each component to check 
-/// if it is a reparse point with a symbolic link tag. If that is the case, the target of the symbolic link is used to gradually resolve 
-/// the input and transform it into its final form.
+/// This function first canonicalizes the input path, then splits it by its path components to then analyze each component to check if it is a reparse
+/// point. If that is the case, the target of the reparse point is used to gradually resolve the input and transform it into its final form.
 /// </remarks>
-static bool ResolveAllSymlinksAndEnforceReparsePointAccess(
+static bool ResolveAllReparsePointsAndEnforceAccess(
     const CanonicalizedPath& path,
     const DWORD dwDesiredAccess,
     const DWORD dwShareMode,
@@ -961,10 +1008,11 @@ static bool ResolveAllSymlinksAndEnforceReparsePointAccess(
     const bool enforceAccess = true,
     const bool isCreateDirectory = false,
     wstring* resolvedPath = nullptr,
-    const bool enforceAccessForResolvedPath = true)
+    const bool enforceAccessForResolvedPath = true,
+    const bool preserveLastReparsePointInPath = false)
 {
     bool success = true;
-    CanonicalizedPath normalized;
+    auto normalized = std::make_unique<wchar_t[]>(_MAX_EXTENDED_PATH_LENGTH);
     const wchar_t* input = (wchar_t*)path.GetPathStringWithoutTypePrefix();
 
     vector<wstring> order;
@@ -986,31 +1034,33 @@ static bool ResolveAllSymlinksAndEnforceReparsePointAccess(
 
         if (err != 0)
         {
-            Dbg(L"EnforceChainOfReparsePointAccesses: _wsplitpath_s failed: %d", err);
+            Dbg(L"ResolveAllReparsePointsAndEnforceAccess: _wsplitpath_s failed: %d", err);
             return false;
         }
 
-        bool symlink_found = false;
+        bool reparsepoint_found = false;
 
-        wstring target;
+        wstring target = L"";
         wstring resolved = drive.get();
 
         wchar_t* context;
         wchar_t* next = wcstok_s(directory.get(), L"\\/", &context);
 
+        // Fist lets resolve the part of path that consists of directories e.g. XXXX:\a\b\c\XXXX -> resolve 'a\b\c'
         while (next)
         {
-            resolved.append(L"\\");
+            resolved += L"\\";
+            resolved += next;
 
-            wstring temp = resolved;
-            temp.append(next);
-
-            if (TryGetSymlinkTarget(temp.c_str(), INVALID_HANDLE_VALUE, target))
+            bool result = TryGetReparsePointTarget(resolved, INVALID_HANDLE_VALUE, target);
+            bool isFilteredPath = PathContainedInPathTranslations(resolved) || PathContainedInPathTranslations(target, true);
+            if (result && !isFilteredPath)
             {
-                order.push_back(temp);
-                resolvedPaths.emplace(temp, ResolvedPathType::Intermediate);
+                order.push_back(resolved);
+                resolvedPaths.emplace(resolved, ResolvedPathType::Intermediate);
+
                 success &= EnforceReparsePointAccess(
-                    temp,
+                    resolved,
                     dwDesiredAccess,
                     dwShareMode,
                     dwCreationDisposition,
@@ -1025,31 +1075,51 @@ static bool ResolveAllSymlinksAndEnforceReparsePointAccess(
                 }
                 else
                 {
-                    resolved.append(target);
+                    resolved = resolved.substr(0, resolved.length() - lstrlenW(next));
+                    resolved += target;
                 }
 
-                symlink_found = true;
-            }
-            else
-            {
-                resolved.append(next);
+                reparsepoint_found = true;
             }
 
             next = wcstok_s(nullptr, L"\\/", &context);
+            target = L"";
         }
 
-        resolved.append(L"\\");
+        resolved += L"\\";
+        resolved += file_name.get();
+        resolved += extension.get();
 
-        wstring temp = resolved;
-        temp.append(file_name.get());
-        temp.append(extension.get());
-
-        if (!symlink_found && TryGetSymlinkTarget(temp.c_str(), INVALID_HANDLE_VALUE, target))
+        if (reparsepoint_found)
         {
-            order.push_back(temp);
-            resolvedPaths.emplace(temp, ResolvedPathType::Intermediate);
+            // Normalize the partially resolved path and repeat the directory resolving, because we could have
+            // more reparse points added after each resolution step (e.g. more directory symbolic links or junctions that point to reparse points again)
+            HRESULT res = PathCchCanonicalizeEx(normalized.get(), _MAX_EXTENDED_PATH_LENGTH, resolved.c_str(), PATHCCH_ALLOW_LONG_PATHS);
+            if (res == S_OK)
+            {
+                input = normalized.get();
+                continue;
+            }
+            else
+            {
+                Dbg(L"ResolveAllReparsePointsAndEnforceAccess: PathCchCanonicalizeEx failed for %s", resolved.c_str());
+                return false;
+            }
+        }
+
+        // The path leading to the last path particle has been resolved, now lets take care of the last part - if 'preserveLastReparsePointInPath' is true,
+        // we don't resolve the last part of the path because we don't want the potential target value.
+        bool result = !preserveLastReparsePointInPath && TryGetReparsePointTarget(resolved, INVALID_HANDLE_VALUE, target);
+        bool isFilteredPath = !preserveLastReparsePointInPath && (PathContainedInPathTranslations(resolved) || PathContainedInPathTranslations(target, true));
+        if (result && !isFilteredPath)
+        {
+            // The last part is a reparse point, rsolve it and repeat the resolving, re-running the outer while loop
+            // is ok as each resolving step is cached from previous resolution steps
+            order.push_back(resolved);
+            resolvedPaths.emplace(resolved, ResolvedPathType::Intermediate);
+
             success &= EnforceReparsePointAccess(
-                temp,
+                resolved,
                 dwDesiredAccess,
                 dwShareMode,
                 dwCreationDisposition,
@@ -1064,62 +1134,55 @@ static bool ResolveAllSymlinksAndEnforceReparsePointAccess(
             }
             else
             {
-                resolved.append(target);
+                resolved = resolved.substr(0, resolved.length() - lstrlenW(file_name.get()) - lstrlenW(extension.get()));
+                resolved += target;
             }
 
-            normalized = CanonicalizedPath::Canonicalize(resolved.c_str());
-            if (!normalized.IsNull())
+            HRESULT res = PathCchCanonicalizeEx(normalized.get(), _MAX_EXTENDED_PATH_LENGTH, resolved.c_str(), PATHCCH_ALLOW_LONG_PATHS);
+            if (res == S_OK)
             {
-                input = normalized.GetPathStringWithoutTypePrefix();
+                input = normalized.get();
                 continue;
             }
             else
             {
-                Dbg(L"EnforceChainOfReparsePointAccesses: CanonicalizedPath::Canonicalize failed for %s", resolved.c_str());
+                Dbg(L"ResolveAllReparsePointsAndEnforceAccess: PathCchCanonicalizeEx failed for %s", resolved.c_str());
                 return false;
             }
         }
         else
         {
-            resolved.append(file_name.get());
-            resolved.append(extension.get());
-
-            normalized = CanonicalizedPath::Canonicalize(resolved.c_str());
-            if (!normalized.IsNull())
+            // Now we have a fully resolved path without any reparse points present, normalize it, add it to the cache and enforce access eventually
+            HRESULT res = PathCchCanonicalizeEx(normalized.get(), _MAX_EXTENDED_PATH_LENGTH, resolved.c_str(), PATHCCH_ALLOW_LONG_PATHS);
+            if (res == S_OK)
             {
-                input = normalized.GetPathStringWithoutTypePrefix();
-                if (symlink_found)
+                input = normalized.get();
+
+                if (resolvedPath != nullptr)
                 {
-                    continue;
+                    resolvedPath->assign(input);
                 }
-                else
+
+                order.push_back(input);
+                resolvedPaths.emplace(input, ResolvedPathType::FullyResolved);
+
+                if (enforceAccessForResolvedPath)
                 {
-                    if (resolvedPath != nullptr)
-                    {
-                        resolvedPath->assign(input);
-                    }
-
-                    order.push_back(temp);
-                    resolvedPaths.emplace(input, ResolvedPathType::FullyResolved);
-
-                    if (enforceAccessForResolvedPath)
-                    {
-                        success &= EnforceReparsePointAccess(
-                            input,
-                            dwDesiredAccess,
-                            dwShareMode,
-                            dwCreationDisposition,
-                            dwFlagsAndAttributes,
-                            pNtStatus,
-                            enforceAccess,
-                            isCreateDirectory,
-                            true);
-                    }
+                    success &= EnforceReparsePointAccess(
+                        input,
+                        dwDesiredAccess,
+                        dwShareMode,
+                        dwCreationDisposition,
+                        dwFlagsAndAttributes,
+                        pNtStatus,
+                        enforceAccess,
+                        isCreateDirectory,
+                        true);
                 }
             }
             else
             {
-                Dbg(L"EnforceChainOfReparsePointAccesses: CanonicalizedPath::Canonicalize failed for %s", resolved.c_str());
+                Dbg(L"ResolveAllReparsePointsAndEnforceAccess: PathCchCanonicalizeEx failed for %s", resolved.c_str());
                 return false;
             }
         }
@@ -1150,7 +1213,8 @@ static bool EnforceChainOfReparsePointAccesses(
     const bool enforceAccess = true,
     const bool isCreateDirectory = false,
     wstring* resolvedPath = nullptr,
-    const bool enforceAccessForResolvedPath = true)
+    const bool enforceAccessForResolvedPath = true,
+    const bool preserveLastReparsePoint = false)
 {
     if (IgnoreReparsePoints() || (isNtCreate && !MonitorNtCreateFile()))
     {
@@ -1162,7 +1226,7 @@ static bool EnforceChainOfReparsePointAccesses(
 
     if (cachedEntries == nullptr)
     {
-        if (IgnoreFullSymlinkResolving())
+        if (IgnoreFullReparsePointResolving())
         {
             auto order = vector<wstring>();
             auto paths = map<wstring, ResolvedPathType>();
@@ -1174,7 +1238,7 @@ static bool EnforceChainOfReparsePointAccesses(
         }
         else
         {
-            return ResolveAllSymlinksAndEnforceReparsePointAccess(
+            return ResolveAllReparsePointsAndEnforceAccess(
                 path,
                 dwDesiredAccess,
                 dwShareMode,
@@ -1183,9 +1247,15 @@ static bool EnforceChainOfReparsePointAccesses(
                 pNtStatus,
                 enforceAccess,
                 isCreateDirectory,
-                resolvedPath);
+                resolvedPath,
+                enforceAccessForResolvedPath,
+                preserveLastReparsePoint);
         }
     }
+
+#if MEASURE_REPARSEPOINT_RESOLVING_IMPACT
+    InterlockedIncrement(&g_resolvedPathsCacheHitCout);
+#endif // MEASURE_REPARSEPOINT_RESOLVING_IMPACT
 
     bool success = true;
     auto contextOperationName = cached ? L"ReparsePointTargetCached" : L"ReparsePointTarget";
@@ -1197,10 +1267,10 @@ static bool EnforceChainOfReparsePointAccesses(
         auto type = lookupTable[key];
 
         // When fully resolving paths, it is sometimes necessary to either pass back the fully resolved path to the caller, or not report it to BuildXL
-        // at all (see <code>ResolveAllSymlinksAndEnforceReparsePointAccess</code>). The 'ResolvedPathType' enum is used to flag the resulting parts of a
-        // path so we can make that distinction when providing cached results. When IgnoreFullSymlinkResolving() is enabled, all files get flagged with
+        // at all (see <code>ResolveAllReparsePointsAndEnforceAccess</code>). The 'ResolvedPathType' enum is used to flag the resulting parts of resolving a
+        // path so we can make the distinction when providing cached results. When IgnoreFullReparsePointResolving() is enabled, all files get flagged with
         // 'ResolvedPathType::Intermediate' in DetourGetFinalPaths when populating the cache, so this check can be skipped too.
-        if (!IgnoreFullSymlinkResolving() && type == ResolvedPathType::FullyResolved)
+        if (!IgnoreFullReparsePointResolving() && type == ResolvedPathType::FullyResolved)
         {
             if (resolvedPath != nullptr)
             {
@@ -1260,6 +1330,70 @@ static bool EnforceChainOfReparsePointAccessesForNonCreateFile(
                 return false;
             }
         }
+    }
+
+    return true;
+}
+
+/// <summary>
+/// Resolves the input policy path and re-adjusts the operation context and policy pahts with the resolved result.
+/// </summary>
+/// /// <remarks>
+/// If 'preserveLastReparsePoint' is true, and the last part of the policy path is a reparse point, it does not
+/// get resolved. This is important depending on the call site of this function. Some detoured functions work on
+/// the reparse point itself e.g. GetFileAttributes*(...) and we don't want to resolve the path fully in those cases.
+/// EnforceReparsePointAccess(...) contains several examples for full resolving, here is another one illustrating
+/// the behavior of this method:
+///
+/// C:\path\dir_sym\file.lnk, where dir_sym -> anotherPath, and file.lnk is a symbolic link to some file
+///
+/// A process calling GetFileAttributesW(L"C:\path\dir_sym\file.lnk") will report the following accesses:
+///
+/// ReparsePointTarget -> R C:\path\dir_sym (OpenedDirectory: false)
+/// Detoured_GetFileAttributesW -> R C:\path\anotherPath\file.lnk (OpenedDirectory: false)
+///
+/// Note, how the reparse point 'file.lnk' is preserved due to some system calls opening the reparse point instead of
+/// the target. This behavior is either implicit or depends on passed flags, e.g. 'FILE_FLAG_OPEN_REPARSE_POINT'
+/// </remarks>
+static bool AdjustOperationContextAndPolicyResultWithFullyResolvedPath(
+    FileOperationContext& opContext,
+    PolicyResult& policyResult,
+    const bool preserveLastReparsePoint,
+    const bool isCreateDirectory = false)
+{
+    if (IgnoreFullReparsePointResolving() || IgnoreReparsePoints())
+    {
+        return true;
+    }
+
+    const CanonicalizedPath path = policyResult.GetCanonicalizedPath();
+
+    if (ShouldResolveReparsePointsInPath(path.GetPathString(), opContext.DesiredAccess, opContext.FlagsAndAttributes))
+    {
+        wstring fullyResolvedPath;
+        bool accessResult = EnforceChainOfReparsePointAccesses(
+            path,
+            INVALID_HANDLE_VALUE,
+            opContext.DesiredAccess,
+            opContext.ShareMode,
+            opContext.CreationDisposition,
+            opContext.FlagsAndAttributes,
+            false,
+            nullptr,
+            true,
+            isCreateDirectory,
+            &fullyResolvedPath,
+            false, // Never enforce access checks and reporting on the fully resolved path - let the caller decide through 'skipAdjustingContextAndPolicy' and subsuquent 'ReportFileAccess(...)' calls.
+            preserveLastReparsePoint);
+
+        if (!accessResult)
+        {
+            Dbg(L"AdjustOperationContextAndPolicyResultWithFullyResolvedPath: Failed resolving and enforcing intermediate accesses for: %s", path.GetPathString());
+            return accessResult;
+        }
+
+        opContext.NoncanonicalPath = fullyResolvedPath.c_str();
+        policyResult.SetPath(CanonicalizedPath::Canonicalize(fullyResolvedPath.c_str()));
     }
 
     return true;
@@ -1355,6 +1489,7 @@ static bool ValidateMoveDirectory(
                 // we reflect that in the report
                 FILE_ATTRIBUTE_NORMAL | (fileAttributes & FILE_ATTRIBUTE_DIRECTORY),
                 file.c_str());
+            destinationOpContext.Correlate(sourceOpContext);
 
             PolicyResult destPolicyResult;
 
@@ -1464,13 +1599,6 @@ typedef enum _FILE_INFORMATION_CLASS_EXTRA {
     FileMaximumInformation
 } FILE_INFORMATION_CLASS_EXTRA, *PFILE_INFORMATION_CLASS_EXTRA;
 
-typedef struct _FILE_RENAME_INFORMATION {
-    BOOLEAN ReplaceIfExists;
-    HANDLE  RootDirectory;
-    ULONG   FileNameLength;
-    WCHAR   FileName[1];
-} FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
-
 typedef struct _FILE_LINK_INFORMATION {
     BOOLEAN ReplaceIfExists;
     HANDLE  RootDirectory;
@@ -1498,10 +1626,6 @@ typedef struct _FILE_NAME_INFORMATION {
     ULONG FileNameLength;
     WCHAR FileName[1];
 } FILE_NAME_INFORMATION, *PFILE_NAME_INFORMATION;
-
-typedef struct _FILE_DISPOSITION_INFORMATION {
-    BOOLEAN DeleteFile;
-} FILE_DISPOSITION_INFORMATION, *PFILE_DISPOSITION_INFORMATION;
 
 typedef struct _FILE_MODE_INFORMATION {
     ULONG Mode;
@@ -1554,7 +1678,12 @@ NTSTATUS HandleFileRenameInformation(
     _In_  ULONG                  Length,
     _In_  FILE_INFORMATION_CLASS FileInformationClass)
 {
-    assert((FILE_INFORMATION_CLASS_EXTRA)FileInformationClass == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformation);
+    FILE_INFORMATION_CLASS_EXTRA fiExtra = (FILE_INFORMATION_CLASS_EXTRA)FileInformationClass;
+
+    assert(fiExtra == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformation
+        || fiExtra == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationEx
+        || fiExtra == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationBypassAccessCheck
+        || fiExtra == FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationExBypassAccessCheck);
 
     DetouredScope scope;
     if (scope.Detoured_IsDisabled())
@@ -1588,7 +1717,7 @@ NTSTATUS HandleFileRenameInformation(
             FileInformationClass);
     }
 
-    PFILE_RENAME_INFORMATION pRenameInfo = (PFILE_RENAME_INFORMATION)FileInformation;
+    PFILE_RENAME_INFO pRenameInfo = (PFILE_RENAME_INFO)FileInformation;
 
     wstring targetPath;
 
@@ -1635,6 +1764,7 @@ NTSTATUS HandleFileRenameInformation(
         CREATE_ALWAYS,
         flagsAndAttributes,
         targetPath.c_str());
+    destinationOpContext.Correlate(sourceOpContext);
 
     PolicyResult destPolicyResult;
 
@@ -1822,12 +1952,25 @@ NTSTATUS HandleFileDispositionInformation(
     _In_  ULONG                  Length,
     _In_  FILE_INFORMATION_CLASS FileInformationClass)
 {
-    assert((FILE_INFORMATION_CLASS_EXTRA)FileInformationClass == FILE_INFORMATION_CLASS_EXTRA::FileDispositionInformation);
+    FILE_INFORMATION_CLASS_EXTRA fiClass = (FILE_INFORMATION_CLASS_EXTRA)FileInformationClass;
 
-    PFILE_DISPOSITION_INFORMATION pDispositionInfo = (PFILE_DISPOSITION_INFORMATION)FileInformation;
+    bool isDeleteOperation = false;
+
+    if (fiClass == FILE_INFORMATION_CLASS_EXTRA::FileDispositionInformation)
+    {
+        PFILE_DISPOSITION_INFO pDispositionInfo = (PFILE_DISPOSITION_INFO)FileInformation;
+        isDeleteOperation = pDispositionInfo->DeleteFile;
+    }
+    else
+    {
+        assert(fiClass == FILE_INFORMATION_CLASS_EXTRA::FileDispositionInformationEx);
+
+        PFILE_DISPOSITION_INFO_EX pDispositionInfo = (PFILE_DISPOSITION_INFO_EX)FileInformation;
+        isDeleteOperation = (pDispositionInfo->Flags & FILE_DISPOSITION_FLAG_DELETE) != 0;
+    }
 
     DetouredScope scope;
-    if (scope.Detoured_IsDisabled() || !pDispositionInfo->DeleteFile)
+    if (scope.Detoured_IsDisabled() || !isDeleteOperation)
     {
         return Real_ZwSetInformationFile(
             FileHandle,
@@ -2081,6 +2224,7 @@ NTSTATUS HandleFileNameInformation(
         CREATE_ALWAYS,
         flagsAndAttributes,
         targetPath.c_str());
+    destinationOpContext.Correlate(sourceOpContext);
 
     PolicyResult destPolicyResult;
 
@@ -2169,6 +2313,9 @@ NTSTATUS NTAPI Detoured_ZwSetInformationFile(
     switch (fileInformationClassExtra)
     {
         case FILE_INFORMATION_CLASS_EXTRA::FileRenameInformation:
+        case FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationEx:
+        case FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationBypassAccessCheck:
+        case FILE_INFORMATION_CLASS_EXTRA::FileRenameInformationExBypassAccessCheck:
             if (!IgnoreZwRenameFileInformation())
             {
                 return HandleFileRenameInformation(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
@@ -2182,6 +2329,7 @@ NTSTATUS NTAPI Detoured_ZwSetInformationFile(
             }
             break;
         case FILE_INFORMATION_CLASS_EXTRA::FileDispositionInformation:
+        case FILE_INFORMATION_CLASS_EXTRA::FileDispositionInformationEx:
             if (!IgnoreZwOtherFileInformation())
             {
                 return HandleFileDispositionInformation(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
@@ -2586,7 +2734,7 @@ HANDLE WINAPI Detoured_CreateFileW(
 
                 ReportFileAccess(
                     operationContext,
-                    FileAccessStatus_Allowed,
+                    FileAccessStatus::FileAccessStatus_Allowed,
                     policyResult,
                     AccessCheckResult(RequestedAccess::None, ResultAction::Deny, ReportLevel::Report),
                     0,
@@ -2642,36 +2790,6 @@ HANDLE WINAPI Detoured_CreateFileW(
 
     error = GetLastError();
 
-    if (ShouldResolveSymlinkChain(lpFileName, dwDesiredAccess, dwFlagsAndAttributes))
-    {
-        // Even though the process CreateFile the file with FILE_FLAG_OPEN_REPARSE_POINT, we need to follow the chain of symlinks
-        // because the process may use the handle returned by that CreateFile to read the file, which essentially read the final target of symlinks.
-        bool accessResult = EnforceChainOfReparsePointAccesses(
-            policyResult.GetCanonicalizedPath(),
-            (dwFlagsAndAttributes & FILE_FLAG_OPEN_REPARSE_POINT) != 0 ? handle : INVALID_HANDLE_VALUE,
-            desiredAccess,
-            sharedAccess,
-            dwCreationDisposition,
-            dwFlagsAndAttributes,
-            false);
-
-        if (!accessResult)
-        {
-            // If we don't have access to the target, close the handle to the reparse point.
-            // This way we don't have a leaking handle.
-            // (See below we the same when a normal file access is not allowed and close the file.)
-            CloseHandle(handle);
-            return INVALID_HANDLE_VALUE;
-        }
-
-        if (!IgnoreFullSymlinkResolving())
-        {
-            // We only report directory symlinks contained in the path and the final target path in this case
-            SetLastError(error);
-            return handle;
-        }
-    }
-
     FileReadContext readContext;
     readContext.InferExistenceFromError(error);
     readContext.OpenedDirectory = IsHandleOrPathToDirectory(
@@ -2710,7 +2828,7 @@ HANDLE WINAPI Detoured_CreateFileW(
 
             ReportFileAccess(
                 opContext,
-                FileAccessStatus_CannotDeterminePolicy,
+                FileAccessStatus::FileAccessStatus_CannotDeterminePolicy,
                 policyResult,
                 AccessCheckResult(RequestedAccess::None, ResultAction::Deny, ReportLevel::Report),
                 getUsnError,
@@ -2743,11 +2861,46 @@ HANDLE WINAPI Detoured_CreateFileW(
         accessCheck = AccessCheckResult::Combine(accessCheck, accessCheck.With(ReportLevel::ReportExplicit));
     }
 
+    bool isHandleToReparsePoint = (dwFlagsAndAttributes & FILE_FLAG_OPEN_REPARSE_POINT) != 0;
+    if (ShouldResolveReparsePointsInPath(policyResult.GetCanonicalizedPath().GetPathString(), dwDesiredAccess, dwFlagsAndAttributes))
+    {
+        bool accessResult = EnforceChainOfReparsePointAccesses(
+            policyResult.GetCanonicalizedPath(),
+            isHandleToReparsePoint ? handle : INVALID_HANDLE_VALUE,
+            desiredAccess,
+            sharedAccess,
+            dwCreationDisposition,
+            dwFlagsAndAttributes,
+            false,
+            nullptr,
+            true,
+            false,
+            nullptr,
+            true,
+            isHandleToReparsePoint);
+
+        if (!accessResult)
+        {
+            // If we don't have access to the target, close the handle to the reparse point.
+            // This way we don't have a leaking handle.
+            // (See below we do the same when a normal file access is not allowed and close the file.)
+            CloseHandle(handle);
+            return INVALID_HANDLE_VALUE;
+        }
+
+        if (!IgnoreFullReparsePointResolving())
+        {
+            goto SkipReportingDueToResolvingAndEnforcingAccess;
+        }
+    }
+
     ReportIfNeeded(accessCheck, opContext, policyResult, error, usn);
+
+SkipReportingDueToResolvingAndEnforcingAccess:
 
     // It is possible that we only reached a deny action under some access check combinations above (rather than a direct check),
     // so log and maybe break here as well now that it is final.
-    if (accessCheck.Result!= ResultAction::Allow)
+    if (accessCheck.Result != ResultAction::Allow)
     {
         WriteWarningOrErrorF(L"Access to file path '%s' is denied.  Requested access: 0x%08x, policy allows: 0x%08x.",
             policyResult.GetCanonicalizedPath().GetPathString(), dwDesiredAccess, policyResult.GetPolicy());
@@ -2871,6 +3024,11 @@ DWORD WINAPI Detoured_GetFileAttributesW(_In_  LPCWSTR lpFileName)
         return INVALID_FILE_ATTRIBUTES;
     }
 
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(fileOperationContext, policyResult, true))
+    {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+
     DWORD attributes = INVALID_FILE_ATTRIBUTES;
     DWORD error = ERROR_SUCCESS;
 
@@ -2894,8 +3052,6 @@ DWORD WINAPI Detoured_GetFileAttributesW(_In_  LPCWSTR lpFileName)
     AccessCheckResult accessCheck = policyResult.CheckReadAccess(RequestedReadAccess::Probe, fileReadContext);
     ReportIfNeeded(accessCheck, fileOperationContext, policyResult, error);
 
-    // No need to enforce chain of reparse point accesess because if the path points to a symbolic link,
-    // then GetFileAttributes returns attributes for the symbolic link.
     if (accessCheck.ShouldDenyAccess())
     {
         error = accessCheck.DenialError();
@@ -2958,6 +3114,12 @@ BOOL WINAPI Detoured_GetFileAttributesExW(
 
     WIN32_FILE_ATTRIBUTE_DATA* fileStandardInfo = (fInfoLevelId == GetFileExInfoStandard && lpFileInformation != nullptr) ?
         (WIN32_FILE_ATTRIBUTE_DATA*)lpFileInformation : nullptr;
+
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(fileOperationContext, policyResult, true))
+    {
+        lpFileInformation = nullptr;
+        return FALSE;
+    }
 
     // Now we can make decisions based on existence and type.
     FileReadContext fileReadContext;
@@ -3103,6 +3265,13 @@ BOOL WINAPI Detoured_CopyFileExW(
         return FALSE;
     }
 
+    bool copySymlink = (dwCopyFlags & COPY_FILE_COPY_SYMLINK) != 0;
+
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(sourceOpContext, sourcePolicyResult, copySymlink))
+    {
+        return FALSE;
+    }
+
     FileOperationContext destinationOpContext = FileOperationContext(
         L"CopyFile_Dest",
         GENERIC_WRITE,
@@ -3110,6 +3279,8 @@ BOOL WINAPI Detoured_CopyFileExW(
         CREATE_ALWAYS,
         FILE_ATTRIBUTE_NORMAL,
         lpNewFileName);
+    destinationOpContext.Correlate(sourceOpContext);
+
     PolicyResult destPolicyResult;
     if (!destPolicyResult.Initialize(lpNewFileName))
     {
@@ -3117,7 +3288,16 @@ BOOL WINAPI Detoured_CopyFileExW(
         return FALSE;
     }
 
-    bool copySymlink = (dwCopyFlags & COPY_FILE_COPY_SYMLINK) != 0;
+    if (copySymlink)
+    {
+        // Invalidate cache entries because we are about to replace the destination with a symbolic link
+        ResolvedPathCache::Instance().Invalidate(destPolicyResult.GetCanonicalizedPath().GetPathStringWithoutTypePrefix());
+    }
+
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(destinationOpContext, destPolicyResult, copySymlink))
+    {
+        return FALSE;
+    }
 
     // When COPY_FILE_COPY_SYMLINK is specified, then no need to enforce chain of symlink accesses.
     if (!copySymlink && !EnforceChainOfReparsePointAccessesForNonCreateFile(sourceOpContext))
@@ -3339,7 +3519,7 @@ BOOL WINAPI Detoured_MoveFileWithProgressW(
             lpData,
             dwFlags);
     }
-    
+
     bool moveDirectory = false;
     DWORD flagsAndAttributes = FILE_ATTRIBUTE_NORMAL;
 
@@ -3366,6 +3546,13 @@ BOOL WINAPI Detoured_MoveFileWithProgressW(
         return FALSE;
     }
 
+    ResolvedPathCache::Instance().Invalidate(sourcePolicyResult.GetCanonicalizedPath().GetPathStringWithoutTypePrefix());
+
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(sourceOpContext, sourcePolicyResult, !moveDirectory))
+    {
+        return FALSE;
+    }
+
     // When MOVEFILE_COPY_ALLOWED is set, If the file is to be moved to a different volume, then the function simulates
     // the move by using the CopyFile and DeleteFile functions. In moving symlink using MOVEFILE_COPY_ALLOWED flag,
     // the call to CopyFile function passes COPY_FILE_SYMLINK, which makes the CopyFile function copies the symlink itself
@@ -3377,13 +3564,19 @@ BOOL WINAPI Detoured_MoveFileWithProgressW(
         0,
         CREATE_ALWAYS,
         flagsAndAttributes,
-        lpNewFileName == NULL ? L"" : lpNewFileName);
+        lpNewFileName);
+    destinationOpContext.Correlate(sourceOpContext);
 
     PolicyResult destPolicyResult;
 
-    if (lpNewFileName != NULL && !destPolicyResult.Initialize(lpNewFileName))
+    if (!destPolicyResult.Initialize(lpNewFileName))
     {
         destPolicyResult.ReportIndeterminatePolicyAndSetLastError(destinationOpContext);
+        return FALSE;
+    }
+
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(destinationOpContext, destPolicyResult, !moveDirectory))
+    {
         return FALSE;
     }
 
@@ -3426,8 +3619,8 @@ BOOL WINAPI Detoured_MoveFileWithProgressW(
         if (!ValidateMoveDirectory(
                 L"MoveFileWithProgress_Source",
                 L"MoveFileWithProgress_Dest",
-                lpExistingFileName,
-                lpNewFileName,
+                sourceOpContext.NoncanonicalPath,
+                destinationOpContext.NoncanonicalPath,
                 filesAndDirectoriesToReport))
         {
             return FALSE;
@@ -3658,6 +3851,13 @@ BOOL WINAPI Detoured_DeleteFileW(_In_ LPCWSTR lpFileName)
         return FALSE;
     }
 
+    ResolvedPathCache::Instance().Invalidate(policyResult.GetCanonicalizedPath().GetPathStringWithoutTypePrefix());
+
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(opContext, policyResult, true))
+    {
+        return FALSE;
+    }
+
     AccessCheckResult accessCheck = policyResult.CheckWriteAccess();
 
     if (accessCheck.ShouldDenyAccess())
@@ -3689,7 +3889,6 @@ BOOL WINAPI Detoured_DeleteFileW(_In_ LPCWSTR lpFileName)
         ReportIfNeeded(accessCheck, opContext, policyResult, error);
     }
 
-    ResolvedPathCache::Instance().Invalidate(policyResult.GetCanonicalizedPath().GetPathStringWithoutTypePrefix());
     SetLastError(error);
     return result;
 }
@@ -3736,6 +3935,11 @@ BOOL WINAPI Detoured_CreateHardLinkW(
         return FALSE;
     }
 
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(sourceOpContext, sourcePolicyResult, true))
+    {
+        return FALSE;
+    }
+
     FileOperationContext destinationOpContext = FileOperationContext(
         L"CreateHardLink_Dest",
         GENERIC_WRITE,
@@ -3743,6 +3947,7 @@ BOOL WINAPI Detoured_CreateHardLinkW(
         CREATE_NEW,
         FILE_ATTRIBUTE_NORMAL,
         lpFileName);
+    destinationOpContext.Correlate(sourceOpContext);
 
     PolicyResult destPolicyResult;
     if (!destPolicyResult.Initialize(lpFileName))
@@ -3751,8 +3956,12 @@ BOOL WINAPI Detoured_CreateHardLinkW(
         return FALSE;
     }
 
-    // Only attempt the call if the write is allowed (prevent sneaky side effects).
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(destinationOpContext, destPolicyResult, false /*CreateHardLinkW always creates a hardlink to the target of the reparse point*/))
+    {
+        return FALSE;
+    }
 
+    // Only attempt the call if the write is allowed (prevent sneaky side effects).
     AccessCheckResult destAccessCheck = destPolicyResult.CheckWriteAccess();
     if (destAccessCheck.ShouldDenyAccess())
     {
@@ -3861,6 +4070,14 @@ BOOLEAN WINAPI Detoured_CreateSymbolicLinkW(
         return FALSE;
     }
 
+    ResolvedPathCache::Instance().Invalidate(policyResultSrc.GetCanonicalizedPath().GetPathStringWithoutTypePrefix());
+
+    // When creating symbolic links, only resolve and report the intermediates on the symbolic link path, the target is never accessed
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(opContextSrc, policyResultSrc, true, (dwFlags & SYMBOLIC_LINK_FLAG_DIRECTORY) != 0))
+    {
+        return FALSE;
+    }
+
     // Check for write access on the symlink.
     AccessCheckResult accessCheckSrc = policyResultSrc.CheckWriteAccess();
     accessCheckSrc = AccessCheckResult::Combine(accessCheckSrc, policyResultSrc.CheckSymlinkCreationAccess());
@@ -3881,7 +4098,7 @@ BOOLEAN WINAPI Detoured_CreateSymbolicLinkW(
 
     error = GetLastError();
 
-    if (!IgnoreFullSymlinkResolving() && (dwFlags & SYMBOLIC_LINK_FLAG_DIRECTORY) != 0)
+    if (!IgnoreFullReparsePointResolving() && (dwFlags & SYMBOLIC_LINK_FLAG_DIRECTORY) != 0)
     {
         // When running in full symlink resolving mode and creating a directory symlink with an approved write access,
         // we need to adjust the report level to make sure we send the report to BuildXL. This normally does not happen,
@@ -4131,7 +4348,9 @@ HANDLE WINAPI Detoured_FindFirstFileExW(
     _In_       DWORD              dwAdditionalFlags)
 {
     DetouredScope scope;
-    if (scope.Detoured_IsDisabled() || IsNullOrEmptyW(lpFileName) || lpFindFileData == NULL ||
+    if (scope.Detoured_IsDisabled() ||
+        IsNullOrEmptyW(lpFileName) ||
+        lpFindFileData == NULL ||
         lpSearchFilter != NULL ||
         (fInfoLevelId != FindExInfoStandard && fInfoLevelId != FindExInfoBasic) ||
         IsSpecialDeviceName(lpFileName))
@@ -4139,55 +4358,34 @@ HANDLE WINAPI Detoured_FindFirstFileExW(
         return Real_FindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
     }
 
-    // Both of the currently understood info levels return WIN32_FIND_DATAW.
-    LPWIN32_FIND_DATAW findFileDataAtLevel = (LPWIN32_FIND_DATAW)lpFindFileData;
-
-    if (!IgnoreFullSymlinkResolving() && ShouldResolveSymlinkChain(lpFileName, GENERIC_READ, FILE_FLAG_OPEN_REPARSE_POINT))
+    if (!IgnoreFullReparsePointResolving())
     {
-        // Note that handle can be invalid because users can CreateFileW of a symlink whose target is non-existent.
-        NTSTATUS ntStatus;
+        // Both of the currently understood info levels return WIN32_FIND_DATAW.
+        LPWIN32_FIND_DATAW findFileDataAtLevel = (LPWIN32_FIND_DATAW)lpFindFileData;
+        FileOperationContext readOpContext = FileOperationContext::CreateForRead(L"FindFirstFileExW_Resolve", lpFileName);
+        readOpContext.FlagsAndAttributes = findFileDataAtLevel->dwFileAttributes;
 
-        wstring resolvedPath = lpFileName;
-        auto path = CanonicalizedPath::Canonicalize(lpFileName);
-
-        bool accessResult = EnforceChainOfReparsePointAccesses(
-            path,
-            INVALID_HANDLE_VALUE,
-            GENERIC_READ,
-            FILE_SHARE_READ,
-            OPEN_EXISTING,
-            findFileDataAtLevel->dwFileAttributes,
-            true,
-            &ntStatus,
-            true,
-            false,
-            &resolvedPath,
-            false
-        );
-
-        if (!accessResult)
+        PolicyResult policyResult;
+        if (!policyResult.Initialize(lpFileName))
         {
-            Dbg(L"FindFirstFileEx: Failed to enforce access on reparse point in input path.");
+            policyResult.ReportIndeterminatePolicyAndSetLastError(readOpContext);
             return INVALID_HANDLE_VALUE;
         }
 
-        // When fully resolving symbolic links, we need to report the required file accesses
-        // for FirstFileExW on the final resolved path too, otherwise the build engine is oblivious
-        // to changes made inside that target path and skips directory fingerprinting.
-        HANDLE handle = ReportFindFirstFileExWAccesses(resolvedPath.c_str(),
-            fInfoLevelId, 
-            lpFindFileData, 
-            fSearchOp, 
-            lpSearchFilter, 
+        if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(readOpContext, policyResult, true))
+        {
+            Dbg(L"FindFirstFileEx: Failed to resolve input path: %s", lpFileName);
+            return INVALID_HANDLE_VALUE;
+        }
+
+        return ReportFindFirstFileExWAccesses(policyResult.GetCanonicalizedPath().GetPathStringWithoutTypePrefix(),
+            fInfoLevelId,
+            lpFindFileData,
+            fSearchOp,
+            lpSearchFilter,
             dwAdditionalFlags);
-
-        if (handle == INVALID_HANDLE_VALUE)
-        {
-            Dbg(L"FindFirstFileEx: Failed to enforce access on resolved path.");
-            return INVALID_HANDLE_VALUE;
-        }
     }
-     
+
     return ReportFindFirstFileExWAccesses(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
 }
 
@@ -4241,15 +4439,17 @@ BOOL WINAPI Detoured_FindNextFileW(
         wchar_t const* enumeratedComponent = &lpFindFileData->cFileName[0];
         PolicyResult filePolicyResult = overlay->Policy.GetPolicyForSubpath(enumeratedComponent);
 
+        if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(fileOperationContext, overlay->Policy, true))
+        {
+            return FALSE;
+        }
+
         FileReadContext readContext;
         readContext.Existence = FileExistence::Existent;
         readContext.OpenedDirectory = (lpFindFileData->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
         AccessCheckResult accessCheck = filePolicyResult.CheckReadAccess(RequestedReadAccess::EnumerationProbe, readContext);
         ReportIfNeeded(accessCheck, fileOperationContext, filePolicyResult, result ? ERROR_SUCCESS : error);
-
-        // No need to enforce chain of reparse point accesses because if path is a symbolic link, the WIN32_FIND_DATA buffer already
-        // contains information about the symbolic link, and not the target.
 
         if (filePolicyResult.ShouldOverrideTimestamps(accessCheck))
         {
@@ -4403,7 +4603,7 @@ static BOOL DeleteUsingSetFileInformationByHandle(
     _In_ FILE_INFO_BY_HANDLE_CLASS FileInformationClass,
     _In_ LPVOID                    lpFileInformation,
     _In_ DWORD                     dwBufferSize,
-    _In_ const wstring&       fullPath)
+    _In_ const wstring&            fullPath)
 {
     FileOperationContext sourceOpContext = FileOperationContext(
         L"SetFileInformationByHandle_Source",
@@ -4491,7 +4691,7 @@ static BOOL RenameUsingSetFileInformationByHandle(
 
     DWORD lastError = GetLastError();
 
-    PFILE_RENAME_INFORMATION pRenameInfo = (PFILE_RENAME_INFORMATION)lpFileInformation;
+    PFILE_RENAME_INFO pRenameInfo = (PFILE_RENAME_INFO)lpFileInformation;
 
     if (!TryGetFileNameFromFileInformation(
         pRenameInfo->FileName,
@@ -4519,6 +4719,7 @@ static BOOL RenameUsingSetFileInformationByHandle(
         CREATE_ALWAYS,
         flagsAndAttributes,
         targetFileName.c_str());
+    destinationOpContext.Correlate(sourceOpContext);
 
     PolicyResult destPolicyResult;
 
@@ -4870,6 +5071,11 @@ BOOL WINAPI Detoured_CreateDirectoryW(
         return FALSE;
     }
 
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(opContext, policyResult, false))
+    {
+        return FALSE;
+    }
+
     AccessCheckResult accessCheck = policyResult.CheckCreateDirectoryAccess();
 
     if (accessCheck.ShouldDenyAccess())
@@ -4887,6 +5093,7 @@ BOOL WINAPI Detoured_CreateDirectoryW(
     BOOL result = Real_CreateDirectoryW(
         lpPathName,
         lpSecurityAttributes);
+
     DWORD error = ERROR_SUCCESS;
     if (!result)
     {
@@ -4994,6 +5201,13 @@ BOOL WINAPI Detoured_RemoveDirectoryW(_In_ LPCWSTR lpPathName)
         return FALSE;
     }
 
+    ResolvedPathCache::Instance().Invalidate(policyResult.GetCanonicalizedPath().GetPathStringWithoutTypePrefix());
+
+    if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(opContext, policyResult, true))
+    {
+        return FALSE;
+    }
+
     AccessCheckResult accessCheck = policyResult.CheckWriteAccess();
 
     if (accessCheck.ShouldDenyAccess())
@@ -5012,7 +5226,6 @@ BOOL WINAPI Detoured_RemoveDirectoryW(_In_ LPCWSTR lpPathName)
     }
 
     ReportIfNeeded(accessCheck, opContext, policyResult, error);
-    ResolvedPathCache::Instance().Invalidate(policyResult.GetCanonicalizedPath().GetPathStringWithoutTypePrefix());
 
     return result;
 }
@@ -5348,7 +5561,6 @@ NTSTATUS NTAPI Detoured_NtQueryDirectoryFile(
         // in CreateFile or NtCreateFile in order to get the (non)directory handle.
         if (overlay->Type == HandleType::Directory)
         {
-
             // TODO: Perhaps should have a specific access check for enumeration.
             //       For now, we always allow enumeration and report it.
             //       Since enumeration has historically not been understood or reported at all, this is a fine incremental move -
@@ -5356,6 +5568,12 @@ NTSTATUS NTAPI Detoured_NtQueryDirectoryFile(
             // TODO: Should include the wildcard in enumeration reports, so that directory enumeration assertions can be more precise.
 
             PolicyResult directoryPolicyResult = overlay->Policy;
+            FileOperationContext fileOperationContext = FileOperationContext::CreateForRead(L"NtQueryDirectoryFile", directoryName);
+
+            if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(fileOperationContext, directoryPolicyResult, FileInformationClass == FileReparsePointInformation))
+            {
+                return DETOURS_STATUS_ACCESS_DENIED;
+            }
 
             // Only report the enumeration if specified by the policy
             bool reportDirectoryEnumeration = directoryPolicyResult.ReportDirectoryEnumeration();
@@ -5372,13 +5590,11 @@ NTSTATUS NTAPI Detoured_NtQueryDirectoryFile(
                 directoryAccessCheck.Level = ReportLevel::Report;
             }
 
-            FileOperationContext fileOperationContext = FileOperationContext::CreateForRead(L"NtQueryDirectoryFile", directoryName);
-
             // Remember that we already enumerated this directory if successful
             overlay->EnumerationHasBeenReported = NT_SUCCESS(result) && directoryAccessCheck.ShouldReport();
 
             // We can report the status for directory now.
-            ReportIfNeeded(directoryAccessCheck, fileOperationContext, overlay->Policy, (DWORD)(NT_SUCCESS(result) ? ERROR_SUCCESS : result), -1, filter.c_str());
+            ReportIfNeeded(directoryAccessCheck, fileOperationContext, directoryPolicyResult, (DWORD)(NT_SUCCESS(result) ? ERROR_SUCCESS : result), -1, filter.c_str());
         }
     }
 
@@ -5480,6 +5696,12 @@ NTSTATUS NTAPI Detoured_ZwQueryDirectoryFile(
             //       given a policy flag for allowing enumeration, we'd apply it globally anyway.
             // TODO: Should include the wildcard in enumeration reports, so that directory enumeration assertions can be more precise.
             PolicyResult directoryPolicyResult = overlay->Policy;
+            FileOperationContext fileOperationContext = FileOperationContext::CreateForRead(L"ZwQueryDirectoryFile", directoryName);
+
+            if (!AdjustOperationContextAndPolicyResultWithFullyResolvedPath(fileOperationContext, directoryPolicyResult, FileInformationClass == FileReparsePointInformation))
+            {
+                return DETOURS_STATUS_ACCESS_DENIED;
+            }
 
             // Only report the enumeration if specified by the policy
             bool reportDirectoryEnumeration = directoryPolicyResult.ReportDirectoryEnumeration();
@@ -5495,8 +5717,6 @@ NTSTATUS NTAPI Detoured_ZwQueryDirectoryFile(
                 // Ensure access is reported (not explicit) when report all accesses is specified
                 directoryAccessCheck.Level = ReportLevel::Report;
             }
-
-            FileOperationContext fileOperationContext = FileOperationContext::CreateForRead(L"ZwQueryDirectoryFile", directoryName);
 
             // Remember that we already enumerated this directory if successful
             overlay->EnumerationHasBeenReported = NT_SUCCESS(result) && directoryAccessCheck.ShouldReport();
@@ -5722,6 +5942,8 @@ NTSTATUS NTAPI Detoured_ZwCreateFile(
         return DETOURS_STATUS_ACCESS_DENIED;
     }
 
+    bool isDirectoryCreation = CheckIfNtCreateFileOptionsExcludeOpeningFiles(CreateOptions);
+
     // We start with allow / ignore (no access requested) and then restrict based on read / write (maybe both, maybe neither!)
     AccessCheckResult accessCheck(RequestedAccess::None, ResultAction::Allow, ReportLevel::Ignore);
     bool forceReadOnlyForRequestedRWAccess = false;
@@ -5751,7 +5973,7 @@ NTSTATUS NTAPI Detoured_ZwCreateFile(
 #endif // SUPER_VERBOSE
                 accessCheck = AccessCheckResult(RequestedAccess::None, ResultAction::Allow, ReportLevel::Ignore);
             }
-            else if (CheckIfNtCreateFileOptionsExcludeOpeningFiles(CreateOptions))
+            else if (isDirectoryCreation)
             {
 #if SUPER_VERBOSE
                 Dbg(L"NtCreateFile: Ignoring a delete-level access since it will only apply to directories: %s", policyResult.GetCanonicalizedPath().GetPathString());
@@ -5778,7 +6000,7 @@ NTSTATUS NTAPI Detoured_ZwCreateFile(
 
                 ReportFileAccess(
                     operationContext,
-                    FileAccessStatus_Allowed,
+                    FileAccessStatus::FileAccessStatus_Allowed,
                     policyResult,
                     AccessCheckResult(RequestedAccess::None, ResultAction::Deny, ReportLevel::Report),
                     0,
@@ -5869,34 +6091,6 @@ NTSTATUS NTAPI Detoured_ZwCreateFile(
         return result;
     }
 
-    if (ShouldResolveSymlinkChain(path.GetPathString(), opContext.DesiredAccess, FileAttributes))
-    {
-        // Note that handle can be invalid because users can CreateFileW of a symlink whose target is non-existent.
-        NTSTATUS ntStatus;
-
-        bool accessResult = EnforceChainOfReparsePointAccesses(
-            policyResult.GetCanonicalizedPath(),
-            (CreateOptions & FILE_OPEN_REPARSE_POINT) != 0 ? *FileHandle : INVALID_HANDLE_VALUE,
-            desiredAccess,
-            sharedAccess,
-            CreateDisposition,
-            FileAttributes,
-            true,
-            &ntStatus);
-
-        if (!accessResult)
-        {
-            // If we don't have access to the target, close the handle to the reparse point.
-            // This way we don't have a leaking handle.
-            // (See below we the same when a normal file access is not allowed and close the file.)
-            NtClose(*FileHandle);
-            *FileHandle = INVALID_HANDLE_VALUE;
-            ntStatus = DETOURS_STATUS_ACCESS_DENIED;
-
-            return ntStatus;
-        }
-    }
-
     FileReadContext readContext;
     readContext.InferExistenceFromNtStatus(result);
     readContext.OpenedDirectory = IsHandleOrPathToDirectory(*FileHandle, path.GetPathString(), opContext.DesiredAccess, CreateOptions, &policyResult);
@@ -5916,7 +6110,48 @@ NTSTATUS NTAPI Detoured_ZwCreateFile(
         }
     }
 
+    bool isHandleToReparsePoint = (CreateOptions & FILE_OPEN_REPARSE_POINT) != 0;
+    if (ShouldResolveReparsePointsInPath(path.GetPathString(), opContext.DesiredAccess, FileAttributes))
+    {
+        // Note that handle can be invalid because users can CreateFileW of a symlink whose target is non-existent.
+        NTSTATUS ntStatus;
+
+        bool accessResult = EnforceChainOfReparsePointAccesses(
+            policyResult.GetCanonicalizedPath(),
+            isHandleToReparsePoint ? *FileHandle : INVALID_HANDLE_VALUE,
+            desiredAccess,
+            sharedAccess,
+            CreateDisposition,
+            FileAttributes,
+            true,
+            &ntStatus,
+            true,
+            isDirectoryCreation,
+            nullptr,
+            true,
+            isHandleToReparsePoint);
+
+        if (!accessResult)
+        {
+            // If we don't have access to the target, close the handle to the reparse point.
+            // This way we don't have a leaking handle.
+            // (See below we do the same when a normal file access is not allowed and close the file.)
+            NtClose(*FileHandle);
+            *FileHandle = INVALID_HANDLE_VALUE;
+            ntStatus = DETOURS_STATUS_ACCESS_DENIED;
+
+            return ntStatus;
+        }
+
+        if (!IgnoreFullReparsePointResolving())
+        {
+            goto SkipReportingDueToResolvingAndEnforcingAccess;
+        }
+    }
+
     ReportIfNeeded(accessCheck, opContext, policyResult, RtlNtStatusToDosError(result));
+
+SkipReportingDueToResolvingAndEnforcingAccess:
 
     bool hasValidHandle = result == ERROR_SUCCESS && !IsNullOrInvalidHandle(*FileHandle);
     if (accessCheck.ShouldDenyAccess())
@@ -6000,6 +6235,8 @@ NTSTATUS NTAPI Detoured_NtCreateFile(
         return DETOURS_STATUS_ACCESS_DENIED;
     }
 
+    bool isDirectoryCreation = CheckIfNtCreateFileOptionsExcludeOpeningFiles(CreateOptions);
+
     // We start with allow / ignore (no access requested) and then restrict based on read / write (maybe both, maybe neither!)
     AccessCheckResult accessCheck(RequestedAccess::None, ResultAction::Allow, ReportLevel::Ignore);
     bool forceReadOnlyForRequestedRWAccess = false;
@@ -6032,7 +6269,7 @@ NTSTATUS NTAPI Detoured_NtCreateFile(
 #endif // SUPER_VERBOSE
                 accessCheck = AccessCheckResult(RequestedAccess::None, ResultAction::Allow, ReportLevel::Ignore);
             }
-            else if (CheckIfNtCreateFileOptionsExcludeOpeningFiles(CreateOptions))
+            else if (isDirectoryCreation)
             {
 #if SUPER_VERBOSE
                 Dbg(L"NtCreateFile: Ignoring a delete-level access since it will only apply to directories: %s", policyResult.GetCanonicalizedPath().GetPathString());
@@ -6059,7 +6296,7 @@ NTSTATUS NTAPI Detoured_NtCreateFile(
 
                 ReportFileAccess(
                     operationContext,
-                    FileAccessStatus_Allowed,
+                    FileAccessStatus::FileAccessStatus_Allowed,
                     policyResult,
                     AccessCheckResult(RequestedAccess::None, ResultAction::Deny, ReportLevel::Report),
                     0,
@@ -6151,34 +6388,6 @@ NTSTATUS NTAPI Detoured_NtCreateFile(
         return result;
     }
 
-    if (ShouldResolveSymlinkChain(path.GetPathString(), opContext.DesiredAccess, FileAttributes))
-    {
-        NTSTATUS ntStatus;
-
-        bool accessResult = EnforceChainOfReparsePointAccesses(
-            policyResult.GetCanonicalizedPath(),
-            (CreateOptions & FILE_OPEN_REPARSE_POINT) != 0 ? *FileHandle : INVALID_HANDLE_VALUE,
-            desiredAccess,
-            sharedAccess,
-            CreateDisposition,
-            FileAttributes,
-            true,
-            &ntStatus);
-
-        if (!accessResult)
-        {
-            // If we don't have access to the target, close the handle to the reparse point.
-            // This way we don't have a leaking handle.
-            // (See below we the same when a normal file access is not allowed and close the file.)
-            NtClose(*FileHandle);
-
-            *FileHandle = INVALID_HANDLE_VALUE;
-            ntStatus = DETOURS_STATUS_ACCESS_DENIED;
-
-            return ntStatus;
-        }
-    }
-
     FileReadContext readContext;
     readContext.InferExistenceFromNtStatus(result);
     readContext.OpenedDirectory = IsHandleOrPathToDirectory(*FileHandle, path.GetPathString(), opContext.DesiredAccess, CreateOptions, &policyResult);
@@ -6198,7 +6407,48 @@ NTSTATUS NTAPI Detoured_NtCreateFile(
         }
     }
 
+    bool isHandleToReparsePoint = (CreateOptions & FILE_OPEN_REPARSE_POINT) != 0;
+    if (ShouldResolveReparsePointsInPath(path.GetPathString(), opContext.DesiredAccess, FileAttributes))
+    {
+        NTSTATUS ntStatus;
+
+        bool accessResult = EnforceChainOfReparsePointAccesses(
+            policyResult.GetCanonicalizedPath(),
+            isHandleToReparsePoint ? *FileHandle : INVALID_HANDLE_VALUE,
+            desiredAccess,
+            sharedAccess,
+            CreateDisposition,
+            FileAttributes,
+            true,
+            &ntStatus,
+            true,
+            isDirectoryCreation,
+            nullptr,
+            true,
+            isHandleToReparsePoint);
+
+        if (!accessResult)
+        {
+            // If we don't have access to the target, close the handle to the reparse point.
+            // This way we don't have a leaking handle.
+            // (See below we do the same when a normal file access is not allowed and close the file.)
+            NtClose(*FileHandle);
+
+            *FileHandle = INVALID_HANDLE_VALUE;
+            ntStatus = DETOURS_STATUS_ACCESS_DENIED;
+
+            return ntStatus;
+        }
+
+        if (!IgnoreFullReparsePointResolving())
+        {
+            goto SkipReportingDueToResolvingAndEnforcingAccess;
+        }
+    }
+
     ReportIfNeeded(accessCheck, opContext, policyResult, RtlNtStatusToDosError(result));
+
+SkipReportingDueToResolvingAndEnforcingAccess:
 
     bool hasValidHandle = result == ERROR_SUCCESS && !IsNullOrInvalidHandle(*FileHandle);
 
@@ -6269,6 +6519,8 @@ NTSTATUS NTAPI Detoured_ZwOpenFile(
         return DETOURS_STATUS_ACCESS_DENIED;
     }
 
+    bool isDirectoryCreation = CheckIfNtCreateFileOptionsExcludeOpeningFiles(OpenOptions);
+
     // We start with allow / ignore (no access requested) and then restrict based on read / write (maybe both, maybe neither!)
     AccessCheckResult accessCheck(RequestedAccess::None, ResultAction::Allow, ReportLevel::Ignore);
     bool forceReadOnlyForRequestedRWAccess = false;
@@ -6295,7 +6547,7 @@ NTSTATUS NTAPI Detoured_ZwOpenFile(
 #endif // SUPER_VERBOSE
                 accessCheck = AccessCheckResult(RequestedAccess::None, ResultAction::Allow, ReportLevel::Ignore);
             }
-            else if (CheckIfNtCreateFileOptionsExcludeOpeningFiles(OpenOptions))
+            else if (isDirectoryCreation)
             {
 #if SUPER_VERBOSE
                 Dbg(L"NtCreateFile: Ignoring a delete-level access since it will only apply to directories: %s", policyResult.GetCanonicalizedPath().GetPathString());
@@ -6322,7 +6574,7 @@ NTSTATUS NTAPI Detoured_ZwOpenFile(
 
                 ReportFileAccess(
                     operationContext,
-                    FileAccessStatus_Allowed,
+                    FileAccessStatus::FileAccessStatus_Allowed,
                     policyResult,
                     AccessCheckResult(RequestedAccess::None, ResultAction::Deny, ReportLevel::Report),
                     0,
@@ -6406,33 +6658,6 @@ NTSTATUS NTAPI Detoured_ZwOpenFile(
         return result;
     }
 
-    if (ShouldResolveSymlinkChain(path.GetPathString(), opContext.DesiredAccess, OpenOptions))
-    {
-        NTSTATUS ntStatus;
-
-        bool accessResult = EnforceChainOfReparsePointAccesses(
-            policyResult.GetCanonicalizedPath(),
-            (OpenOptions & FILE_OPEN_REPARSE_POINT) != 0 ? *FileHandle : INVALID_HANDLE_VALUE,
-            desiredAccess,
-            sharedAccess,
-            FILE_OPEN,
-            0L,
-            true,
-            &ntStatus);
-
-        if (!accessResult)
-        {
-            // If we don't have access to the target, close the handle to the reparse point.
-            // This way we don't have a leaking handle.
-            // (See below we the same when a normal file access is not allowed and close the file.)
-            NtClose(*FileHandle);
-            *FileHandle = INVALID_HANDLE_VALUE;
-            ntStatus = DETOURS_STATUS_ACCESS_DENIED;
-
-            return ntStatus;
-        }
-    }
-
     FileReadContext readContext;
     readContext.InferExistenceFromNtStatus(result);
     readContext.OpenedDirectory = IsHandleOrPathToDirectory(*FileHandle, path.GetPathString(), opContext.DesiredAccess, OpenOptions, &policyResult);
@@ -6452,7 +6677,47 @@ NTSTATUS NTAPI Detoured_ZwOpenFile(
         }
     }
 
+    bool isHandleToReparsePoint = (OpenOptions & FILE_OPEN_REPARSE_POINT) != 0;
+    if (ShouldResolveReparsePointsInPath(path.GetPathString(), opContext.DesiredAccess, OpenOptions))
+    {
+        NTSTATUS ntStatus;
+
+        bool accessResult = EnforceChainOfReparsePointAccesses(
+            policyResult.GetCanonicalizedPath(),
+            isHandleToReparsePoint != 0 ? *FileHandle : INVALID_HANDLE_VALUE,
+            desiredAccess,
+            sharedAccess,
+            FILE_OPEN,
+            0L,
+            true,
+            &ntStatus,
+            true,
+            isDirectoryCreation,
+            nullptr,
+            true,
+            isHandleToReparsePoint);
+
+        if (!accessResult)
+        {
+            // If we don't have access to the target, close the handle to the reparse point.
+            // This way we don't have a leaking handle.
+            // (See below we do the same when a normal file access is not allowed and close the file.)
+            NtClose(*FileHandle);
+            *FileHandle = INVALID_HANDLE_VALUE;
+            ntStatus = DETOURS_STATUS_ACCESS_DENIED;
+
+            return ntStatus;
+        }
+
+        if (!IgnoreFullReparsePointResolving())
+        {
+            goto SkipReportingDueToResolvingAndEnforcingAccess;
+        }
+    }
+
     ReportIfNeeded(accessCheck, opContext, policyResult, RtlNtStatusToDosError(result));
+
+SkipReportingDueToResolvingAndEnforcingAccess:
 
     bool hasValidHandle = result == ERROR_SUCCESS && !IsNullOrInvalidHandle(*FileHandle);
     if (accessCheck.ShouldDenyAccess())

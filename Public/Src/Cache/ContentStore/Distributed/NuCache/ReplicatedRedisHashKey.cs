@@ -51,6 +51,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// Name of field in redis hash which indicates the version number of key. 
         /// </summary>
         private const string ReplicatedHashVersionNumber = nameof(ReplicatedHashVersionNumber);
+        private static readonly Tracer Tracer = new Tracer(nameof(ReplicatedRedisHashKey));
 
         private readonly string _key;
         private readonly IReplicatedKeyHost _host;
@@ -69,9 +70,26 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <summary>
-        /// Perform an operation against the redis hash using logic to ensure that result of operation comes from instance with latest updates and is resilient to data loss in one of the instances
+        /// Perform an operation against the redis hash using logic to ensure that result of operation comes from instance with latest updates and is resilient to data loss in one of the instances.
         /// </summary>
-        public async Task<Result<T>> UseReplicatedHashAsync<T>(OperationContext context, TimeSpan? retryWindow, RedisOperation operation, Func<RedisBatch, string, Task<T>> addOperations, [CallerMemberName] string? caller = null)
+        public Task<Result<T>> UseNonConcurrentReplicatedHashAsync<T>(
+            OperationContext context,
+            TimeSpan? retryWindow,
+            RedisOperation operation,
+            Func<RedisBatch, string, Task<T>> addOperations,
+            TimeSpan timeout,
+            [CallerMemberName] string? caller = null)
+        {
+            // UseReplicatedHashCoreAsync runs sequentially on different redis instances.
+            // To prevent the potential hangs, forcing the timeout for all of them.
+            return context.PerformOperationWithTimeoutAsync(
+                Tracer,
+                nestedContext => UseNonConcurrentReplicatedHashAsync(nestedContext, retryWindow, operation, addOperations, caller),
+                timeout: timeout,
+                traceErrorsOnly: true);
+        }
+
+        private async Task<Result<T>> UseNonConcurrentReplicatedHashAsync<T>(OperationContext context, TimeSpan? retryWindow, RedisOperation operation, Func<RedisBatch, string, Task<T>> addOperations, [CallerMemberName] string? caller = null)
         {
             // Query to see which db has highest version number
             (Result<(T result, long version)>? primaryVersionedResult, Result<(T result, long version)>? secondaryVersionedResult) =
@@ -79,21 +97,22 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     context,
                     async (redisDb, token) =>
                     {
-                        (T result, long version) operationResult = await redisDb.ExecuteBatchAsync(
+                        Result<(T result, long version)> operationResult = await redisDb.ExecuteBatchAsResultAsync(
                             context,
+                            Tracer,
                             async batch =>
                             {
                                 var versionTask = batch.AddOperation(_key, b => b.HashIncrementAsync(_key, nameof(ReplicatedHashVersionNumber)));
                                 var addOperationsTask = addOperations(batch, _key);
                                 await Task.WhenAll(versionTask, addOperationsTask);
 
-                                var result = await addOperationsTask;
+                                var addOperationsTaskResult = await addOperationsTask;
                                 var version = await versionTask;
-                                return (result, version);
+                                return (addOperationsTaskResult, version);
                             },
                             operation);
 
-                        return Result.Success(operationResult);
+                        return operationResult;
                     },
                     retryWindow,
                     // Always run on primary first to ensure that primary version will always be greater or equal in cases of
@@ -149,12 +168,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     _redis.PrimaryRedisDb,
                     async (redisDb, token) =>
                     {
-                        long version = await redisDb.ExecuteBatchAsync(
+                        return await redisDb.ExecuteBatchAsResultAsync(
                             context,
+                            Tracer,
                             batch => batch.AddOperation(_key, b => b.HashIncrementAsync(_key, nameof(ReplicatedHashVersionNumber), value: 0)),
                             operation);
-
-                        return Result.Success(version);
                     },
                     cancellationTokenSource.Token);
                 

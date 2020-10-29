@@ -6,8 +6,8 @@ using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
-using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
@@ -32,6 +32,7 @@ using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Native.IO;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
+using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
 using static BuildXL.Cache.ContentStore.Distributed.Tracing.TracingStructuredExtensions;
 using static BuildXL.Cache.ContentStore.UtilitiesCore.Internal.CollectionUtilities;
@@ -76,7 +77,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <nodoc />
         public ContentLocationEventStore EventStore { get; private set; }
 
-
         internal ClusterState ClusterState => GlobalStore.ClusterState;
 
         private readonly IClock _clock;
@@ -120,9 +120,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         /// <summary>
         /// Initialization for local location store may take too long if we restore the first checkpoint in there.
-        /// So the initialization process is split into two pieces: core initialization and post-initialization that should be checked in every public method.
+        /// So the initialization process is split into two phases: core initialization and post-initialization that should be checked in every public method.
+        /// This field has two parts: TaskSourceSlim (TaskCompletionSource under the hood) and a boolean flag that is true when the source is linked to
+        /// an actual post-initialization task (the flag is true when the postinialization has started).
+        /// This is done to make sure the underlying "post initialization task" is never null and we won't get any errors if the client will wait on
+        /// it by callling EnsureInitialized even before StartupAsync method is done.
+        /// But in some cases we need to know that the post-initialization has not started yet, for instance, in shutdown logic.
         /// </summary>
-        private Task<BoolResult> _postInitializationTask;
+        private (TaskSourceSlim<BoolResult> tcs, bool postInitializationStarted) _postInitialization = (TaskSourceSlim.Create<BoolResult>(), false);
 
         private const string BinManagerKey = "LocalLocationStore.BinManager";
 
@@ -157,7 +162,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
             _innerCentralStorage = CreateCentralStorage(_configuration.CentralStore);
 
-            if (_configuration.DistributedCentralStore != null)
+            if (Configuration.DistributedCentralStore != null)
             {
                 DistributedCentralStorage = new DistributedCentralStorage(
                     _configuration.DistributedCentralStore,
@@ -240,8 +245,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 configuration.PrimaryMachineLocation.ToString(),
                 CentralStorage,
                 configuration.Checkpoint.WorkingDirectory / "reconciles" / subfolder,
-                _clock
-                );
+                _clock);
         }
 
         private CentralStorage CreateCentralStorage(CentralStoreConfiguration configuration)
@@ -336,23 +340,28 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     HeartbeatAsync(nestedContext).FireAndForget(nestedContext);
                 }, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
 
-            _postInitializationTask = Task.Run(() => HeartbeatAsync(context, inline: true)
-                .ThenAsync(r => r.Succeeded ? r : new BoolResult(r, "Failed initializing Local Location Store")))
-                // Run continuations asynchronously because many callers may be queued waiting for initialization to complete
-                .RunContinuationsAsync();
+            var postInitializationTask = Task.Run(() => HeartbeatAsync(context, inline: true)
+                .ThenAsync(r => r.Succeeded ? r : new BoolResult(r, "Failed initializing Local Location Store")));
+            _postInitialization.tcs.LinkToTask(postInitializationTask);
+            _postInitialization.postInitializationStarted = true;
 
-            await _postInitializationTask.FireAndForgetOrInlineAsync(context, _configuration.InlinePostInitialization);
+            await postInitializationTask.FireAndForgetOrInlineAsync(context, _configuration.InlinePostInitialization);
 
             Analysis.IgnoreResult(
-                _postInitializationTask.ContinueWith(
+                postInitializationTask.ContinueWith(
                     t =>
                     {
                         // It is very important to explicitly trace when the post initialization is done,
                         // because only after that the service can process the requests.
-                        LifetimeTrackerTracer.ServiceReadyToProcessRequests(context);
+                        LifetimeTracker.ServiceReadyToProcessRequests(context);
                     }));
 
             Database.DatabaseInvalidated = OnContentLocationDatabaseInvalidation;
+
+            if (Configuration.MasterThroughputCheckMode)
+            {
+                Tracer.Warning(context, $"Running the system in master throughput check mode! EventHubCursorPosition={Configuration.EventHubCursorPosition}");
+            }
 
             return BoolResult.Success;
         }
@@ -373,8 +382,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             Tracer.Info(context, "Shutting down local location store.");
 
             BoolResult result = BoolResult.Success;
-            if (_postInitializationTask != null)
+            if (_postInitialization.postInitializationStarted)
             {
+                // If startup procedure reached the point when the post initialization started, then waiting for its completion.
                 var postInitializationResult = await EnsureInitializedAsync();
                 if (!postInitializationResult && !postInitializationResult.IsCancelled)
                 {
@@ -443,7 +453,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         context.TracingContext.ChangeRole(newRole.ToString());
 
                         // Local database should be immutable on workers and only master is responsible for collecting stale records
-                        Database.SetDatabaseMode(isDatabaseWriteable: newRole == Role.Master);
+                        Database.SetDatabaseMode(isDatabaseWriteable: newRole == Role.Master || Configuration.MasterThroughputCheckMode);
                         ClusterState.EnableBinManagerUpdates = newRole == Role.Master;
                     }
 
@@ -455,7 +465,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                     // Restore if this is a worker and we should restore
                     shouldRestore |= newRole == Role.Worker && ShouldRestoreCheckpoint(context, checkpointState.CheckpointTime).ThrowIfFailure();
-                    BoolResult result;
+
+                    if (_configuration.MasterThroughputCheckMode)
+                    {
+                        // Don't restore the checkpoint in the throughput check mode.
+                        shouldRestore = false;
+                    }
 
                     if (CurrentRole == Role.Master)
                     {
@@ -465,6 +480,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     {
                         ClusterState.SetMasterMachine(checkpointState.Producer);
                     }
+
+                    BoolResult result;
 
                     if (shouldRestore || forceRestore)
                     {
@@ -494,6 +511,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         // Start receiving events from the given checkpoint
                         result = EventStore.StartProcessing(context, checkpointState.StartSequencePoint);
                     }
+                    else if (_configuration.MasterThroughputCheckMode)
+                    {
+                        var cursor = Configuration.EventHubCursorPosition ?? _clock.UtcNow;
+                        result = EventStore.StartProcessing(context, new EventSequencePoint(cursor));
+                    }
                     else
                     {
                         // Stop receiving events.
@@ -505,7 +527,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         return result;
                     }
 
-                    if (newRole == Role.Master)
+                    if (newRole == Role.Master && !_configuration.MasterThroughputCheckMode)
                     {
                         // Only create a checkpoint if the machine is currently a master machine and was a master machine
                         if (ShouldSchedule(_configuration.Checkpoint.CreateCheckpointInterval, _lastCheckpointTime))
@@ -589,10 +611,23 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 // A post initialization process may fail due to a transient issue, like a storage failure or an inconsistent checkpoint's state.
                 // The transient error can go away and the system may recover itself by calling this method again.
 
-                // In this case we need to reset _postInitializationTask and move its state from "failure" to "success"
+                // In this case we need to reset the post-initialization task and move its state from "failure" to "success"
                 // and unblock all the public operations that will fail if post-initialization task is unsuccessful.
+                var postInitialization = _postInitialization.tcs.Task;
 
-                _postInitializationTask = BoolResult.SuccessTask;
+                // If the task already in one of the failure states, and the current call is successful, then it means that the transient issue is gone and
+                // the component is back to a working state.
+                if (postInitialization.IsCompleted)
+                {
+                    // The task is completed already. If the task is not completed yet, it will be in a moment, because Heartbeat is almost done.
+                    if (postInitialization.Status != TaskStatus.RanToCompletion || !postInitialization.GetAwaiter().GetResult().Succeeded)
+                    {
+                        // The task either failed (with an exception or was canceled), or the result was not successful.
+                        var tcs = TaskSourceSlim.Create<BoolResult>();
+                        tcs.SetResult(BoolResult.Success);
+                        _postInitialization.tcs = tcs;
+                    }
+                }
             }
 
             return result;
@@ -820,9 +855,17 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 Tracer,
                 () => GetBulkCoreAsync(context, requestingMachineId, contentHashes, origin),
                 traceOperationStarted: false,
-                extraEndMessage: r => $"GetBulk({origin}) => [{r.GetShortHashesTraceString()}]");
+                extraEndMessage: r => getExtraEndMessage(r));
 
             return result;
+
+            string getExtraEndMessage(GetBulkLocationsResult r)
+            {
+                // Print the resulting hashes with locations if succeeded, but still print the set of hashes to simplify diagnostics in case of a failure as well.
+                return r.Succeeded
+                    ? $"GetBulk({origin}) => [{r.GetShortHashesTraceString()}]"
+                    : $"GetBulk({origin}) => [{contentHashes.GetShortHashesTraceString()}]";
+            }
         }
 
         private Task<GetBulkLocationsResult> GetBulkCoreAsync(OperationContext context, MachineId requestingMachineId, IReadOnlyList<ContentHash> contentHashes, GetBulkOrigin origin)
@@ -914,6 +957,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             {
                 // TODO: Its probably possible to do this by getting the max machine id in the locations set rather than enumerating all of them (bug 1365340)
                 var entry = entries[i];
+                Contract.AssertNotNull(entry);
+
                 foreach (var machineId in entry.Locations.EnumerateMachineIds())
                 {
                     if (!ClusterState.TryResolve(machineId, out _))
@@ -1012,14 +1057,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private RegisterAction GetRegisterAction(OperationContext context, MachineId machineId, ContentHash hash, DateTime now)
         {
-            if (_configuration.SkipRedundantContentLocationAdd && _recentlyRemovedHashes.Contains(hash))
+            if (Configuration.SkipRedundantContentLocationAdd && _recentlyRemovedHashes.Contains(hash))
             {
                 // Content was recently removed. Eagerly register with global store.
                 Counters[ContentLocationStoreCounters.LocationAddRecentRemoveEager].Increment();
                 return RegisterAction.RecentRemoveEagerGlobal;
             }
 
-            if (ClusterState.LastInactiveTime.IsRecent(now, _configuration.MachineStateRecomputeInterval.Multiply(5)))
+            if (ClusterState.LastInactiveTime.IsRecent(now, Configuration.MachineStateRecomputeInterval.Multiply(5)))
             {
                 // The machine was recently inactive. We should eagerly register content for some amount of time (a few heartbeats) because content may be currently filtered from other machines
                 // local db results due to inactive machines filter.
@@ -1027,7 +1072,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 return RegisterAction.RecentInactiveEagerGlobal;
             }
 
-            if (_configuration.SkipRedundantContentLocationAdd && _recentlyAddedHashes.Contains(hash))
+            if (Configuration.SkipRedundantContentLocationAdd && _recentlyAddedHashes.Contains(hash))
             {
                 // Content was recently added for the machine by a prior operation
                 Counters[ContentLocationStoreCounters.RedundantRecentLocationAddSkipped].Increment();
@@ -1039,11 +1084,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             {
                 // TODO[LLS]: Is it ok to ignore a hash already registered to the machine. There is a subtle race condition (bug 1365340)
                 // here if the hash is deleted and immediately added to the machine
-                if (_configuration.SkipRedundantContentLocationAdd
+                if (Configuration.SkipRedundantContentLocationAdd
                     && entry.Locations[machineId.Index]) // content is registered for this machine
                 {
                     // If content was touched recently, we can skip. Otherwise, we touch via event
-                    if (entry.LastAccessTimeUtc.ToDateTime().IsRecent(now, _configuration.TouchFrequency))
+                    if (entry.LastAccessTimeUtc.ToDateTime().IsRecent(now, Configuration.TouchFrequency))
                     {
                         Counters[ContentLocationStoreCounters.RedundantLocationAddSkipped].Increment();
                         return RegisterAction.SkippedDueToRedundantAdd;
@@ -1056,7 +1101,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 }
 
                 // The entry is not on the machine, we definitely need to register the content location via event stream
-                if (entry.Locations.Count >= _configuration.SafeToLazilyUpdateMachineCountThreshold)
+                if (entry.Locations.Count >= Configuration.SafeToLazilyUpdateMachineCountThreshold)
                 {
                     Counters[ContentLocationStoreCounters.LocationAddQueued].Increment();
                     return RegisterAction.LazyEventOnly;
@@ -1069,8 +1114,34 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         internal Task<BoolResult> EnsureInitializedAsync()
         {
-            Contract.Assert(_postInitializationTask != null);
-            return _postInitializationTask;
+            return _postInitialization.tcs.Task;
+        }
+
+        private async Task<BoolResult> PrepareForWriteAsync<T>(IReadOnlyCollection<T> hashes)
+        {
+            var postInitializationResult = await EnsureInitializedAsync();
+            if (!postInitializationResult)
+            {
+                return postInitializationResult;
+            }
+
+            if (_configuration.DistributedContentConsumerOnly)
+            {
+                return BoolResult.Success;
+            }
+
+            if (hashes.Count == 0)
+            {
+                return BoolResult.Success;
+            }
+
+            return null;
+        }
+
+        private bool HasResult(BoolResult possibleResult, out BoolResult result)
+        {
+            result = possibleResult;
+            return possibleResult != null;
         }
 
         /// <summary>
@@ -1080,15 +1151,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             Contract.Requires(contentHashes != null);
 
-            var postInitializationResult = await EnsureInitializedAsync();
-            if (!postInitializationResult)
+            if (HasResult(await PrepareForWriteAsync(contentHashes), out var result))
             {
-                return postInitializationResult;
-            }
-
-            if (contentHashes.Count == 0)
-            {
-                return BoolResult.Success;
+                return result;
             }
 
             string extraMessage = string.Empty;
@@ -1139,11 +1204,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     }
 
                     // Register all recently added hashes so subsequent operations do not attempt to re-add
-                    if (_configuration.SkipRedundantContentLocationAdd)
+                    if (Configuration.SkipRedundantContentLocationAdd)
                     {
                         foreach (var hash in eventContentHashes)
                         {
-                            _recentlyAddedHashes.Add(hash.Hash, _configuration.TouchFrequency);
+                            _recentlyAddedHashes.Add(hash.Hash, Configuration.TouchFrequency);
                         }
 
                         // Only eagerly added hashes should invalidate recently removed hashes.
@@ -1165,15 +1230,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             Contract.Requires(contentHashes != null);
 
-            var postInitializationResult = await EnsureInitializedAsync();
-            if (!postInitializationResult)
+            if (HasResult(await PrepareForWriteAsync(contentHashes), out var result))
             {
-                return postInitializationResult;
-            }
-
-            if (contentHashes.Count == 0)
-            {
-                return BoolResult.Success;
+                return result;
             }
 
             return context.PerformOperation(
@@ -1185,12 +1244,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                     foreach (var hash in contentHashes)
                     {
-                        if (_recentlyAddedHashes.Contains(hash) || !_recentlyTouchedHashes.Add(hash, _configuration.TouchFrequency))
+                        if (_recentlyAddedHashes.Contains(hash) || !_recentlyTouchedHashes.Add(hash, Configuration.TouchFrequency))
                         {
                             continue;
                         }
 
-                        if (TryGetContentLocations(context, hash, out var entry) && (entry.LastAccessTimeUtc.ToDateTime() + _configuration.TouchFrequency) > now)
+                        if (TryGetContentLocations(context, hash, out var entry) && (entry.LastAccessTimeUtc.ToDateTime() + Configuration.TouchFrequency) > now)
                         {
                             continue;
                         }
@@ -1214,15 +1273,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             Contract.Requires(contentHashes != null);
 
-            var postInitializationResult = await EnsureInitializedAsync();
-            if (!postInitializationResult)
+            if (HasResult(await PrepareForWriteAsync(contentHashes), out var result))
             {
-                return postInitializationResult;
-            }
-
-            if (contentHashes.Count == 0)
-            {
-                return BoolResult.Success;
+                return result;
             }
 
             foreach (var contentHashesPage in contentHashes.GetPages(100))
@@ -1234,13 +1287,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 Tracer,
                 () =>
                 {
-                    if (_configuration.SkipRedundantContentLocationAdd)
+                    if (Configuration.SkipRedundantContentLocationAdd)
                     {
                         foreach (var hash in contentHashes)
                         {
                             // Content has been removed. Ensure that subsequent additions will not be skipped
                             _recentlyAddedHashes.Invalidate(hash);
-                            _recentlyRemovedHashes.Add(hash, _configuration.TouchFrequency);
+                            _recentlyRemovedHashes.Add(hash, Configuration.TouchFrequency);
                         }
                     }
 
@@ -1268,11 +1321,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 var first = contentHashesWithInfo[0];
                 var last = contentHashesWithInfo[contentHashesWithInfo.Count - 1];
 
-                context.Debug($"{nameof(GetHashesInEvictionOrder)} start with contentHashesWithInfo.Count={contentHashesWithInfo.Count}, firstAge={first.Age(_clock)}, lastAge={last.Age(_clock)}");
+                Tracer.Debug(context, $"{nameof(GetHashesInEvictionOrder)} start with contentHashesWithInfo.Count={contentHashesWithInfo.Count}, firstAge={first.Age(_clock)}, lastAge={last.Age(_clock)}");
             }
 
             var operationContext = new OperationContext(context);
-            var effectiveLastAccessTimeProvider = new EffectiveLastAccessTimeProvider(_configuration, _clock, new ContentResolver(this, machineInfo));
+            var effectiveLastAccessTimeProvider = new EffectiveLastAccessTimeProvider(Configuration, _clock, new ContentResolver(this, machineInfo));
 
             // Ideally, we want to remove content we know won't be used again for quite a while. We don't have that
             // information, so we use an evictability metric. Here we obtain and sort by that evictability metric.
@@ -1283,7 +1336,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             var contentHashesWithLastAccessTimes = contentHashesWithInfo.SelectList(v => new ContentHashWithLastAccessTime(v.ContentHash, v.LastAccessTime));
 
 
-            if (_configuration.UseFullEvictionSort)
+            if (Configuration.UseFullEvictionSort)
             {
                 return GetHashesInEvictionOrderUsingFullSort(
                     operationContext,
@@ -1328,14 +1381,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             // not the evictability metric.
             var oldestContentSortedByEvictability = contentHashesWithInfo
                 .Take(contentHashesWithInfo.Count / 2)
-                .ApproximateSort(comparer, getContentEvictionInfos, _configuration.EvictionPoolSize, _configuration.EvictionWindowSize, _configuration.EvictionRemovalFraction, _configuration.EvictionDiscardFraction);
+                .ApproximateSort(comparer, getContentEvictionInfos, Configuration.EvictionPoolSize, Configuration.EvictionWindowSize, Configuration.EvictionRemovalFraction, Configuration.EvictionDiscardFraction);
 
             var newestContentSortedByEvictability = contentHashesWithInfo
                 .SkipOptimized(contentHashesWithInfo.Count / 2)
-                .ApproximateSort(comparer, getContentEvictionInfos, _configuration.EvictionPoolSize, _configuration.EvictionWindowSize, _configuration.EvictionRemovalFraction, _configuration.EvictionDiscardFraction);
+                .ApproximateSort(comparer, getContentEvictionInfos, Configuration.EvictionPoolSize, Configuration.EvictionWindowSize, Configuration.EvictionRemovalFraction, Configuration.EvictionDiscardFraction);
 
             return NuCacheCollectionUtilities.MergeOrdered(oldestContentSortedByEvictability, newestContentSortedByEvictability, comparer)
-                .Where((candidate, index) => IsPassEvictionAge(operationContext, candidate, _configuration.EvictionMinAge, index, ref evictionCount));
+                .Where((candidate, index) => IsPassEvictionAge(operationContext, candidate, Configuration.EvictionMinAge, index, ref evictionCount));
         }
 
         private IEnumerable<ContentEvictionInfo> GetHashesInEvictionOrderUsingFullSort(
@@ -1345,14 +1398,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             IReadOnlyList<ContentHashWithLastAccessTime> contentHashesWithInfo,
             bool reverse)
         {
-            var candidateQueue = new PriorityQueue<ContentEvictionInfo>(_configuration.EvictionPoolSize, comparer);
+            var candidateQueue = new PriorityQueue<ContentEvictionInfo>(Configuration.EvictionPoolSize, comparer);
 
             foreach (var candidate in GetFullSortedContentWithEffectiveLastAccessTimes(operationContext, effectiveLastAccessTimeProvider, contentHashesWithInfo, reverse))
             {
                 candidateQueue.Push(candidate);
 
                 // Only consider content when the eviction pool size is reached.
-                if (candidateQueue.Count > _configuration.EvictionPoolSize)
+                if (candidateQueue.Count > Configuration.EvictionPoolSize)
                 {
                     yield return candidateQueue.Top;
                     candidateQueue.Pop();
@@ -1376,9 +1429,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 ? ContentEvictionInfo.ReverseFullSortAgeOnlyComparer
                 : ContentEvictionInfo.FullSortAgeOnlyComparer;
 
-            var ageSortingQueue = new PriorityQueue<ContentEvictionInfo>(_configuration.EvictionPoolSize, ageOnlyComparer);
+            var ageSortingQueue = new PriorityQueue<ContentEvictionInfo>(Configuration.EvictionPoolSize, ageOnlyComparer);
 
-            foreach (var page in contentHashesWithInfo.GetPages(_configuration.EvictionWindowSize))
+            foreach (var page in contentHashesWithInfo.GetPages(Configuration.EvictionWindowSize))
             {
                 foreach (var item in GetEffectiveLastAccessTimes(operationContext, effectiveLastAccessTimeProvider, page).ThrowIfFailure())
                 {
@@ -1416,7 +1469,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 return true;
             }
             Counters[ContentLocationStoreCounters.EvictionMinAge].Increment();
-            context.Debug($"Previous successful eviction attempts = {evictionCount}, Total eviction attempts previously = {index}, minimum eviction age = {evictionMinAge.ToString()}, pool size = {_configuration.EvictionPoolSize}." +
+            Tracer.Debug(context, $"Previous successful eviction attempts = {evictionCount}, Total eviction attempts previously = {index}, minimum eviction age = {evictionMinAge.ToString()}, pool size = {Configuration.EvictionPoolSize}." +
                 $" Candidate replica count = {candidate.ReplicaCount}, effective age = {candidate.EffectiveAge}, age = {candidate.Age}.");
             return false;
         }
@@ -1436,7 +1489,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             Contract.Requires(contentHashes != null);
             Contract.Requires(contentHashes.Count > 0);
 
-            var effectiveLastAccessTimeProvider = new EffectiveLastAccessTimeProvider(_configuration, _clock, new ContentResolver(this, machineInfo));
+            var effectiveLastAccessTimeProvider = new EffectiveLastAccessTimeProvider(Configuration, _clock, new ContentResolver(this, machineInfo));
 
             return GetEffectiveLastAccessTimes(context, effectiveLastAccessTimeProvider, contentHashes);
         }
@@ -1498,7 +1551,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         return new ReconciliationResult(new ErrorResult("Local content store is not provided"));
                     }
 
-                    if (_configuration.AllowSkipReconciliation && IsReconcileUpToDate(machineId))
+                    if (_configuration.DistributedContentConsumerOnly || (_configuration.AllowSkipReconciliation && IsReconcileUpToDate(machineId)))
                     {
                         return new ReconciliationResult(addedCount: 0, removedCount: 0, totalLocalContentCount: -1);
                     }
@@ -1514,7 +1567,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     int iteration = 0;
                     for (iteration = 0; !isFinished; iteration++)
                     {
-                        var delayTask = Task.Delay(_configuration.ReconciliationCycleFrequency, token);
+                        var delayTask = Task.Delay(Configuration.ReconciliationCycleFrequency, token);
 
                         await context.PerformOperationAsync(
                             Tracer,
@@ -1576,9 +1629,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                             var addedContent = new List<ShortHashWithSize>();
                             var removedContent = new List<ShortHash>();
 
-                            var removalsOnlyLimit = _configuration.ReconciliationMaxRemoveHashesCycleSize ?? _configuration.ReconciliationMaxCycleSize;
-                            var maximumAddsOnRemoveBatch = removalsOnlyLimit * (_configuration.ReconciliationMaxRemoveHashesAddPercentage ?? 0);
-                            var limit = _configuration.ReconciliationMaxCycleSize;
+                            var removalsOnlyLimit = Configuration.ReconciliationMaxRemoveHashesCycleSize ?? _configuration.ReconciliationMaxCycleSize;
+                            var maximumAddsOnRemoveBatch = (removalsOnlyLimit * (Configuration.ReconciliationMaxRemoveHashesAddPercentage ?? 0)) / 100;
+
+                            var limit = Configuration.ReconciliationMaxCycleSize;
                             var limitThreshold = Math.Min(limit, removalsOnlyLimit);
                             foreach (var diffItem in diffedContent)
                             {
@@ -1598,16 +1652,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                                     removedContent.Add(diffItem.item.hash);
                                 }
 
-                                // We have the most information about the batch size at the limit, so that's when we
-                                // compute exactly what size we need.
-                                if (addedContent.Count + removedContent.Count == limitThreshold)
+                                // Potentially adjusting the limit of the cycle size once we reached the limit threshold.
+                                if (addedContent.Count + removedContent.Count >= limitThreshold)
                                 {
-                                    if (addedContent.Count > 0)
+                                    // Using normal (lower) limit if the number of adds exceeds the threshold.
+                                    // Or using a "re-imaging" (higher) limit otherwise.
+                                    if (addedContent.Count >= maximumAddsOnRemoveBatch )
                                     {
-                                        if (removedContent.Count > 0 && addedContent.Count <= maximumAddsOnRemoveBatch)
-                                        {
-                                            limit = removalsOnlyLimit;
-                                        }
+                                        limit = _configuration.ReconciliationMaxCycleSize;
                                     }
                                     else
                                     {
@@ -1628,7 +1680,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                             {
                                 // Create separate event store for reconciliation events so they are dispatched first before
                                 // events in normal event store which may be queued during reconciliation operation.
-                                var reconciliationEventStore = CreateEventStore(_configuration, subfolder: "reconcile");
+                                var reconciliationEventStore = CreateEventStore(Configuration, subfolder: "reconcile");
 
                                 try
                                 {
@@ -1833,7 +1885,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                 bool foundDistributedEntry = _localLocationStore.TryGetContentLocations(context, hash, out var distributedEntry);
 
-                if (_localLocationStore._configuration.UpdateStaleLocalLastAccessTimes
+                if (_localLocationStore.Configuration.UpdateStaleLocalLastAccessTimes
                     && foundLocalInfo
                     && foundDistributedEntry
                     && distributedEntry.LastAccessTimeUtc.ToDateTime() > localInfo.LastAccessTimeUtc)

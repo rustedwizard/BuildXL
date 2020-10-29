@@ -309,7 +309,8 @@ namespace BuildXL.Execution.Analyzer
             return new XElement(
                 "div",
                 new XAttribute("class", "miniGroup"),
-                m_html.CreateRow("Path", data.Path),
+                m_html.CreateRow("Path", data.Path) ?? m_html.CreateRow("Path", data.ManifestPath),
+                m_html.CreateRow("RequestedAccess", RequestedAccessToString(data.RequestedAccess)),
                 m_html.CreateEnumRow("CreationDisposition", data.CreationDisposition),
                 m_html.CreateEnumRow("DesiredAccess", data.DesiredAccess),
                 m_html.CreateEnumRow("ShareMode", data.ShareMode),
@@ -323,6 +324,24 @@ namespace BuildXL.Execution.Analyzer
                 m_html.CreateRow("Process", data.Process.ProcessId.ToString(CultureInfo.InvariantCulture)),
                 m_html.CreateRow("ExplicitlyReported", data.ExplicitlyReported),
                 m_html.CreateRow("EnumeratePattern", data.EnumeratePattern));
+        }
+
+        private static string RequestedAccessToString(RequestedAccess requestedAccess)
+        {
+            switch (requestedAccess)
+            {
+                case RequestedAccess.Enumerate:
+                case RequestedAccess.EnumerationProbe:
+                    return "[Enumerate]";
+                case RequestedAccess.Probe:
+                    return "[Probe]";
+                case RequestedAccess.Read:
+                    return "[Read]";
+                case RequestedAccess.Write:
+                    return "[Write]";
+            }
+
+            return string.Empty;
         }
 
         private XElement RenderReportedProcess(ReportedProcess data)
@@ -534,6 +553,7 @@ namespace BuildXL.Execution.Analyzer
                     m_html.CreateRow("Success Codes", pip.SuccessExitCodes.Select(code => code.ToString(CultureInfo.InvariantCulture))),
                     m_html.CreateRow("Semaphores", pip.Semaphores.Select(CreateSemaphore)),
                     m_html.CreateRow("PreserveOutputTrustLevel", pip.PreserveOutputsTrustLevel),
+                    m_html.CreateRow("PreserveOutputsAllowlist", pip.PreserveOutputAllowlist.Select(allowed => allowed.ToString(PathTable))),
                     m_html.CreateRow("ProcessOptions", pip.ProcessOptions.ToString()),
                     m_html.CreateRow("RetryExitCodes", string.Join(",", pip.RetryExitCodes))),
 

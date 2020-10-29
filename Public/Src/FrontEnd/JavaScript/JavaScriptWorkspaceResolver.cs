@@ -9,6 +9,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using BuildXL.FrontEnd.JavaScript.ProjectGraph;
 using BuildXL.FrontEnd.Script.RuntimeModel.AstBridge;
+using BuildXL.FrontEnd.Script.Util;
 using BuildXL.FrontEnd.Sdk;
 using BuildXL.FrontEnd.Utilities;
 using BuildXL.FrontEnd.Utilities.GenericProjectGraphResolver;
@@ -37,7 +38,7 @@ namespace BuildXL.FrontEnd.JavaScript
         where TResolverSettings : class, IJavaScriptResolverSettings
     {
         /// <summary>
-        /// Name of the Bxl configuration file that can be dropped at the root of a javascript project
+        /// Name of the Bxl configuration file that can be dropped at the root of a JavaScript project
         /// </summary>
         internal const string BxlConfigurationFilename = "bxlconfig.json";
 
@@ -425,7 +426,7 @@ namespace BuildXL.FrontEnd.JavaScript
             {
                 var flattenedJavaScriptGraph = serializer.Deserialize<GenericJavaScriptGraph<DeserializedJavaScriptProject, TGraphConfiguration>>(reader);
 
-                Possible<JavaScriptGraph<TGraphConfiguration>> graph = ResolveGraph(flattenedJavaScriptGraph);
+                Possible<JavaScriptGraph<TGraphConfiguration>> graph = ApplyBxlExecutionSemantics() ? ResolveGraphWithExecutionSemantics(flattenedJavaScriptGraph) : ResolveGraphWithoutExecutionSemantics(flattenedJavaScriptGraph);
 
                 return graph.Then(graph => new Possible<(JavaScriptGraph<TGraphConfiguration>, GenericJavaScriptGraph<DeserializedJavaScriptProject, TGraphConfiguration>)>((graph, flattenedJavaScriptGraph)));
             }
@@ -445,6 +446,8 @@ namespace BuildXL.FrontEnd.JavaScript
                 m_resolverSettings.NodeExeLocation.Value.Path.ToString(m_context.PathTable) :
                 "node.exe";
             var toolArguments = GetGraphConstructionToolArguments(outputFile, toolLocation, toolPath, nodeExeLocation);
+
+            Tracing.Logger.Log.ConstructingGraphScript(m_context.LoggingContext, toolArguments);
 
             return FrontEndUtilities.RunSandboxedToolAsync(
                m_context,
@@ -467,7 +470,15 @@ namespace BuildXL.FrontEnd.JavaScript
         /// <returns></returns>
         protected abstract string GetGraphConstructionToolArguments(AbsolutePath outputFile, AbsolutePath toolLocation, AbsolutePath bxlGraphConstructionToolPath, string nodeExeLocation);
 
-        private Possible<JavaScriptGraph<TGraphConfiguration>> ResolveGraph(GenericJavaScriptGraph<DeserializedJavaScriptProject, TGraphConfiguration> flattenedJavaScriptGraph)
+        /// <summary>
+        /// Whether the graph produced by the corresponding graph construction tool needs BuildXL to add execution semantics.
+        /// </summary>
+        /// <remarks>
+        /// If not, bxl will define the graph based on the specification of 'execute'
+        /// </remarks>
+        protected abstract bool ApplyBxlExecutionSemantics();
+
+        private Possible<JavaScriptGraph<TGraphConfiguration>> ResolveGraphWithExecutionSemantics(GenericJavaScriptGraph<DeserializedJavaScriptProject, TGraphConfiguration> flattenedJavaScriptGraph)
         {
             var resolvedProjects = new Dictionary<(string projectName, string command), (JavaScriptProject JavaScriptProject, DeserializedJavaScriptProject deserializedJavaScriptProject)>(flattenedJavaScriptGraph.Projects.Count * m_computedCommands.Count);
 
@@ -485,16 +496,9 @@ namespace BuildXL.FrontEnd.JavaScript
                         continue;
                     }
 
-                    var javaScriptProject = JavaScriptProject.FromDeserializedProject(command, deserializedProject.AvailableScriptCommands[command], deserializedProject, m_context.PathTable);
-
-                    if (!ValidateDeserializedProject(javaScriptProject, out string failure))
+                    if (!TryValidateAndCreateProject(command, deserializedProject, out JavaScriptProject javaScriptProject, out Failure failure))
                     {
-                        Tracing.Logger.Log.ProjectGraphConstructionError(
-                            m_context.LoggingContext,
-                            m_resolverSettings.Location(m_context.PathTable),
-                            $"The project '{deserializedProject.Name}' defined in '{deserializedProject.ProjectFolder.ToString(m_context.PathTable)}' is invalid. {failure}");
-
-                        return new JavaScriptGraphConstructionFailure(m_resolverSettings, m_context.PathTable);
+                        return failure;
                     }
 
                     // Here we check for duplicate projects
@@ -504,10 +508,15 @@ namespace BuildXL.FrontEnd.JavaScript
                             $"Duplicate project name '{javaScriptProject.Name}' defined in '{javaScriptProject.ProjectFolder.ToString(m_context.PathTable)}' " +
                             $"and '{resolvedProjects[(javaScriptProject.Name, command)].JavaScriptProject.ProjectFolder.ToString(m_context.PathTable)}' for script command '{command}'");
                     }
-                    
+
                     resolvedProjects.Add((javaScriptProject.Name, command), (javaScriptProject, deserializedProject));
                 }
             }
+
+            var deserializedProjectsByName = flattenedJavaScriptGraph.Projects.ToDictionary(project => project.Name);
+
+            // Start with an empty cache for closest present dependencies
+            var closestDependenciesCache = new Dictionary<(string name, string command), HashSet<JavaScriptProject>>();
 
             // Now resolve dependencies
             foreach (var kvp in resolvedProjects)
@@ -521,48 +530,191 @@ namespace BuildXL.FrontEnd.JavaScript
                     Contract.Assume(false, $"The command {command} is expected to be part of the computed commands");
                 }
 
-                var projectDependencies = new List<JavaScriptProject>();
-                foreach (IJavaScriptCommandDependency dependency in dependencies)
+                // Let's use a pooled set for computing the dependencies to make sure we are not adding duplicates
+                using (var projectDependenciesWrapper = Pools.CreateSetPool<JavaScriptProject>().GetInstance())
                 {
-                    // If it is a local dependency, add a dependency to the same JavaScript project and the specified command
-                    if (dependency.IsLocalKind())
+                    var projectDependencies = projectDependenciesWrapper.Instance;
+                    foreach (IJavaScriptCommandDependency dependency in dependencies)
                     {
-                        // Skip if it is not defined but log
-                        if (!resolvedProjects.TryGetValue((javaScriptProject.Name, dependency.Command), out var value))
+                        // If it is a local dependency, add a dependency to the same JavaScript project and the specified command
+                        if (dependency.IsLocalKind())
                         {
-                            Tracing.Logger.Log.DependencyIsIgnoredScriptIsMissing(
-                                m_context.LoggingContext, Location.FromFile(javaScriptProject.ProjectFolder.ToString(m_context.PathTable)), javaScriptProject.Name, javaScriptProject.ScriptCommandName, javaScriptProject.Name, dependency.Command);
-                            continue;
-                        }
-
-                        projectDependencies.Add(value.JavaScriptProject);
-                    }
-                    else
-                    {
-                        // Otherwise add a dependency on all the package dependencies with the specified command
-                        var packageDependencies = resolvedProjects[(javaScriptProject.Name, command)].deserializedJavaScriptProject.Dependencies;
-
-                        foreach (string packageDependencyName in packageDependencies)
-                        {
-                            // Skip if it is not defined but log
-                            if (!resolvedProjects.TryGetValue((packageDependencyName, dependency.Command), out var value))
+                            // If it is not defined verbose log it and try to find its closest transitive dependencies
+                            if (!resolvedProjects.TryGetValue((javaScriptProject.Name, dependency.Command), out var value))
                             {
                                 Tracing.Logger.Log.DependencyIsIgnoredScriptIsMissing(
-                                    m_context.LoggingContext, Location.FromFile(javaScriptProject.ProjectFolder.ToString(m_context.PathTable)), javaScriptProject.Name, javaScriptProject.ScriptCommandName, packageDependencyName, dependency.Command);
-                                continue;
-                            }
+                                    m_context.LoggingContext, Location.FromFile(javaScriptProject.ProjectFolder.ToString(m_context.PathTable)), javaScriptProject.Name, javaScriptProject.ScriptCommandName, javaScriptProject.Name, dependency.Command);
 
-                            projectDependencies.Add(value.JavaScriptProject);
+                                AddClosestPresentDependencies(javaScriptProject.Name, dependency.Command, resolvedProjects, deserializedProjectsByName, projectDependencies, closestDependenciesCache);
+                            }
+                            else
+                            {
+                                projectDependencies.Add(value.JavaScriptProject);
+                            }
+                        }
+                        else
+                        {
+                            // Otherwise add a dependency on all the package dependencies with the specified command
+                            var packageDependencies = resolvedProjects[(javaScriptProject.Name, command)].deserializedJavaScriptProject.Dependencies;
+
+                            foreach (string packageDependencyName in packageDependencies)
+                            {
+                                // If it is not defined verbose log it and try to find its closest transitive dependencies
+                                if (!resolvedProjects.TryGetValue((packageDependencyName, dependency.Command), out var value))
+                                {
+                                    Tracing.Logger.Log.DependencyIsIgnoredScriptIsMissing(
+                                        m_context.LoggingContext, Location.FromFile(javaScriptProject.ProjectFolder.ToString(m_context.PathTable)), javaScriptProject.Name, javaScriptProject.ScriptCommandName, packageDependencyName, dependency.Command);
+
+                                    AddClosestPresentDependencies(packageDependencyName, dependency.Command, resolvedProjects, deserializedProjectsByName, projectDependencies, closestDependenciesCache);
+                                }
+                                else
+                                {
+                                    projectDependencies.Add(value.JavaScriptProject);
+                                }
+                            }
                         }
                     }
+
+                    javaScriptProject.SetDependencies(projectDependencies.ToList());
                 }
-                
-                javaScriptProject.SetDependencies(projectDependencies);
             }
 
             return new JavaScriptGraph<TGraphConfiguration>(
                 new List<JavaScriptProject>(resolvedProjects.Values.Select(kvp => kvp.JavaScriptProject)), 
                 flattenedJavaScriptGraph.Configuration);
+        }
+
+        private void AddClosestPresentDependencies(
+            string projectName,
+            string command,
+            Dictionary<(string projectName, string command), (JavaScriptProject JavaScriptProject, DeserializedJavaScriptProject deserializedJavaScriptProject)> resolvedProjects,
+            Dictionary<string, DeserializedJavaScriptProject> deserializedProjects,
+            HashSet<JavaScriptProject> closestDependencies,
+            Dictionary<(string name, string command), HashSet<JavaScriptProject>> closestDependenciesCache)
+        {
+            // Check the cache to see if we resolved this project/command before
+            if (closestDependenciesCache.TryGetValue((projectName, command), out var closestCachedDependencies))
+            {
+                closestDependencies.AddRange(closestCachedDependencies);
+                return;
+            }
+
+            closestCachedDependencies = new HashSet<JavaScriptProject>();
+
+            // The assumption is that projectName and command represent an absent project
+            // Get all its dependencies to retrieve the 'frontier' of present projects
+            var dependencies = m_computedCommands[command];
+            foreach (var dependency in dependencies)
+            {
+                if (dependency.IsLocalKind())
+                {
+                    // If it is a local dependency, check for the presence of the current project name and the dependency command
+                    if (!resolvedProjects.TryGetValue((projectName, dependency.Command), out var dependencyProject))
+                    {
+                        AddClosestPresentDependencies(projectName, dependency.Command, resolvedProjects, deserializedProjects, closestCachedDependencies, closestDependenciesCache);
+                    }
+                    else
+                    {
+                        closestCachedDependencies.Add(dependencyProject.JavaScriptProject);
+                    }
+                }
+                else
+                {
+                    // If it is a package dependency, check if there is any of those missing
+                    IReadOnlyCollection<string> projectDependencyNames = deserializedProjects[projectName].Dependencies;
+                    foreach (string projectDependencyName in projectDependencyNames)
+                    {
+                        if (!resolvedProjects.TryGetValue((projectDependencyName, dependency.Command), out var dependencyProject))
+                        {
+                            AddClosestPresentDependencies(projectDependencyName, dependency.Command, resolvedProjects, deserializedProjects, closestCachedDependencies, closestDependenciesCache);
+                        }
+                        else
+                        {
+                            closestCachedDependencies.Add(dependencyProject.JavaScriptProject);
+                        }
+                    }
+                }
+            }
+
+            // Populate the result and update the cache
+            closestDependencies.AddRange(closestCachedDependencies);
+            closestDependenciesCache[(projectName, command)] = closestCachedDependencies;
+        }
+
+        private Possible<JavaScriptGraph<TGraphConfiguration>> ResolveGraphWithoutExecutionSemantics(GenericJavaScriptGraph<DeserializedJavaScriptProject, TGraphConfiguration> flattenedJavaScriptGraph)
+        {
+            var resolvedProjects = new Dictionary<string, (JavaScriptProject JavaScriptProject, DeserializedJavaScriptProject deserializedJavaScriptProject)>(flattenedJavaScriptGraph.Projects.Count);
+
+            foreach (var deserializedProject in flattenedJavaScriptGraph.Projects)
+            {
+                Contract.Assert(deserializedProject.AvailableScriptCommands.Count == 1, "If the graph builder tool is already adding the execution semantics, each deserialized project should only have one script command");
+                string command = deserializedProject.AvailableScriptCommands.Keys.Single();
+
+                if (!TryValidateAndCreateProject(command, deserializedProject, out JavaScriptProject javaScriptProject, out Failure failure))
+                {
+                    return failure;
+                }
+
+                // Here we check for duplicate projects
+                if (resolvedProjects.ContainsKey((javaScriptProject.Name)))
+                {
+                    return new JavaScriptProjectSchedulingFailure(javaScriptProject,
+                        $"Duplicate project name '{javaScriptProject.Name}' defined in '{javaScriptProject.ProjectFolder.ToString(m_context.PathTable)}' " +
+                        $"and '{resolvedProjects[javaScriptProject.Name].JavaScriptProject.ProjectFolder.ToString(m_context.PathTable)}' for script command '{command}'");
+                }
+
+                resolvedProjects.Add(javaScriptProject.Name, (javaScriptProject, deserializedProject));
+            }
+
+            // Now resolve dependencies
+            foreach (var kvp in resolvedProjects)
+            {
+                JavaScriptProject javaScriptProject = kvp.Value.JavaScriptProject;
+                DeserializedJavaScriptProject deserializedProject = kvp.Value.deserializedJavaScriptProject;
+
+                var projectDependencies = new List<JavaScriptProject>();
+                foreach (string dependency in deserializedProject.Dependencies)
+                {
+                    // When the execution semantics is provided by the graph builder tool, it is expected to be complete
+                    if (!resolvedProjects.TryGetValue(dependency, out var value))
+                    {
+                        return new JavaScriptProjectSchedulingFailure(javaScriptProject,
+                            $"Project dependency '{dependency}' is missing. Dependency required by '{javaScriptProject.ProjectFolder.ToString(m_context.PathTable)}'");
+                    }
+
+                    projectDependencies.Add(value.JavaScriptProject);
+                }
+
+                javaScriptProject.SetDependencies(projectDependencies);
+            }
+
+            return new JavaScriptGraph<TGraphConfiguration>(
+                new List<JavaScriptProject>(resolvedProjects.Values.Select(kvp => kvp.JavaScriptProject)),
+                flattenedJavaScriptGraph.Configuration);
+        }
+
+        private bool TryValidateAndCreateProject(
+            string command, 
+            DeserializedJavaScriptProject deserializedProject, 
+            out JavaScriptProject javaScriptProject,
+            out Failure failure)
+        {
+            javaScriptProject = JavaScriptProject.FromDeserializedProject(command, deserializedProject.AvailableScriptCommands[command], deserializedProject, m_context.PathTable);
+
+            if (!ValidateDeserializedProject(javaScriptProject, out string reason))
+            {
+                Tracing.Logger.Log.ProjectGraphConstructionError(
+                    m_context.LoggingContext,
+                    m_resolverSettings.Location(m_context.PathTable),
+                    $"The project '{deserializedProject.Name}' defined in '{deserializedProject.ProjectFolder.ToString(m_context.PathTable)}' is invalid. {reason}");
+
+                failure =  new JavaScriptGraphConstructionFailure(m_resolverSettings, m_context.PathTable);
+                return false;
+            }
+
+            failure = null;
+
+            return true;
         }
 
         private bool ValidateDeserializedProject(JavaScriptProject project, out string failure)

@@ -23,10 +23,10 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
         /// <inheritdoc />
         protected override CacheTracer CacheTracer { get; } = new CacheTracer(nameof(DistributedOneLevelCache));
 
-        private readonly DistributedContentStore<AbsolutePath> _distributedContentStore;
+        private readonly DistributedContentStore _distributedContentStore;
 
         /// <nodoc />
-        public DistributedOneLevelCache(IContentStore contentStore, DistributedContentStore<AbsolutePath> distributedContentStore, Guid id, bool passContentToMemoization = true)
+        public DistributedOneLevelCache(IContentStore contentStore, DistributedContentStore distributedContentStore, Guid id, bool passContentToMemoization = true)
             : base(id, passContentToMemoization)
         {
             ContentStore = contentStore;
@@ -56,11 +56,23 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
                     return new BoolResult("LocalLocationStore not available");
                 }
 
+                var memoizationStoreConfiguration = localLocationStore.Configuration as RedisMemoizationStoreConfiguration;
+                if (memoizationStoreConfiguration == null)
+                {
+                    return new BoolResult($"LocalLocationStore.Configuration should be of type 'RedisMemoizationStoreConfiguration' but was {localLocationStore.Configuration.GetType()}");
+                }
+
                 var redisStore = (RedisGlobalStore)localLocationStore.GlobalStore;
 
-                MemoizationStore = new DatabaseMemoizationStore(new DistributedMemoizationDatabase(
-                    localLocationStore,
-                    new RedisMemoizationDatabase(redisStore.RedisDatabase, localLocationStore.EventStore.Clock, localLocationStore.Configuration.LocationEntryExpiry)));
+                MemoizationStore = new DatabaseMemoizationStore(
+                    new DistributedMemoizationDatabase(
+                        localLocationStore,
+                        new RedisMemoizationDatabase(
+                            redisStore.RaidedRedis,
+                            localLocationStore.EventStore.Clock,
+                            memoizationStoreConfiguration.LocationEntryExpiry,
+                            memoizationStoreConfiguration.MemoizationOperationTimeout,
+                            memoizationStoreConfiguration.MemoizationSlowOperationCancellationTimeout)));
 
                 return await MemoizationStore.StartupAsync(context);
             });

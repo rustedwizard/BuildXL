@@ -170,6 +170,11 @@ namespace BuildXL.Scheduler
 
         private DispatcherReleaser m_dispatcherReleaser;
 
+        /// <summary>
+        /// Worker id for the preferred worker when module affinity is enabled
+        /// </summary>
+        public int PreferredWorkerId { get; internal set; }
+
         internal RunnablePipPerformanceInfo Performance { get; }
 
         /// <summary>
@@ -316,7 +321,7 @@ namespace BuildXL.Scheduler
                 // Handle Retryable Cancellations
                 SetWorker(null);
 
-                Performance.Retried(ExecutionResult?.RetryInfo ?? RetryInfo.RetryOnDifferentWorker(RetryReason.StoppedWorker));
+                Performance.Retried(ExecutionResult?.RetryInfo ?? RetryInfo.GetDefault(RetryReason.StoppedWorker));
 
                 return DecideNextStepForRetry();
             }

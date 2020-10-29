@@ -36,6 +36,18 @@ namespace ExternalToolTest.BuildXL.Scheduler
         }
 
         [Fact]
+        public void RunProcessReferencingUnsetEnvironmentVariable()
+        {
+            ProcessBuilder builder = CreatePipBuilder(new[] { Operation.ReadFile(CreateSourceFile()), Operation.WriteFile(CreateOutputFileArtifact()) });
+            builder.Options |= Process.Options.RequiresAdmin;
+            ProcessWithOutputs process = SchedulePipBuilder(builder);
+            // HOMEDRIVE is no longer set by CloudBuild. Test to make sure environment variable forwarding code can handle this
+            builder.SetPassthroughEnvironmentVariable(Context.StringTable.AddString("HOMEDRIVE"));
+            RunScheduler().AssertSuccess();
+            RunScheduler().AssertCacheHit(process.Process.PipId);
+        }
+
+        [Fact]
         public void RunSingleProcessWithSharedOpaqueOutputLogging()
         {
             Configuration.Schedule.UnsafeLazySODeletion = true;
@@ -143,20 +155,6 @@ namespace ExternalToolTest.BuildXL.Scheduler
 
             ScheduleRunResult result = RunScheduler().AssertSuccess();
             AssertWarningEventLogged(ProcessesLogEventId.PipProcessWarning, count: 1);
-        }
-
-        [Fact]
-        public void ExecutionRespectFailure()
-        {
-            ProcessBuilder builder = CreatePipBuilder(new[] {
-                Operation.ReadFile(CreateSourceFile()),
-                Operation.Fail(),
-                Operation.WriteFile(CreateOutputFileArtifact()) });
-            builder.Options |= Process.Options.RequiresAdmin;
-            ProcessWithOutputs process = SchedulePipBuilder(builder);
-
-            RunScheduler().AssertFailure();
-            AssertErrorEventLogged(ProcessesLogEventId.PipProcessError, count: 1);
         }
 
         [Fact]

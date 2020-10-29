@@ -84,6 +84,11 @@ namespace BuildXL.Scheduler
                 () => new Dictionary<FileArtifact, Task<Possible<FileMaterializationInfo>>>(),
                 map => { map.Clear(); return map; });
 
+        private static readonly ObjectPool<OutputDirectoryEnumerationData> s_outputEnumerationDataPool =
+            new ObjectPool<OutputDirectoryEnumerationData>(
+                () => new OutputDirectoryEnumerationData(),
+                data => { data.Clear(); return data; });
+
         /// <summary>
         /// Materializes pip's inputs.
         /// </summary>
@@ -164,7 +169,7 @@ namespace BuildXL.Scheduler
                     ReadOnlyArray<AbsolutePath> symlinkChain;
                     var symlinkTarget = AbsolutePath.Invalid;
                     bool isSymLink = false;
-               
+
                     var possibleSymlinkChain = CheckValidSymlinkChainAsync(pip.Source, environment);
                     if (!possibleSymlinkChain.Succeeded)
                     {
@@ -314,7 +319,7 @@ namespace BuildXL.Scheduler
                         FileArtifact.CreateSourceFile(chainElement),
                         environment.Configuration.Sandbox.FlushPageCacheToFileSystemOnStoringOutputsToCache,
                         ignoreKnownContentHashOnDiscoveringContent: true,
-                        isSymlink: true);
+                        isReparsePoint: true);
 
                     if (!possiblyTracked.Succeeded)
                     {
@@ -341,7 +346,7 @@ namespace BuildXL.Scheduler
             // we are doing the check here using FileMaterializationInfo because 'source' might not be present on disk
             // (e.g., in case of lazyOutputMaterialization)
             var materializationInfo = environment.State.FileContentManager.GetInputContent(source);
-            if (!materializationInfo.ReparsePointInfo.IsSymlink)
+            if (!materializationInfo.ReparsePointInfo.IsActionableReparsePoint)
             {
                 return ReadOnlyArray<AbsolutePath>.Empty;
             }
@@ -449,7 +454,7 @@ namespace BuildXL.Scheduler
                 MakeSharedOpaqueOutputIfNeeded(environment, copyFile.Destination);
             }
 
-            var mayBeTracked = await TrackPipOutputAsync(operationContext, environment, copyFile.Destination, isSymlink: false);
+            var mayBeTracked = await TrackPipOutputAsync(operationContext, environment, copyFile.Destination);
 
             if (!mayBeTracked.Succeeded)
             {
@@ -543,7 +548,7 @@ namespace BuildXL.Scheduler
 
             // ensure services are running
             bool ensureServicesRunning =
-                await environment.State.ServiceManager.TryRunServiceDependenciesAsync(environment, pip.ServicePipDependencies, operationContext);
+                await environment.State.ServiceManager.TryRunServiceDependenciesAsync(environment, pip.PipId, pip.ServicePipDependencies, operationContext);
             if (!ensureServicesRunning)
             {
                 Logger.Log.PipFailedDueToServicesFailedToRun(operationContext, pip.GetDescription(environment.Context));
@@ -695,7 +700,8 @@ namespace BuildXL.Scheduler
 
         private static void MakeSharedOpaqueOutputIfNeeded(IPipExecutionEnvironment environment, AbsolutePath path)
         {
-            if (environment.PipGraphView.IsPathUnderOutputDirectory(path, out bool isItSharedOpaque) && isItSharedOpaque)
+            if (!environment.Configuration.Sandbox.UnsafeSandboxConfiguration.SkipFlaggingSharedOpaqueOutputs() &&
+                environment.PipGraphView.IsPathUnderOutputDirectory(path, out bool isItSharedOpaque) && isItSharedOpaque)
             {
                 string expandedPath = path.ToString(environment.Context.PathTable);
                 SharedOpaqueOutputHelper.EnforceFileIsSharedOpaqueOutput(expandedPath);
@@ -792,8 +798,8 @@ namespace BuildXL.Scheduler
                                 destinationFile,
                                 tryFlushPageCacheToFileSystem: environment.Configuration.Sandbox.FlushPageCacheToFileSystemOnStoringOutputsToCache,
                                 knownContentHash: contentHash,
-                                isSymlink: false)
-                            : await TrackPipOutputAsync(operationContext, environment, destinationFile, isSymlink: false);
+                                isReparsePoint: false)
+                            : await TrackPipOutputAsync(operationContext, environment, destinationFile);
 
                         if (!possiblyStored.Succeeded)
                         {
@@ -940,6 +946,17 @@ namespace BuildXL.Scheduler
                     output.fileInfo,
                     overrideOutputOrigin ?? output.Item3,
                     doubleWriteErrorsAreWarnings);
+            }
+
+            // The file content manager is not really aware of directories, unless there are files
+            // underneath them. But in order to properly compute directory enumeration fingerprints for
+            // minimal graph with alien files mode, we need to make the output file system aware of
+            // created directories, even if they are empty
+            foreach (var directory in processExecutionResult.CreatedDirectories)
+            {
+                // We explicitly don't update parents, since we want to keep track of directories that were actual 
+                // outputs of the build.
+                environment.State.FileSystemView.ReportOutputFileSystemExistence(directory, PathExistence.ExistsAsDirectory, updateParents: false);
             }
 
             if (processExecutionResult.NumberOfWarnings > 0)
@@ -1090,7 +1107,7 @@ namespace BuildXL.Scheduler
                     environment,
                     pip.SemiStableHash,
                     executionResult,
-                    pip.PipType == PipType.Process ? ((Process)pip).DoubleWritePolicy.ImpliesDoubleWriteIsWarning() : false);
+                    pip.PipType == PipType.Process ? ((Process)pip).RewritePolicy.ImpliesDoubleWriteIsWarning() : false);
 
                 if (cacheHitData.Metadata.NumberOfWarnings > 0 && environment.Configuration.Logging.ReplayWarnings)
                 {
@@ -1199,7 +1216,7 @@ namespace BuildXL.Scheduler
             using (operationContext.StartOperation(PipExecutorCounter.RunServiceDependenciesDuration))
             {
                 bool ensureServicesRunning =
-                    await environment.State.ServiceManager.TryRunServiceDependenciesAsync(environment, pip.ServicePipDependencies, operationContext);
+                    await environment.State.ServiceManager.TryRunServiceDependenciesAsync(environment, pip.PipId, pip.ServicePipDependencies, operationContext);
                 if (!ensureServicesRunning)
                 {
                     Logger.Log.PipFailedDueToServicesFailedToRun(operationContext, processDescription);
@@ -1219,7 +1236,7 @@ namespace BuildXL.Scheduler
                     pip,
                     expectedMemoryCounters,
                     allowResourceBasedCancellation,
-                    async (resourceScope) => { return await ExecutePipAndHandleRetryAsync(resourceScope, 
+                    async (resourceScope) => { return await ExecutePipAndHandleRetryAsync(resourceScope,
                         operationContext, pip, expectedMemoryCounters, environment, state, processIdListener, detoursEventListener, start); });
 
             processExecutionResult.ReportSandboxedExecutionResult(executionResult);
@@ -1233,18 +1250,6 @@ namespace BuildXL.Scheduler
 
             // We may have some violations reported already (outright denied by the sandbox manifest).
             FileAccessReportingContext fileAccessReportingContext = executionResult.UnexpectedFileAccesses;
-
-            if (executionResult.Status == SandboxedProcessPipExecutionStatus.PreparationFailed)
-            {
-                // Preparation failures provide minimal feedback.
-                // We do not have any execution-time information (observed accesses or file monitoring violations) to analyze.
-                processExecutionResult.SetResult(operationContext, PipResultStatus.Failed);
-
-                counters.IncrementCounter(PipExecutorCounter.PreparationFailureCount);
-                counters.IncrementCounter(PipExecutorCounter.PreparationFailurePartialCopyCount);
-
-                return processExecutionResult;
-            }
 
             if (RetryInfo.RetryAbleOnDifferentWorker(executionResult.RetryInfo))
             {
@@ -1262,6 +1267,20 @@ namespace BuildXL.Scheduler
                         PipExecutorCounter.CanceledProcessExecuteDuration,
                         executionResult.PrimaryProcessTimes.TotalWallClockTime);
                 }
+
+                return processExecutionResult;
+            }
+
+            if (executionResult.Status == SandboxedProcessPipExecutionStatus.PreparationFailed)
+            {
+                // Preparation failures provide minimal feedback.
+                // We do not have any execution-time information (observed accesses or file monitoring violations) to analyze.
+                // executionResult.RetryInfo.
+                // No error here
+                processExecutionResult.SetResult(operationContext, PipResultStatus.Failed);
+
+                counters.IncrementCounter(PipExecutorCounter.PreparationFailureCount);
+                counters.IncrementCounter(PipExecutorCounter.PreparationFailurePartialCopyCount);
 
                 return processExecutionResult;
             }
@@ -1317,6 +1336,7 @@ namespace BuildXL.Scheduler
                             fileAccessReportingContext,
                             executionResult.ObservedFileAccesses,
                             executionResult.SharedDynamicDirectoryWriteAccesses,
+                            executionResult.CreatedDirectories,
                             trackFileChanges: succeeded);
                     LogSubPhaseDuration(
                         operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseValidateObservedFileAccesses, DateTime.UtcNow.Subtract(start),
@@ -1329,6 +1349,7 @@ namespace BuildXL.Scheduler
                 processExecutionResult.DynamicallyObservedEnumerations = observedInputValidationResult.DynamicallyObservedEnumerations;
                 processExecutionResult.AllowedUndeclaredReads = observedInputValidationResult.AllowedUndeclaredSourceReads;
                 processExecutionResult.AbsentPathProbesUnderOutputDirectories = observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories;
+                processExecutionResult.CreatedDirectories = executionResult.CreatedDirectories;
 
                 if (observedInputValidationResult.Status == ObservedInputProcessingStatus.Aborted)
                 {
@@ -1505,9 +1526,9 @@ namespace BuildXL.Scheduler
         /// Execute Pip and handle retries within the same worker
         /// </summary>
         private static async Task<SandboxedProcessPipExecutionResult> ExecutePipAndHandleRetryAsync(ProcessResourceManager.ResourceScope resourceScope,
-            OperationContext operationContext, 
-            Process pip, 
-            ProcessMemoryCounters expectedMemoryCounters, 
+            OperationContext operationContext,
+            Process pip,
+            ProcessMemoryCounters expectedMemoryCounters,
             IPipExecutionEnvironment environment,
             PipExecutionState.PipScopeState state,
             Action<int> processIdListener,
@@ -1573,7 +1594,7 @@ namespace BuildXL.Scheduler
                     FileMaterializationInfo inputMaterializationInfo =
                         environment.State.FileContentManager.GetInputContent(artifactNeededPrivate);
 
-                    if (inputMaterializationInfo.ReparsePointInfo.IsSymlink)
+                    if (inputMaterializationInfo.ReparsePointInfo.IsActionableReparsePoint)
                     {
                         // Do nothing in case of re-writing a symlink --- a process can safely change
                         // symlink's target since it won't affect things in CAS.
@@ -1598,7 +1619,7 @@ namespace BuildXL.Scheduler
 
                             // Source should have been tracked by hash-source file pip, no need to retrack.
                             trackPath: false,
-                            isSymlink: false);
+                            isReparsePoint: false);
 
                         if (!maybeStored.Succeeded)
                         {
@@ -1677,7 +1698,7 @@ namespace BuildXL.Scheduler
                     ? environment.State.FileContentManager.SourceChangeAffectedInputs.GetChangeAffectedInputs(pip)
                     : null;
 
-                int remainingUserRetries = pip.RetryExitCodes.Length > 0 ? configuration.Schedule.ProcessRetries : 0;
+                int remainingUserRetries = pip.RetryExitCodes.Length > 0 ? pip.ProcessRetries : 0;
                 int remainingInternalSandboxedProcessExecutionFailureRetries = InternalSandboxedProcessExecutionFailureRetryCountMax;
 
                 bool firstAttempt = true;
@@ -1722,7 +1743,8 @@ namespace BuildXL.Scheduler
                         changeAffectedInputs: changeAffectedInputs,
                         detoursListener: detoursEventListener,
                         symlinkedAccessResolver: environment.SymlinkedAccessResolver,
-                        staleOutputsUnderSharedOpaqueDirectories: staleDynamicOutputs);
+                        staleOutputsUnderSharedOpaqueDirectories: staleDynamicOutputs,
+                        pluginManager: environment.PluginManager);
 
                     resourceScope.RegisterQueryRamUsageMb(
                         () =>
@@ -1776,6 +1798,7 @@ namespace BuildXL.Scheduler
                         start = DateTime.UtcNow;
                         result = await executor.RunAsync(innerResourceLimitCancellationTokenSource.Token, sandboxConnection: environment.SandboxConnection, sidebandWriter: sidebandWriter);
                         LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseRunningPip, DateTime.UtcNow.Subtract(start));
+                        staleDynamicOutputs = result.SharedDynamicDirectoryWriteAccesses;
                     }
 
                     if (result.PipProperties != null)
@@ -1808,14 +1831,19 @@ namespace BuildXL.Scheduler
                         }
                     }
 
-                    if (result.RetryInfo != null && result.RetryInfo.RetryReason == RetryReason.UserSpecifiedExitCode)
+                    if (result.RetryInfo?.RetryLocation == RetryLocation.DifferentWorker)
+                    {
+                        Logger.Log.PipProcessToBeRetriedOnDifferentWorker(operationContext,
+                            processDescription, result.RetryInfo.RetryReason.ToString());
+                    }
+
+                    if (result.RetryInfo?.RetryReason == RetryReason.UserSpecifiedExitCode)
                     {
                         Contract.Assert(remainingUserRetries > 0);
                         --remainingUserRetries;
                         LogUserSpecifiedExitCodeEvent(result, operationContext, context, pip, processDescription, remainingUserRetries);
 
                         userRetry = true;
-                        staleDynamicOutputs = result.SharedDynamicDirectoryWriteAccesses;
 
                         counters.AddToCounter(PipExecutorCounter.RetriedUserExecutionDuration, result.PrimaryProcessTimes.TotalWallClockTime);
                         counters.IncrementCounter(PipExecutorCounter.ProcessUserRetries);
@@ -1832,14 +1860,28 @@ namespace BuildXL.Scheduler
                                 LogRetryOnSameWorkerErrors(result.RetryInfo.RetryReason, operationContext, pip, processDescription);
                                 break;
                             }
-                            else // case: RetryLocation.Both
+                            else // Case: RetryLocation.Both
                             {
-                                // Retry on different worker after failing on the same worker to be added here
+                                Logger.Log.PipProcessToBeRetriedOnDifferentWorker(operationContext,
+                                    processDescription, result.RetryInfo.RetryReason.ToString());
+                                break;
                             }
                         }
                         else
                         {
+                            if (EngineEnvironmentSettings.DisableDetoursRetries && result.RetryInfo.RetryReason.IsDetoursRetrableFailure())
+                            {
+                                Logger.Log.DisabledDetoursRetry(operationContext, pip.SemiStableHash, processDescription, result.RetryInfo.RetryReason.ToString());
+                                break;
+                            }
+
                             --remainingInternalSandboxedProcessExecutionFailureRetries;
+
+                            Logger.Log.PipProcessToBeRetriedOnSameWorker(operationContext,
+                                InternalSandboxedProcessExecutionFailureRetryCountMax - remainingInternalSandboxedProcessExecutionFailureRetries,
+                                InternalSandboxedProcessExecutionFailureRetryCountMax,
+                                processDescription, result.RetryInfo.RetryReason.ToString());
+
                             counters.AddToCounter(PipExecutorCounter.RetriedInternalExecutionDuration, result.PrimaryProcessTimes.TotalWallClockTime);
 
                             if (!IncrementInternalErrorRetryCounters(result.RetryInfo.RetryReason, counters))
@@ -1859,7 +1901,7 @@ namespace BuildXL.Scheduler
 
                 if (result.Status == SandboxedProcessPipExecutionStatus.Canceled && resourceScope.CancellationReason.HasValue)
                 {
-                    result.RetryInfo = RetryInfo.RetryOnDifferentWorker(RetryReason.ResourceExhaustion);
+                    result.RetryInfo = RetryInfo.GetDefault(RetryReason.ResourceExhaustion);
 
                     counters.IncrementCounter(resourceScope.CancellationReason == ProcessResourceManager.ResourceScopeCancellationReason.ResourceLimits ?
                         PipExecutorCounter.ProcessRetriesDueToResourceLimits :
@@ -1901,7 +1943,7 @@ namespace BuildXL.Scheduler
 
         private static bool IncrementInternalErrorRetryCounters(RetryReason retryReason, CounterCollection<PipExecutorCounter> counters)
         {
-            // Retrun true to break the caller's loop
+            // Return true to break the caller's loop
             switch (retryReason)
             {
                 case RetryReason.OutputWithNoFileAccessFailed:
@@ -1914,6 +1956,10 @@ namespace BuildXL.Scheduler
 
                 case RetryReason.AzureWatsonExitCode:
                     counters.IncrementCounter(PipExecutorCounter.AzureWatsonExitCodeRetriesCount);
+                    return true;
+
+                case RetryReason.VmExecutionError:
+                    counters.IncrementCounter(PipExecutorCounter.VmExecutionRetriesCount);
                     return true;
             }
 
@@ -3239,7 +3285,7 @@ namespace BuildXL.Scheduler
             // The ordering of pip.DirectoryOutputs and metadata.DynamicOutputs is consistent.
 
             // The index of the first artifact corresponding to an opaque directory input
-            using (var poolFileList = Pools.GetFileArtifactList())
+            using (var poolFileList = Pools.GetFileArtifactWithAttributesList())
             {
                 var fileList = poolFileList.Instance;
                 for (int i = 0; i < pip.DirectoryOutputs.Length; i++)
@@ -3248,7 +3294,10 @@ namespace BuildXL.Scheduler
 
                     foreach (var dynamicOutputFileAndInfo in cacheHitData.DynamicDirectoryContents[i])
                     {
-                        fileList.Add(dynamicOutputFileAndInfo.fileArtifact);
+                        fileList.Add(FileArtifactWithAttributes.Create(
+                            dynamicOutputFileAndInfo.fileArtifact,
+                            FileExistence.Required,
+                            dynamicOutputFileAndInfo.fileMaterializationInfo.IsUndeclaredFileRewrite));
                     }
 
                     executionResult.ReportDirectoryOutput(pip.DirectoryOutputs[i], fileList);
@@ -3395,7 +3444,8 @@ namespace BuildXL.Scheduler
                     operationContext: operationContext,
                     filesToMaterialize: filesToMaterialize,
                     materializatingOutputs: true,
-                    isDeclaredProducer: pip.GetOutputs().Contains(file));
+                    isDeclaredProducer: pip.GetOutputs().Contains(file),
+                    isApiServerRequest: false);
 
             if (result != ArtifactMaterializationResult.Succeeded)
             {
@@ -3878,6 +3928,7 @@ namespace BuildXL.Scheduler
             FileAccessReportingContext fileAccessReportingContext,
             SortedReadOnlyArray<ObservedFileAccess, ObservedFileAccessExpandedPathComparer> observedFileAccesses,
             [CanBeNull] IReadOnlyDictionary<AbsolutePath, IReadOnlyCollection<FileArtifactWithAttributes>> sharedDynamicDirectoryWriteAccesses,
+            IReadOnlyCollection<AbsolutePath> createdDirectories,
             bool trackFileChanges = true)
         {
             Contract.Requires(environment != null);
@@ -3899,6 +3950,7 @@ namespace BuildXL.Scheduler
                 pip,
                 observedFileAccesses,
                 sharedDynamicDirectoryWriteAccesses,
+                createdDirectories,
                 trackFileChanges);
 
             LogInputAssertions(
@@ -4029,8 +4081,9 @@ namespace BuildXL.Scheduler
                     operationContext,
                     allHashes,
                     materialize: materializeToVerifyAvailability,
-                    onContentUnavailable: (i, s, f) => {
-                        onContentUnavailable?.Invoke(allHashes[i].fileArtifact);
+                    onContentUnavailable: (index, expectedHash, hashOnDiskIfAvailableOrNull, failure) =>
+                    {
+                        onContentUnavailable?.Invoke(allHashes[index].fileArtifact);
                     });
 
                 if (materializeToVerifyAvailability || !succeeded)
@@ -4134,26 +4187,26 @@ namespace BuildXL.Scheduler
             }
         }
 
-        private static bool CheckForAllowedJunctionProduction(AbsolutePath outputPath, OperationContext operationContext, string description, PathTable pathTable, ExecutionResult processExecutionResult)
+        private static bool CheckForAllowedReparsePointProduction(AbsolutePath outputPath, OperationContext operationContext, string description, PathTable pathTable, ExecutionResult processExecutionResult, IConfiguration configuration)
         {
             if (OperatingSystemHelper.IsUnixOS)
             {
                 return true;
             }
 
-            var pathstring = outputPath.ToString(pathTable);
-            var possibleReparsePointType = FileUtilities.TryGetReparsePointType(pathstring);
-            if (possibleReparsePointType.Succeeded && possibleReparsePointType.Result == ReparsePointType.MountPoint)
+            if (configuration.Sandbox.UnsafeSandboxConfiguration.IgnoreFullReparsePointResolving)
             {
-                // We don't support storing directory symlinks/junctions to the cache in Windows right now.
-                // We won't fail the pip
-                // We won't cache it either
-                Logger.Log.StorageJunctionInOutputDirectoryWarning(
-                    operationContext,
-                    description,
-                    pathstring);
-                processExecutionResult.MustBeConsideredPerpetuallyDirty = true;
-                return false;
+                var pathstring = outputPath.ToString(pathTable);
+                var possibleReparsePointType = FileUtilities.TryGetReparsePointType(pathstring);
+                if (possibleReparsePointType.Succeeded && possibleReparsePointType.Result == ReparsePointType.DirectorySymlink)
+                {
+                    // We don't support storing directory symlinks to the cache on Windows unless full reparse point resolving is enabled.
+                    // 1. We won't fail the pip!
+                    // 2. We won't cache it either!
+                    Logger.Log.StorageReparsePointInOutputDirectoryWarning(operationContext, description, pathstring);
+                    processExecutionResult.MustBeConsideredPerpetuallyDirty = true;
+                    return false;
+                }
             }
 
             return true;
@@ -4226,7 +4279,7 @@ namespace BuildXL.Scheduler
             using (var poolFileArtifactWithAttributesList = Pools.GetFileArtifactWithAttributesList())
             using (var poolAbsolutePathFileOutputDataMap = s_absolutePathFileOutputDataMapPool.GetInstance())
             using (var poolAbsolutePathFileArtifactWithAttributes = Pools.GetAbsolutePathFileArtifactWithAttributesMap())
-            using (var poolFileList = Pools.GetFileArtifactList())
+            using (var poolFileList = Pools.GetFileArtifactWithAttributesList())
             using (var poolAbsolutePathFileMaterializationInfoTuppleList = s_absolutePathFileMaterializationInfoTuppleListPool.GetInstance())
             using (var poolFileArtifactPossibleFileMaterializationInfoTaskMap = s_fileArtifactPossibleFileMaterializationInfoTaskMapPool.GetInstance())
             {
@@ -4252,7 +4305,7 @@ namespace BuildXL.Scheduler
                 {
                     FileOutputData.UpdateFileData(allOutputData, output.Path, OutputFlags.DeclaredFile);
 
-                    if (!CheckForAllowedJunctionProduction(output.Path, operationContext, description, pathTable, processExecutionResult))
+                    if (!CheckForAllowedReparsePointProduction(output.Path, operationContext, description, pathTable, processExecutionResult, environment.Configuration))
                     {
                         enableCaching = false;
                         continue;
@@ -4268,6 +4321,10 @@ namespace BuildXL.Scheduler
                     allOutputs.Add(output);
                 }
 
+                using var outputDirectoryDataWrapper = s_outputEnumerationDataPool.GetInstance();
+                var outputDirectoryData = outputDirectoryDataWrapper.Instance;
+                outputDirectoryData.Process = process;
+
                 // We need to discover dynamic outputs in the given opaque directories.
                 var fileList = poolFileList.Instance;
 
@@ -4282,17 +4339,19 @@ namespace BuildXL.Scheduler
                     // For the case of an opaque directory, the content is determined by scanning the file system
                     if (!directoryArtifact.IsSharedOpaque)
                     {
-                        var enumerationResult = environment.State.FileContentManager.EnumerateDynamicOutputDirectory(
+                        var enumerationResult = environment.State.FileContentManager.EnumerateAndTrackOutputDirectory(
                             directoryArtifact,
+                            outputDirectoryData,
                             handleFile: fileArtifact =>
                             {
-                                if (!CheckForAllowedJunctionProduction(fileArtifact.Path, operationContext, description, pathTable, processExecutionResult))
+                                if (!CheckForAllowedReparsePointProduction(fileArtifact.Path, operationContext, description, pathTable, processExecutionResult, environment.Configuration))
                                 {
                                     enableCaching = false;
                                     return;
                                 }
 
-                                fileList.Add(fileArtifact);
+                                // Files under an exclusive opaques are always considered required outputs
+                                fileList.Add(FileArtifactWithAttributes.Create(fileArtifact, FileExistence.Required));
                                 FileOutputData.UpdateFileData(allOutputData, fileArtifact.Path, OutputFlags.DynamicFile, index);
                                 var fileArtifactWithAttributes = fileArtifact.WithAttributes(FileExistence.Required);
                                 allOutputs.Add(fileArtifactWithAttributes);
@@ -4328,14 +4387,21 @@ namespace BuildXL.Scheduler
 
                         foreach (var access in accesses)
                         {
-                            fileList.Add(access.ToFileArtifact());
-                            FileOutputData.UpdateFileData(allOutputData, access.Path, OutputFlags.DynamicFile, index);
-
-                            allOutputs.Add(access);
-
-                            if (sharedOutputDirectoriesAreRedirected)
+                            if (!CheckForAllowedReparsePointProduction(access.Path, operationContext, description, pathTable, processExecutionResult, environment.Configuration))
                             {
-                                PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, access, allRedirectedOutputs);
+                                enableCaching = false;
+                            }
+                            else
+                            {
+                                fileList.Add(access);
+                                FileOutputData.UpdateFileData(allOutputData, access.Path, OutputFlags.DynamicFile, index);
+
+                                allOutputs.Add(access);
+
+                                if (sharedOutputDirectoriesAreRedirected)
+                                {
+                                    PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, access, allRedirectedOutputs);
+                                }
                             }
                         }
                     }
@@ -4640,21 +4706,22 @@ namespace BuildXL.Scheduler
                     !isRewrittenOutputFile;
 
                 var reparsePointType = FileUtilities.TryGetReparsePointType(outputArtifact.Path.ToString(environment.Context.PathTable));
-                bool isSymlink = reparsePointType.Succeeded && FileUtilities.IsReparsePointSymbolicLink(reparsePointType.Result);
+                bool isReparsePoint = reparsePointType.Succeeded && FileUtilities.IsReparsePointActionable(reparsePointType.Result);
 
                 bool shouldStoreOutputToCache =
-                    ((environment.Configuration.Schedule.StoreOutputsToCache && !shouldOutputBePreserved) ||
-                    isRewrittenOutputFile)
-                    && !isSymlink;
+                    ((environment.Configuration.Schedule.StoreOutputsToCache && !shouldOutputBePreserved) || isRewrittenOutputFile)
+                    && !isReparsePoint;
 
                 Possible<TrackedFileContentInfo> possiblyStoredOutputArtifact = shouldStoreOutputToCache
-                    ? await StoreProcessOutputToCacheAsync(operationContext, environment, process, outputArtifact, isSymlink)
+                    ? await StoreProcessOutputToCacheAsync(operationContext, environment, process, outputArtifact, output.IsUndeclaredFileRewrite, isReparsePoint)
                     : await TrackPipOutputAsync(
                         operationContext,
                         environment,
                         outputArtifact,
-                        environment.ShouldCreateHandleWithSequentialScan(outputArtifact),
-                        isSymlink);
+                        createHandleWithSequentialScan: environment.ShouldCreateHandleWithSequentialScan(outputArtifact),
+                        isReparsePoint: isReparsePoint,
+                        shouldOutputBePreserved: shouldOutputBePreserved,
+                        isUndeclaredFileRewrite: output.IsUndeclaredFileRewrite);
 
                 if (!possiblyStoredOutputArtifact.Succeeded)
                 {
@@ -5051,7 +5118,8 @@ namespace BuildXL.Scheduler
             IPipExecutionEnvironment environment,
             Process process,
             FileArtifact outputFileArtifact,
-            bool isSymlink = false)
+            bool isUndeclaredFileRewrite,
+            bool isReparsePoint = false)
         {
             Contract.Requires(environment != null);
             Contract.Requires(process != null);
@@ -5061,10 +5129,11 @@ namespace BuildXL.Scheduler
                 await
                     environment.LocalDiskContentStore.TryStoreAsync(
                         environment.Cache.ArtifactContentCache,
-                        GetFileRealizationMode(environment, process),
+                        GetFileRealizationMode(environment, process, isUndeclaredFileRewrite),
                         outputFileArtifact.Path,
                         tryFlushPageCacheToFileSystem: environment.Configuration.Sandbox.FlushPageCacheToFileSystemOnStoringOutputsToCache,
-                        isSymlink: isSymlink);
+                        isReparsePoint: isReparsePoint,
+                        isUndeclaredFileRewrite: isUndeclaredFileRewrite);
 
             if (!possiblyStored.Succeeded)
             {
@@ -5082,14 +5151,16 @@ namespace BuildXL.Scheduler
             IPipExecutionEnvironment environment,
             FileArtifact outputFileArtifact,
             bool createHandleWithSequentialScan = false,
-            bool isSymlink = false)
+            bool isReparsePoint = false,
+            bool shouldOutputBePreserved = false,
+            bool isUndeclaredFileRewrite = false)
         {
             Contract.Requires(environment != null);
             Contract.Requires(outputFileArtifact.IsOutputFile);
             // we cannot simply track rewritten files, we have to store them into cache
             // it's fine to just track rewritten symlinks though (all data required for
             // proper symlink materialization will be a part of cache metadata)
-            Contract.Requires(isSymlink || !IsRewriteOutputFile(environment, outputFileArtifact));
+            Contract.Requires(isReparsePoint || !IsRewriteOutputFile(environment, outputFileArtifact));
 
             var possiblyTracked = await environment.LocalDiskContentStore.TryTrackAsync(
                 outputFileArtifact,
@@ -5097,10 +5168,11 @@ namespace BuildXL.Scheduler
                 // In tracking file, LocalDiskContentStore will call TryDiscoverAsync to compute the content hash of the file.
                 // TryDiscoverAsync uses FileContentTable to avoid re-hashing the file if the hash is already in the FileContentTable.
                 // Moreover, FileContentTable can enable so-called path mapping optimization that allows one to avoid opening handles and by-passing checking
-                // of the USN. However, here we are tracking a produced output. Thus, the known content hash should be ignored.
-                ignoreKnownContentHashOnDiscoveringContent: true,
+                // of the USN. However, here we are tracking a produced output. Thus, the known content hash should be ignored, unless the output should be preserved.
+                ignoreKnownContentHashOnDiscoveringContent: !shouldOutputBePreserved,
                 createHandleWithSequentialScan: createHandleWithSequentialScan,
-                isSymlink: isSymlink);
+                isReparsePoint: isReparsePoint,
+                isUndeclaredFileRewrite: isUndeclaredFileRewrite);
 
             if (!possiblyTracked.Succeeded)
             {
@@ -5120,9 +5192,11 @@ namespace BuildXL.Scheduler
                 : FileRealizationMode.Copy;
         }
 
-        private static FileRealizationMode GetFileRealizationMode(IPipExecutionEnvironment environment, Process process)
+        private static FileRealizationMode GetFileRealizationMode(IPipExecutionEnvironment environment, Process process, bool isUndeclaredFileRewrite)
         {
-            return (environment.Configuration.Engine.UseHardlinks && !process.OutputsMustRemainWritable)
+            // Make sure we don't place hardlinks for undeclared file rewrites, since we want ot leave the rewrite writable
+            // for future builds
+            return (environment.Configuration.Engine.UseHardlinks && !process.OutputsMustRemainWritable && !isUndeclaredFileRewrite)
                 ? FileRealizationMode.HardLinkOrCopy // Prefers hardlinks, but will fall back to copying when creating a hard link fails. (e.g. >1023 links)
                 : FileRealizationMode.Copy;
         }

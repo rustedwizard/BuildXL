@@ -55,11 +55,10 @@ namespace BuildXL.Cache.MemoizationStore.Service
             ServiceClientContentSessionTracer sessionTracer,
             ServiceClientContentStoreConfiguration configuration)
         {
-            var rpcConfiguration = configuration.RpcConfiguration;
-            return new GrpcCacheClient(sessionTracer, fileSystem, rpcConfiguration.GrpcPort, configuration.Scenario, rpcConfiguration.HeartbeatInterval);
+            return new GrpcCacheClient(sessionTracer, fileSystem, configuration.RpcConfiguration, configuration.Scenario);
         }
 
-        private Task<TResult> PerformOperationAsync<TResult>(Context context, CancellationToken cts, Func<OperationContext, GrpcCacheClient, Task<TResult>> func, [CallerMemberName]string caller = null, Counter? counter = null, Counter? retryCounter = null, bool traceErrorsOnly = false, string additionalStopMessage = null) where TResult : ResultBase
+        private Task<TResult> PerformOperationAsync<TResult>(Context context, CancellationToken cts, Func<OperationContext, GrpcCacheClient, Task<TResult>> func, [CallerMemberName]string caller = null, Counter? counter = null, Counter? retryCounter = null, bool traceErrorsOnly = false, string additionalStopMessage = null, string additionalStartMessage = null) where TResult : ResultBase
         {
             return WithOperationContext(context, cts,
                 operationContext =>
@@ -72,7 +71,8 @@ namespace BuildXL.Cache.MemoizationStore.Service
                                 retryCounter: retryCounter),
                         caller: caller,
                         counter: counter,
-                        traceOperationStarted: false,
+                        traceOperationStarted: TraceOperationStarted,
+                        extraStartMessage: additionalStartMessage,
                         traceErrorsOnly: traceErrorsOnly,
                         extraEndMessage: additionalStopMessage == null ? (Func<TResult, string>)null : _ => additionalStopMessage);
                 });
@@ -81,12 +81,15 @@ namespace BuildXL.Cache.MemoizationStore.Service
         /// <inheritdoc />
         public Task<AddOrGetContentHashListResult> AddOrGetContentHashListAsync(Context context, StrongFingerprint strongFingerprint, ContentHashListWithDeterminism contentHashListWithDeterminism, CancellationToken cts, UrgencyHint urgencyHint = UrgencyHint.Nominal)
         {
+            var contentHashes = contentHashListWithDeterminism.ContentHashList.Hashes;
             return PerformOperationAsync(
                 context,
                 cts,
                 (ctx, client) => client.AddOrGetContentHashListAsync(ctx, strongFingerprint, contentHashListWithDeterminism),
                 counter: _memoizationCounters[MemoizationStoreCounters.AddOrGetContentHashList],
-                retryCounter: _memoizationCounters[MemoizationStoreCounters.AddOrGetContentHashListRetries]);
+                retryCounter: _memoizationCounters[MemoizationStoreCounters.AddOrGetContentHashListRetries],
+                additionalStartMessage: $"StrongFingerprint=({strongFingerprint}) {contentHashListWithDeterminism.ToTraceString()}",
+                additionalStopMessage: $"StrongFingerprint=({strongFingerprint}) {contentHashListWithDeterminism.ToTraceString()}");
         }
 
         /// <inheritdoc />
@@ -97,7 +100,9 @@ namespace BuildXL.Cache.MemoizationStore.Service
                 cts,
                 (ctx, client) => client.GetContentHashListAsync(ctx, strongFingerprint),
                 counter: _memoizationCounters[MemoizationStoreCounters.GetContentHashList],
-                retryCounter: _memoizationCounters[MemoizationStoreCounters.GetContentHashListRetries]);
+                retryCounter: _memoizationCounters[MemoizationStoreCounters.GetContentHashListRetries],
+                additionalStartMessage: $"StrongFingerprint=({strongFingerprint})",
+                additionalStopMessage: $"StrongFingerprint=({strongFingerprint})");
         }
 
         /// <inheritdoc />

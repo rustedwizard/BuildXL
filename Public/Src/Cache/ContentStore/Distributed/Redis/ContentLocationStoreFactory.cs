@@ -109,7 +109,25 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
                 RedisDatabaseFactoryForRedisGlobalStoreSecondary,
                 "secondaryRedisDatabase",
                 optional: true);
-            IGlobalLocationStore globalStore = new RedisGlobalStore(Clock, Configuration, redisDatabaseForGlobalStore, secondaryRedisDatabaseForGlobalStore);
+
+            RedisDatabaseAdapter? redisBlobDatabase;
+            RedisDatabaseAdapter? secondaryRedisBlobDatabase;
+            if (Configuration.UseSeparateConnectionForRedisBlobs)
+            {
+                // To prevent blob opoerations from blocking other operations, create a separate connections for them.
+                redisBlobDatabase = CreateDatabase(RedisDatabaseFactoryForRedisGlobalStore, "primaryRedisBlobDatabase");
+                secondaryRedisBlobDatabase = CreateDatabase(
+                    RedisDatabaseFactoryForRedisGlobalStoreSecondary,
+                    "secondaryRedisBlobDatabase",
+                    optional: true);
+            }
+            else
+            {
+                redisBlobDatabase = redisDatabaseForGlobalStore;
+                secondaryRedisBlobDatabase = secondaryRedisDatabaseForGlobalStore;
+            }
+
+            IGlobalLocationStore globalStore = new RedisGlobalStore(Clock, Configuration, redisDatabaseForGlobalStore, secondaryRedisDatabaseForGlobalStore, redisBlobDatabase, secondaryRedisBlobDatabase);
             return globalStore;
         }
 
@@ -121,10 +139,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
                     KeySpace,
                     Configuration.RedisConnectionErrorLimit,
                     Configuration.RedisReconnectionLimitBeforeServiceRestart,
-                    traceOperationFailures: Configuration.TraceRedisFailures,
-                    traceTransientFailures: Configuration.TraceRedisTransientFailures,
                     databaseName: databaseName,
-                    minReconnectInterval: Configuration.MinRedisReconnectInterval);
+                    minReconnectInterval: Configuration.MinRedisReconnectInterval,
+                    cancelBatchWhenMultiplexerIsClosed: Configuration.CancelBatchWhenMultiplexerIsClosed,
+                    treatObjectDisposedExceptionAsTransient: Configuration.TreatObjectDisposedExceptionAsTransient,
+                    operationTimeout: Configuration.OperationTimeout,
+                    exponentialBackoffConfiguration: Configuration.ExponentialBackoffConfiguration,
+                    retryCount: Configuration.RetryCount);
 
                 return new RedisDatabaseAdapter(factory, adapterConfiguration);
             }
@@ -143,14 +164,16 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
             RedisDatabaseFactoryForRedisGlobalStore = await RedisDatabaseFactory.CreateAsync(
                 context,
                 new LiteralConnectionStringProvider(Configuration.RedisGlobalStoreConnectionString),
-                logSeverity: Configuration.RedisInternalLogSeverity ?? Severity.Unknown);
+                logSeverity: Configuration.RedisInternalLogSeverity ?? Severity.Unknown,
+                usePreventThreadTheft: Configuration.UsePreventThreadTheftFeature);
 
             if (Configuration.RedisGlobalStoreSecondaryConnectionString != null)
             {
                 RedisDatabaseFactoryForRedisGlobalStoreSecondary = await RedisDatabaseFactory.CreateAsync(
                     context,
                     new LiteralConnectionStringProvider(Configuration.RedisGlobalStoreSecondaryConnectionString),
-                    logSeverity: Configuration.RedisInternalLogSeverity ?? Severity.Unknown);
+                    logSeverity: Configuration.RedisInternalLogSeverity ?? Severity.Unknown,
+                    usePreventThreadTheft: Configuration.UsePreventThreadTheftFeature);
             }
 
             return BoolResult.Success;

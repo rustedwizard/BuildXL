@@ -33,7 +33,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "ArtifactServices.App.Shared",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -42,7 +42,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "ArtifactServices.App.Shared.Cache",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -52,6 +52,33 @@
         "NuGet": {
           "Name": "AsyncFixer",
           "Version": "1.3.0"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Azure.Core",
+          "Version": "1.3.0"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Azure.Identity",
+          "Version": "1.1.1"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Azure.Security.KeyVault.Secrets",
+          "Version": "4.0.3"
         }
       }
     },
@@ -132,7 +159,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "CB.QTest",
-          "Version": "20.7.17.160336"
+          "Version": "20.10.9.160907"
         }
       }
     },
@@ -167,15 +194,6 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
-          "Name": "Desktop.Analyzers",
-          "Version": "1.1.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
           "Name": "DotNet.Glob",
           "Version": "2.0.3"
         }
@@ -186,7 +204,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Drop.App.Core",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -195,16 +213,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Drop.Client",
-          "Version": "18.171.30210-buildid12336404"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "EntityFramework",
-          "Version": "6.0.0"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -221,35 +230,8 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
-          "Name": "EnvDTE100",
-          "Version": "10.0.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
           "Name": "EnvDTE80",
           "Version": "8.0.3"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "EnvDTE90",
-          "Version": "9.0.3"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "EnvDTE90a",
-          "Version": "9.0.3"
         }
       }
     },
@@ -266,8 +248,26 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
+          "Name": "FSharp.Core",
+          "Version": "4.2.3"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
           "Name": "FluentAssertions",
           "Version": "5.3.0"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "FsCheck",
+          "Version": "2.14.3"
         }
       }
     },
@@ -285,7 +285,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Google.Protobuf",
-          "Version": "3.11.2"
+          "Version": "3.13.0"
         }
       }
     },
@@ -294,7 +294,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Google.Protobuf.Tools",
-          "Version": "3.11.2"
+          "Version": "3.13.0"
         }
       }
     },
@@ -303,7 +303,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Core",
-          "Version": "2.26.0"
+          "Version": "2.32.0"
         }
       }
     },
@@ -312,7 +312,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Core.Api",
-          "Version": "2.26.0"
+          "Version": "2.32.0"
         }
       }
     },
@@ -321,7 +321,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Net.Client",
-          "Version": "2.26.0"
+          "Version": "2.32.0"
         }
       }
     },
@@ -330,7 +330,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Net.Common",
-          "Version": "2.26.0"
+          "Version": "2.32.0"
         }
       }
     },
@@ -339,7 +339,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Grpc.Tools",
-          "Version": "2.26.0"
+          "Version": "2.32.0"
         }
       }
     },
@@ -366,7 +366,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "ItemStore.Shared",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -376,15 +376,6 @@
         "NuGet": {
           "Name": "JsonDiffPatch.Net",
           "Version": "2.1.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "Microsoft.AnalyzerPowerPack",
-          "Version": "1.0.1"
         }
       }
     },
@@ -475,6 +466,24 @@
         "NuGet": {
           "Name": "Microsoft.AspNetCore.App.Ref",
           "Version": "3.1.3"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.AspNetCore.App.Runtime.linux-x64",
+          "Version": "3.1.5"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.AspNetCore.App.Runtime.osx-x64",
+          "Version": "3.1.5"
         }
       }
     },
@@ -1049,15 +1058,6 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
-          "Name": "Microsoft.CodeAnalysis.VisualBasic.Workspaces",
-          "Version": "3.5.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
           "Name": "Microsoft.CodeAnalysis.Workspaces.Common",
           "Version": "3.5.0"
         }
@@ -1087,24 +1087,6 @@
         "NuGet": {
           "Name": "Microsoft.Composition",
           "Version": "1.0.30"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "Microsoft.Data.Edm",
-          "Version": "5.8.2"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "Microsoft.Data.OData",
-          "Version": "5.8.4"
         }
       }
     },
@@ -1256,6 +1238,15 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
+          "Name": "Microsoft.Identity.Client",
+          "Version": "4.16.1"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
           "Name": "Microsoft.IdentityModel.Clients.ActiveDirectory",
           "Version": "5.2.6"
         }
@@ -1365,15 +1356,6 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.NETCore.DotNetAppHost",
-          "Version": "2.2.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "Microsoft.NETCore.DotNetAppHost",
           "Version": "3.1.0"
         }
       }
@@ -1384,15 +1366,6 @@
         "NuGet": {
           "Name": "Microsoft.NETCore.DotNetHostPolicy",
           "Version": "3.1.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "Microsoft.NETCore.DotNetHostResolver",
-          "Version": "2.2.0"
         }
       }
     },
@@ -1420,15 +1393,6 @@
         "NuGet": {
           "Name": "Microsoft.NETCore.Targets",
           "Version": "2.0.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "Microsoft.NETCore.Windows.ApiSets",
-          "Version": "1.0.1"
         }
       }
     },
@@ -1716,7 +1680,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.VisualStudio.Services.ArtifactServices.Shared",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -1725,7 +1689,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.VisualStudio.Services.BlobStore.Client",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -1734,7 +1698,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.VisualStudio.Services.BlobStore.Client.Cache",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -1743,7 +1707,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.VisualStudio.Services.Client",
-          "Version": "16.171.0-internal202006103"
+          "Version": "16.174.0-internal202008065"
         }
       }
     },
@@ -1752,7 +1716,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.VisualStudio.Services.InteractiveClient",
-          "Version": "16.171.0-internal202006103"
+          "Version": "16.174.0-internal202008065"
         }
       }
     },
@@ -2111,15 +2075,6 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
-          "Name": "NodeJs",
-          "Version": "13.3.0-noTest"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
           "Name": "Npm.OnCloudBuild",
           "Version": "3.1.0"
         }
@@ -2265,7 +2220,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Symbol.App.Core",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -2274,7 +2229,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Symbol.Client",
-          "Version": "18.171.30210-buildid12336404"
+          "Version": "18.174.30406-buildid12785353"
         }
       }
     },
@@ -2742,7 +2697,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "System.IO.Pipelines",
-          "Version": "4.7.0"
+          "Version": "4.7.2"
         }
       }
     },
@@ -3543,7 +3498,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "System.Threading.Tasks.Extensions",
-          "Version": "4.5.2"
+          "Version": "4.5.4"
         }
       }
     },
@@ -3686,80 +3641,8 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
-          "Name": "VSLangProj100",
-          "Version": "10.0.30320"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "VSLangProj110",
-          "Version": "11.0.61031"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "VSLangProj140",
-          "Version": "14.0.25030"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "VSLangProj150",
-          "Version": "15.0.26229"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "VSLangProj157",
-          "Version": "15.7.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "VSLangProj158",
-          "Version": "15.8.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
           "Name": "VSLangProj2",
           "Version": "7.0.5001"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "VSLangProj80",
-          "Version": "8.0.50728"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "VSLangProj90",
-          "Version": "9.0.30730"
         }
       }
     },
@@ -3840,7 +3723,7 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "runtime.linux-x64.BuildXL",
-          "Version": "0.0.31"
+          "Version": "0.0.41"
         }
       }
     },
@@ -3965,35 +3848,8 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
-          "Name": "runtime.osx-x64.Microsoft.NETCore.DotNetAppHost",
-          "Version": "2.2.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "runtime.osx-x64.Microsoft.NETCore.DotNetHostPolicy",
-          "Version": "2.2.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
           "Name": "runtime.osx-x64.Microsoft.NETCore.DotNetHostPolicy",
           "Version": "3.1.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "runtime.osx-x64.Microsoft.NETCore.DotNetHostResolver",
-          "Version": "2.2.0"
         }
       }
     },
@@ -4073,35 +3929,8 @@
       "Component": {
         "Type": "NuGet",
         "NuGet": {
-          "Name": "runtime.win-x64.Microsoft.NETCore.DotNetAppHost",
-          "Version": "2.2.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy",
-          "Version": "2.2.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
           "Name": "runtime.win-x64.Microsoft.NETCore.DotNetHostPolicy",
           "Version": "3.1.0"
-        }
-      }
-    },
-    {
-      "Component": {
-        "Type": "NuGet",
-        "NuGet": {
-          "Name": "runtime.win-x64.Microsoft.NETCore.DotNetHostResolver",
-          "Version": "2.2.0"
         }
       }
     },

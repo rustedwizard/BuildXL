@@ -50,7 +50,7 @@ namespace BuildXL.FrontEnd.Core
     public sealed partial class FrontEndHostController : FrontEndHost, IFrontEndController
     {
         private Workspace m_buildIsCancelledWorkspace;
-        private readonly ConcurrentDictionary<string, int> m_frontEndPaths = new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, int> m_frontEndPaths = new ConcurrentDictionary<string, int>(OperatingSystemHelper.PathComparer);
         private IInternalDefaultDScriptResolverSettings m_defaultDScriptResolverSettings;
         private readonly CycleDetectorStatistics m_cycleDetectorStatistics;
 
@@ -380,14 +380,6 @@ namespace BuildXL.FrontEnd.Core
 
                     statistics.ResolverCount = success ? m_resolvers.Length : 0;
                     
-                    // Get a stable list of the different kind of resolvers used in this build
-                    IEnumerable<string> kinds = (configuration.Resolvers ?? CollectionUtilities.EmptyArray<IResolverSettings>())
-                        .Select(resolver => resolver.Kind)
-                        .Distinct(StringComparer.Ordinal)
-                        .OrderBy(kind => kind, StringComparer.Ordinal);
-                    
-                    statistics.ResolverKinds = string.Join(";", kinds);
-
                     return success;
                 }))
             {
@@ -1356,7 +1348,7 @@ namespace BuildXL.FrontEnd.Core
         private async Task<bool> EvaluateModulesAsync(QualifierId[] qualifierIds, IReadOnlyList<ModuleDefinition> modulesToEvaluate)
         {
             // Register the meta pips for the modules and the specs with the graph
-            RegisterModuleAndSpecPips(Workspace);
+            RegisterModuleAndSpecPips();
 
             if (FrontEndConfiguration.ReleaseWorkspaceBeforeEvaluation)
             {
@@ -1406,8 +1398,9 @@ namespace BuildXL.FrontEnd.Core
         /// <remarks>
         /// This should be called on the 'filtered down' modules for evaluation.
         /// </remarks>
-        private void RegisterModuleAndSpecPips(Workspace  workspace)
+        private void RegisterModuleAndSpecPips()
         {
+            var workspace = Workspace;
             if (PipGraph != null)
             {
                 foreach (var module in workspace.Modules)

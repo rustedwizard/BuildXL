@@ -82,7 +82,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             context = context.CreateNested(nameof(CheckpointManager));
 
             string checkpointId = "Unknown";
-            long checkpointSize = 0;
+            double contentColumnFamilySizeMb = -1;
+            double contentDataSizeMb = -1;
+            double metadataColumnFamilySizeMb = -1;
+            double metadataDataSizeMb = -1;
+            double sizeOnDiskMb = -1;
             return context.PerformOperationAsync(
                 _tracer,
                 async () =>
@@ -98,16 +102,43 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                             // between the reported value and the actual size on disk: updates will get in in-between.
                             // The better alternative is to actually open the checkpoint and ask, but it seems like too
                             // much.
-                            checkpointSize = _database.GetContentDatabaseSizeBytes().GetValueOrDefault(-1);
+                            if (_database is RocksDbContentLocationDatabase rocksDb)
+                            {
+                                contentColumnFamilySizeMb = rocksDb.GetLongProperty(
+                                    RocksDbContentLocationDatabase.LongProperty.LiveFilesSizeBytes,
+                                    RocksDbContentLocationDatabase.Entity.ContentTracking).Select(x => x * 1e-6).GetValueOrDefault(-1);
 
+                                contentDataSizeMb = rocksDb.GetLongProperty(
+                                    RocksDbContentLocationDatabase.LongProperty.LiveDataSizeBytes,
+                                    RocksDbContentLocationDatabase.Entity.ContentTracking).Select(x => x * 1e-6).GetValueOrDefault(-1);
+
+                                metadataColumnFamilySizeMb = rocksDb.GetLongProperty(
+                                    RocksDbContentLocationDatabase.LongProperty.LiveFilesSizeBytes,
+                                    RocksDbContentLocationDatabase.Entity.Metadata).Select(x => x * 1e-6).GetValueOrDefault(-1);
+
+                                metadataDataSizeMb = rocksDb.GetLongProperty(
+                                    RocksDbContentLocationDatabase.LongProperty.LiveDataSizeBytes,
+                                    RocksDbContentLocationDatabase.Entity.Metadata).Select(x => x * 1e-6).GetValueOrDefault(-1);
+                            }
 
                             // Saving checkpoint for the database into the temporary folder
                             _database.SaveCheckpoint(context, _checkpointStagingDirectory).ThrowIfFailure();
 
+                            try
+                            {
+                                sizeOnDiskMb = _fileSystem
+                                    .EnumerateFiles(_checkpointStagingDirectory, EnumerateOptions.Recurse)
+                                    .Sum(fileInfo => fileInfo.Length) * 1e-6;
+                            }
+                            catch (IOException e)
+                            {
+                                _tracer.Error(context, $"Error counting size of checkpoint's staging directory `{_checkpointStagingDirectory}`: {e}");
+                            }
+
                             if (_configuration.UseIncrementalCheckpointing)
                             {
-                                 checkpointId = await CreateCheckpointIncrementalAsync(context, sequencePoint);
-                                 successfullyUpdatedIncrementalState = true;
+                                checkpointId = await CreateCheckpointIncrementalAsync(context, sequencePoint);
+                                successfullyUpdatedIncrementalState = true;
                             }
                             else
                             {
@@ -123,7 +154,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     }
                 },
                 extraStartMessage: $"SequencePoint=[{sequencePoint}]",
-                extraEndMessage: result => $"SequencePoint=[{sequencePoint}] Id=[{checkpointId}] SizeMb=[{(checkpointSize < 0 ? checkpointSize:checkpointSize*1e-6)}]");
+                extraEndMessage: result => $"SequencePoint=[{sequencePoint}] Id=[{checkpointId}] SizeMb=[{sizeOnDiskMb}] ContentColumnFamilySizeMb=[{contentColumnFamilySizeMb}] ContentDataSizeMb=[{contentDataSizeMb}] MetadataColumnFamilySizeMb=[{metadataColumnFamilySizeMb}] MetadataDataSizeMb=[{metadataDataSizeMb}]");
         }
 
         private async Task<string> CreateFullCheckpointAsync(OperationContext context, EventSequencePoint sequencePoint)
@@ -323,9 +354,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             context = context.CreateNested(nameof(CheckpointManager));
             var checkpointId = checkpointState.CheckpointId;
-            return context.PerformOperationAsync(
+            return context.PerformOperationWithTimeoutAsync(
                 _tracer,
-                async () =>
+                async nestedContext =>
                 {
                     bool successfullyUpdatedIncrementalState = false;
                     try
@@ -350,11 +381,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         using (new DisposableDirectory(_fileSystem, _checkpointStagingDirectory))
                         {
                             // Getting the checkpoint from the central store
-                            await _storage.TryGetFileAsync(context, checkpointId, checkpointFile, isImmutable: true).ThrowIfFailure();
+                            await _storage.TryGetFileAsync(nestedContext, checkpointId, checkpointFile, isImmutable: true).ThrowIfFailure();
 
                             if (isIncrementalCheckpoint)
                             {
-                                var incrementalRestoreResult = await RestoreCheckpointIncrementalAsync(context, checkpointFile, extractedCheckpointDirectory);
+                                var incrementalRestoreResult = await RestoreCheckpointIncrementalAsync(nestedContext, checkpointFile, extractedCheckpointDirectory);
                                 incrementalRestoreResult.ThrowIfFailure();
                             }
                             else
@@ -363,10 +394,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                             }
 
                             // Restoring the checkpoint
-                            _database.RestoreCheckpoint(context, extractedCheckpointDirectory).ThrowIfFailure();
+                            _database.RestoreCheckpoint(nestedContext, extractedCheckpointDirectory).ThrowIfFailure();
 
                             // Save latest checkpoint info to file in case we get restarded and want to know about the previous checkpoint.
-                            WriteLatestCheckpoint(context, checkpointState);
+                            WriteLatestCheckpoint(nestedContext, checkpointState);
 
                             successfullyUpdatedIncrementalState = true;
                             return BoolResult.Success;
@@ -374,11 +405,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     }
                     finally
                     {
-                        ClearIncrementalCheckpointStateIfNeeded(context, successfullyUpdatedIncrementalState);
+                        ClearIncrementalCheckpointStateIfNeeded(nestedContext, successfullyUpdatedIncrementalState);
                     }
                 },
                 extraStartMessage: $"CheckpointId=[{checkpointId}]",
-                extraEndMessage: _ => $"CheckpointId=[{checkpointId}]");
+                extraEndMessage: _ => $"CheckpointId=[{checkpointId}]",
+                timeout: _configuration.RestoreCheckpointTimeout);
         }
 
         private void WriteLatestCheckpoint(OperationContext context, CheckpointState? checkpointState)

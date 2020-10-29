@@ -293,7 +293,10 @@ namespace BuildXL.Native.IO
         /// </summary>
         /// <param name="junctionPoint">Junction name.</param>
         /// <param name="targetDir">Target directory.</param>
-        void CreateJunction(string junctionPoint, string targetDir);
+        /// <param name="createDirectoryForJunction">If a directory should be created for the junction or the caller created one already.</param>
+        /// <param name="allowNonExistentTarget">If a junction can be created even if the target doesn't exist. This is possible, even though is not the 
+        /// behavior of mklink</param>
+        void CreateJunction(string junctionPoint, string targetDir, bool createDirectoryForJunction = true, bool allowNonExistentTarget = false);
 
         /// <summary>
         /// Tries to create a symbolic link
@@ -328,13 +331,6 @@ namespace BuildXL.Native.IO
         /// <param name="reparsePointType">The type of the reparse point.</param>
         /// <returns>true if this is an actionable reparse point, otherwise false.</returns>
         bool IsReparsePointActionable(ReparsePointType reparsePointType);
-
-        /// <summary>
-        /// Returns whether the reparse point type is a symbolic link.
-        /// </summary>
-        /// <param name="reparsePointType">The type of the reparse point.</param>
-        /// <returns>true if this is an reparse point of symbolic link type, otherwise false.</returns>
-        bool IsReparsePointSymbolicLink(ReparsePointType reparsePointType);
 
         /// <summary>
         /// Returns <see cref="ReparsePointType"/> of a path.

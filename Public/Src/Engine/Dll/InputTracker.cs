@@ -114,12 +114,12 @@ namespace BuildXL.Engine
         private ConcurrentDictionary<string, ContentHash> m_unchangedPaths;
 
         private readonly FileContentTable m_fileContentTable;
-        private readonly ConcurrentDictionary<string, ContentHash> m_inputHashes = new ConcurrentDictionary<string, ContentHash>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, ContentHash> m_inputHashes = new ConcurrentDictionary<string, ContentHash>(OperatingSystemHelper.PathComparer);
         private readonly ConcurrentQueue<string> m_changedPaths;
         private readonly bool m_isChangePathSetComplete;
 
         private readonly ConcurrentDictionary<string, DirectoryMembershipTrackingFingerprint> m_directoryFingerprints =
-            new ConcurrentDictionary<string, DirectoryMembershipTrackingFingerprint>(StringComparer.OrdinalIgnoreCase);
+            new ConcurrentDictionary<string, DirectoryMembershipTrackingFingerprint>(OperatingSystemHelper.PathComparer);
 
         private bool m_allDirectoriesEnumerationsAccountedFor = true;
         private bool m_wasAnyDirectoryEnumerated;
@@ -326,7 +326,10 @@ namespace BuildXL.Engine
 
             if (members != null)
             {
-                possibleEnumResult = FileChangeTracker.TryTrackDirectoryMembership(directoryPath, members);
+                possibleEnumResult = FileChangeTracker.TryTrackDirectoryMembership(
+                    directoryPath,
+                    members,
+                    supersedeWithStrongIdentity: false /* enumeration only happens in sources, no need to supersede */);
             }
             else
             {
@@ -334,7 +337,9 @@ namespace BuildXL.Engine
                 // In future, this method will be responsible for enumeration as well.
                 possibleEnumResult = FileChangeTracker.TryEnumerateDirectoryAndTrackMembership(
                     directoryPath,
-                    (entryName, entryAttributes) => { });
+                    (entryName, entryAttributes) => { },
+                    shouldIncludeEntry: null /* include all entries */,
+                    supersedeWithStrongIdentity: false /* enumeration only happens in sources, no need to supersede */);
             }
 
             Possible<DirectoryMembershipTrackingFingerprint> possiblyDirectoryFingerprint;
@@ -376,7 +381,9 @@ namespace BuildXL.Engine
 
             var possibleEnumResult = tracker.TryEnumerateDirectoryAndTrackMembership(
                     directoryPath,
-                    (entryName, entryAttributes) => { });
+                    (entryName, entryAttributes) => { },
+                    shouldIncludeEntry: null /* include all entries */,
+                    supersedeWithStrongIdentity: false);
 
             if (possibleEnumResult.Succeeded)
             {
@@ -682,7 +689,7 @@ namespace BuildXL.Engine
                     envVarList.Add((reader.ReadString(), reader.ReadString()));
                 }
 
-                foreach (var envVar in envVarList.OrderBy(tuple => tuple.Item1, StringComparer.OrdinalIgnoreCase))
+                foreach (var envVar in envVarList.OrderBy(tuple => tuple.Item1, OperatingSystemHelper.EnvVarComparer))
                 {
                     writer.WriteLine(I($"\t - ({envVar.Item1}, {envVar.Item2})"));
                 }
@@ -706,7 +713,7 @@ namespace BuildXL.Engine
                 }
             }
 
-            writer.WriteLine(I($"Atomic save token: {FileEnvelopeId.Deserialize(reader).ToString()}"));
+            writer.WriteLine(I($"Atomic save token: {FileEnvelopeId.Deserialize(reader)}"));
 
             int inputHashCount = reader.ReadInt32();
 
@@ -720,9 +727,9 @@ namespace BuildXL.Engine
                     inputHashList.Add((reader.ReadString(), ContentHashingUtilities.CreateFrom(reader)));
                 }
 
-                foreach (var input in inputHashList.OrderBy(tuple => tuple.Item1, StringComparer.OrdinalIgnoreCase))
+                foreach (var input in inputHashList.OrderBy(tuple => tuple.Item1, OperatingSystemHelper.PathComparer))
                 {
-                    writer.WriteLine(I($"\t - {input.Item1}: {input.Item2.ToString()}"));
+                    writer.WriteLine(I($"\t - {input.Item1}: {input.Item2}"));
                 }
             }
 
@@ -738,9 +745,9 @@ namespace BuildXL.Engine
                     directoryHashList.Add((reader.ReadString(), ContentHashingUtilities.CreateFrom(reader)));
                 }
 
-                foreach (var input in directoryHashList.OrderBy(tuple => tuple.Item1, StringComparer.OrdinalIgnoreCase))
+                foreach (var input in directoryHashList.OrderBy(tuple => tuple.Item1, OperatingSystemHelper.PathComparer))
                 {
-                    writer.WriteLine(I($"\t - {input.Item1}: {input.Item2.ToString()}"));
+                    writer.WriteLine(I($"\t - {input.Item1}: {input.Item2}"));
                 }
             }
         }
@@ -930,7 +937,7 @@ namespace BuildXL.Engine
                 if (availableMountsByName.ContainsKey(mountName))
                 {
                     string currentPath = availableMountsByName[mountName].Path.ToString(availableMounts.MountPathExpander.PathTable);
-                    if (!previousPath.Equals(currentPath, StringComparison.OrdinalIgnoreCase))
+                    if (!previousPath.Equals(currentPath, OperatingSystemHelper.PathComparison))
                     {
                         result.MissType = GraphCacheMissReason.MountChanged;
                         result.FirstMissIdentifier = string.Format(
@@ -993,7 +1000,7 @@ namespace BuildXL.Engine
                 fileChangeTracker = FileChangeTracker.StartTrackingChanges(
                     loggingContext, 
                     journalState.VolumeMap, 
-                    journalState.Journal, 
+                    journalState.Journal,
                     graphFingerprint.ExactFingerprint.BuildEngineHash.ToString(),
                     atomicSaveToken); // Passing the save token ensure that the file change tracker is owned by (or correlated to) the input tracker.
             }
@@ -1164,7 +1171,7 @@ namespace BuildXL.Engine
 
             // upToDatePaths will hold paths that are tracked by the FileChangeTracker and have a known hash. These files need
             // not be tracked in the future as long as the same FileChangeTracker instance is used
-            ConcurrentDictionary<string, ContentHash> upToDatePaths = new ConcurrentDictionary<string, ContentHash>(StringComparer.OrdinalIgnoreCase);
+            ConcurrentDictionary<string, ContentHash> upToDatePaths = new ConcurrentDictionary<string, ContentHash>(OperatingSystemHelper.PathComparer);
 
             int reportedCount = 0;
             BlockingCollection<(string, ContentHash)> filesToCheck = new BlockingCollection<(string, ContentHash)>();

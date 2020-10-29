@@ -15,7 +15,6 @@ namespace BuildXL.Cache.ContentStore.Hashing
     public class DedupNodeOrChunkHashAlgorithm : HashAlgorithm, IHashAlgorithmInputLength, IHashAlgorithmBufferPool
     {
         private readonly List<ChunkInfo> _chunks = new List<ChunkInfo>();
-        private readonly DedupNodeTree.Algorithm _treeAlgorithm;
         private readonly IChunker _chunker;
         private readonly DedupChunkHashAlgorithm _chunkHasher = new DedupChunkHashAlgorithm();
         private IChunkerSession? _session;
@@ -23,24 +22,26 @@ namespace BuildXL.Cache.ContentStore.Hashing
         private bool _chunkingStarted;
         private long _bytesChunked;
         private DedupNode? _lastNode;
+        private const HashType NodeOrChunkTargetHashType = HashType.Dedup64K;
 
         /// <inheritdoc />
-        public override int HashSize => 8 * DedupNodeOrChunkHashInfo.Length;
+        public override int HashSize => 8 * DedupNode64KHashInfo.Length;
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="DedupNodeOrChunkHashAlgorithm"/> class.
+        /// GetHashType - retrieves the hash type configuration to use.
         /// </summary>
-        public DedupNodeOrChunkHashAlgorithm()
-            : this(DedupNodeTree.Algorithm.MaximallyPacked, Chunker.Create(ChunkerConfiguration.Default))
+        public virtual HashType DedupHashType => NodeOrChunkTargetHashType;
+
+        /// <nodoc />
+        public DedupNodeOrChunkHashAlgorithm() :
+            this(Chunker.Create(NodeOrChunkTargetHashType.GetChunkerConfiguration()))
         {
         }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="DedupNodeOrChunkHashAlgorithm"/> class.
-        /// </summary>
-        public DedupNodeOrChunkHashAlgorithm(DedupNodeTree.Algorithm treeAlgorithm, IChunker chunker)
+        /// <nodoc />
+        public DedupNodeOrChunkHashAlgorithm(IChunker chunker)
         {
-            _treeAlgorithm = treeAlgorithm;
+            if (!ChunkerConfiguration.IsValidChunkSize(chunker.Configuration)) {throw new NotImplementedException($"Unsupported chunk size specified: {chunker.Configuration.AvgChunkSize} in bytes.");}
             _chunker = chunker;
             Initialize();
         }
@@ -48,16 +49,13 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// <inheritdoc/>
         public void SetInputLength(long expectedSize)
         {
-            Contract.Assert(!_chunkingStarted);
-            Contract.Assert(expectedSize >= 0);
+            Contract.Check(!_chunkingStarted)?.Assert($"{nameof(SetInputLength)}: chunking cannot start before input length is set {nameof(_chunkingStarted)}: {_chunkingStarted}");
+            Contract.Check(expectedSize >= 0)?.Assert($"{nameof(SetInputLength)}: expected size cannot be negative {nameof(expectedSize)}: {expectedSize}");
             _sizeHint = expectedSize;
         }
 
         /// <inheritdoc/>
-        public Pool<byte[]>.PoolHandle GetBufferFromPool()
-        {
-            return _chunker.GetBufferFromPool();
-        }
+        public Pool<byte[]>.PoolHandle GetBufferFromPool() => _chunker.GetBufferFromPool();
 
         /// <summary>
         /// Creates a copy of the chunk list.
@@ -122,9 +120,9 @@ namespace BuildXL.Cache.ContentStore.Hashing
         {
             if (SingleChunkHotPath)
             {
-                Contract.Assert(_chunks.Count == 0);
-                Contract.Check(_bytesChunked == _sizeHint)?.Assert($"_bytesChunked != _sizeHint. _bytesChunked={_bytesChunked} _sizeHin={_sizeHint}");
-                Contract.Assert(_session == null);
+                Contract.Check(_chunks.Count == 0)?.Assert($"Chunk count: {_chunks.Count} sizehint: {_sizeHint} chunker min chunk size: {_chunker.Configuration.MinChunkSize}");
+                Contract.Check(_bytesChunked == _sizeHint)?.Assert($"_bytesChunked != _sizeHint. _bytesChunked={_bytesChunked} _sizeHint={_sizeHint}");
+                Contract.Assert(_session == null, "Dedup session cannot be null.");
                 byte[] chunkHash = _chunkHasher.HashFinalInternal();
                 return new DedupNode(DedupNode.NodeType.ChunkLeaf, (ulong)_sizeHint, chunkHash, 0);
             }
@@ -135,18 +133,18 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
                 if (_chunks.Count == 0)
                 {
-                    return new DedupNode(new ChunkInfo(0, 0, DedupChunkHashInfo.Instance.EmptyHash.ToHashByteArray()));
+                    return new DedupNode(new ChunkInfo(0, 0, DedupSingleChunkHashInfo.Instance.EmptyHash.ToHashByteArray()));
                 }
                 else if (_chunks.Count == 1)
                 {
                     // Content is small enough to track as a chunk.
                     var node = new DedupNode(_chunks.Single());
-                    Contract.Assert(node.Type == DedupNode.NodeType.ChunkLeaf);
+                    Contract.Check(node.Type == DedupNode.NodeType.ChunkLeaf)?.Assert($"{nameof(CreateNode)}: expected chunk leaf: {DedupNode.NodeType.ChunkLeaf} got {node.Type} instead.");
                     return node;
                 }
                 else
                 {
-                    return DedupNodeTree.Create(_chunks, _treeAlgorithm);
+                    return DedupNodeTree.Create(_chunks);
                 }
             }
         }
@@ -164,6 +162,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
         private void SaveChunks(ChunkInfo chunk)
         {
+            Contract.Check(chunk.Size != 0)?.Assert($"{nameof(SaveChunks)}: chunk size cannot be zero. Size: {chunk.Size}");
             _chunks.Add(chunk);
         }
 
@@ -184,7 +183,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
             }
             else
             {
-                result[bytes.Length] = NodeDedupIdentifier.NodeAlgorithmId;
+                result[bytes.Length] = (byte)ChunkerConfiguration.GetNodeAlgorithmId(_chunker.Configuration);
             }
 
             return result;

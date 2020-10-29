@@ -547,7 +547,7 @@ namespace BuildXL.FrontEnd.Core.Tracing
             EventLevel = Level.Error,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Parser,
-            Message = "Tool '{toolName}' failed to store file '{targetFilePath}' successfully in the cache with has '{contentHash}': {message}")]
+            Message = "Tool '{toolName}' failed to store file '{targetFilePath}' successfully in the cache with hash '{contentHash}': {message}")]
         public abstract void DownloadToolCannotCache(
             LoggingContext loggingContext,
             string toolName,
@@ -976,6 +976,33 @@ namespace BuildXL.FrontEnd.Core.Tracing
             Message = "Destruction cone (changed/affected/required/all specs): {numChanged}/{numAffected}/{numRequired}/{numAll}",
             Keywords = (int)Keywords.UserMessage)]
         public abstract void ReportDestructionCone(LoggingContext context, int numChanged, int numAffected, int numRequired, int numAll);
+        
+        [GeneratedEvent(
+            (ushort)LogEventId.FrontEndWorkspaceMemoryCollectionSkipped,
+            EventGenerators = EventGenerators.LocalAndTelemetry,
+            EventLevel = Level.Verbose,
+            EventTask = (ushort)Tasks.Parser,
+            Message = "Workspace memory collection skipped. {message}",
+            Keywords = (int)Keywords.UserMessage)]
+        public abstract void FrontEndWorkspaceMemoryCollectionSkipped(LoggingContext context, string message);
+        
+        [GeneratedEvent(
+            (ushort)LogEventId.FrontEndWorkspaceMemoryCollectedSuccessfully,
+            EventGenerators = EventGenerators.LocalAndTelemetry,
+            EventLevel = Level.Verbose,
+            EventTask = (ushort)Tasks.Parser,
+            Message = "Workspace memory collected successfully",
+            Keywords = (int)Keywords.UserMessage)]
+        public abstract void FrontEndWorkspaceMemoryCollectedSuccessfully(LoggingContext context);
+        
+        [GeneratedEvent(
+            (ushort)LogEventId.FrontEndWorkspaceMemoryNotCollected,
+            EventGenerators = EventGenerators.LocalAndTelemetry,
+            EventLevel = Level.Verbose,
+            EventTask = (ushort)Tasks.Parser,
+            Message = "Workspace memory was not collected successfully. This indicates a memory leak that drastically increase memory footprint during evaluation phase",
+            Keywords = (int)Keywords.UserMessage)]
+        public abstract void FrontEndWorkspaceMemoryNotCollected(LoggingContext context);
     }
 
     /// <summary>
@@ -1051,9 +1078,6 @@ namespace BuildXL.FrontEnd.Core.Tracing
 
         /// <nodoc />
         public long ResolverCount { get; set; }
-
-        /// <nodoc />
-        public string ResolverKinds { get; set; }
     }
 
     /// <summary>

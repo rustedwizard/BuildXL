@@ -439,6 +439,11 @@ namespace BuildXL.Scheduler.Distribution
         public int AcquiredProcessSlots => Volatile.Read(ref m_acquiredProcessSlots);
 
         /// <summary>
+        /// Gets the currently acquired postprocess slots
+        /// </summary>
+        public int AcquiredPostProcessSlots => Volatile.Read(ref m_acquiredPostProcessSlots);
+
+        /// <summary>
         /// Gets the currently acquired process slots
         /// </summary>
         public int AcquiredMaterializeInputSlots => Volatile.Read(ref m_acquiredMaterializeInputSlots);
@@ -555,7 +560,7 @@ namespace BuildXL.Scheduler.Distribution
         /// <summary>
         /// Try acquire given resources on the worker. This must be called from a thread-safe context to prevent race conditions.
         /// </summary>
-        internal bool TryAcquire(RunnablePip runnablePip, out WorkerResource? limitingResource, double loadFactor = 1)
+        internal bool TryAcquire(RunnablePip runnablePip, out WorkerResource? limitingResource, double loadFactor = 1, bool moduleAffinityEnabled = false)
         {
             Contract.Requires(runnablePip.PipType == PipType.Ipc || runnablePip.PipType == PipType.Process);
             Contract.Ensures(Contract.Result<bool>() == (limitingResource == null), "Must set a limiting resource when resources cannot be acquired");
@@ -575,10 +580,12 @@ namespace BuildXL.Scheduler.Distribution
                     return true;
                 }
 
-                if (IsLocal)
+                if (IsLocal && !moduleAffinityEnabled)
                 {
                     // Local worker does not use load factor as it may be down throttle by the
                     // scheduler in order to handle remote requests.
+                    // When ModuleAffinity is enabled, we want to oversubscribe the local worker as well
+                    // to prevent a new worker from adding to the list.
                     loadFactor = 1;
                 }
 
@@ -932,8 +939,7 @@ namespace BuildXL.Scheduler.Distribution
             {
                 // Only perform this operation for distributed master.
                 var pip = runnable.Pip;
-                var description = runnable.Description;
-                Logger.Log.DistributionExecutePipRequest(operationContext, pip.SemiStableHash, description, Name, runnable.Step.AsString());
+                Logger.Log.DistributionExecutePipRequest(operationContext, pip.FormattedSemiStableHash, Name, runnable.Step.AsString());
             }
 
             return scope;
@@ -952,10 +958,9 @@ namespace BuildXL.Scheduler.Distribution
 
             var operationContext = runnable.OperationContext;
             var pip = runnable.Pip;
-            var description = runnable.Description;
             var executionResult = runnable.ExecutionResult;
 
-            Logger.Log.DistributionFinishedPipRequest(operationContext, pip.SemiStableHash, description, Name, runnable.Step.AsString());
+            Logger.Log.DistributionFinishedPipRequest(operationContext, pip.FormattedSemiStableHash, Name, runnable.Step.AsString());
 
             if (executionResult == null)
             {
@@ -990,8 +995,7 @@ namespace BuildXL.Scheduler.Distribution
                     // may be changed due to cache convergence
                     Logger.Log.DistributionMasterWorkerProcessOutputContent(
                         operationContext,
-                        pip.SemiStableHash,
-                        description,
+                        pip.FormattedSemiStableHash,
                         outputFile.fileArtifact.Path.ToString(runnable.Environment.Context.PathTable),
                         outputFile.fileInfo.Hash.ToHex(),
                         outputFile.fileInfo.ReparsePointInfo.ToString(),

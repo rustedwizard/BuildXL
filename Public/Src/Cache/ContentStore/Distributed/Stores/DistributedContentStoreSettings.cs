@@ -5,11 +5,12 @@ using System;
 using System.Collections.Generic;
 using BuildXL.Cache.ContentStore.Distributed.Sessions;
 using BuildXL.Cache.ContentStore.Interfaces.Distributed;
+using BuildXL.Cache.ContentStore.Interfaces.Utils;
 
 namespace BuildXL.Cache.ContentStore.Distributed.Stores
 {
     /// <summary>
-    /// Configuration object for <see cref="DistributedContentCopier{T}"/> and <see cref="DistributedContentStore{T}"/> classes.
+    /// Configuration object for <see cref="DistributedContentCopier"/> and <see cref="DistributedContentStore"/> classes.
     /// </summary>
     public sealed class DistributedContentStoreSettings
     {
@@ -109,9 +110,19 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public int MaxConcurrentCopyOperations { get; set; } = 512;
 
         /// <summary>
+        /// Order for copies within the IO gate.
+        /// </summary>
+        public SemaphoreOrder OrderForCopies { get; set; } = SemaphoreOrder.NonDeterministic;
+
+        /// <summary>
         /// Maximum number of concurrent proactive copies.
         /// </summary>
         public int MaxConcurrentProactiveCopyOperations { get; set; } = 512;
+
+        /// <summary>
+        /// Order for proactive copies within the IO gate.
+        /// </summary>
+        public SemaphoreOrder OrderForProactiveCopies { get; set; } = SemaphoreOrder.NonDeterministic;
 
         /// <summary>
         /// Maximum number of files to copy locally in parallel for a given operation
@@ -122,6 +133,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// Delays for retries for file copies
         /// </summary>
         public IReadOnlyList<TimeSpan> RetryIntervalForCopies { get; set; } = CacheCopierDefaultRetryIntervals;
+
+        /// <summary>
+        /// Per-copy bandwidth options that allow more aggressive copy cancellation for earlier attempts.
+        /// </summary>
+        public IReadOnlyList<BandwidthConfiguration> BandwidthConfigurations { get; set; }
 
         /// <summary>
         /// Controls the maximum total number of copy retry attempts
@@ -184,9 +200,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public int RestrictedCopyReplicaCount { get; set; } = 3;
 
         /// <summary>
-        /// Time before a proactive copy times out.
+        /// Time before the IO Gate stops waiting and throws a TimeoutException.
         /// </summary>
-        public TimeSpan TimeoutForProactiveCopies { get; set; } = TimeSpan.FromMinutes(15);
+        public TimeSpan ProactiveCopyIOGateTimeout { get; set; } = TimeSpan.FromMinutes(15);
 
         /// <summary>
         /// Whether to enable proactive replication
@@ -253,6 +269,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public int? ReplicaCreditInMinutes { get; set; }
 
         /// <summary>
+        /// Every time interval we trace a report on copy progression.
+        /// </summary>
+        public TimeSpan PeriodicCopyTracingInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+        /// <summary>
         /// The batch size used by the location store
         /// </summary>
         public int LocationStoreBatchSize { get; set; }
@@ -266,5 +287,5 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// Returns true if Redis can be used for storing small files.
         /// </summary>
         public bool AreBlobsSupported { get; set; }
-    }
+    }    
 }

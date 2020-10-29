@@ -38,6 +38,17 @@ namespace BuildXL.Cache.ContentStore.Distributed
     public class LocalLocationStoreConfiguration
     {
         /// <summary>
+        /// Indicates whether LLS operates in read-only mode where no writes are performed
+        ///
+        /// In this mode, the machine does not register itself as a part of the distributed network and thus is not
+        /// discoverable as a content replica for any content on the machine. This is useful for scenarios where distributed network
+        /// partially composed of machines which are short-lived and thus should not participate in the distributed network for the
+        /// sake of avoid churn. The machines can still pull content from other machines by querying LLS DB/Redis and getting replicas
+        /// on machines which are long-lived (and this flag is false).
+        /// </summary>
+        public bool DistributedContentConsumerOnly { get; set; }
+
+        /// <summary>
         /// The machine location for the primary CAS folder on the machine.
         /// NOTE: LLS database is assumed to be stored on the same disk as this CAS instance.
         /// </summary>
@@ -95,6 +106,15 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public string? RedisGlobalStoreConnectionString { get; set; }
 
         /// <summary>
+        /// Gets or sets the flag to enable thread theft prevention feature.
+        /// </summary>
+        /// <remarks>
+        /// See this article about thread theft: https://stackexchange.github.io/StackExchange.Redis/ThreadTheft
+        /// Basically, this feature forces all the continuations running asynchronously, i.e. all the user code is detached from the redis library's code.
+        /// </remarks>
+        public bool UsePreventThreadTheftFeature { get; set; } = false;
+
+        /// <summary>
         /// Gets the connection string used by the redis global store.
         /// </summary>
         public string? RedisGlobalStoreSecondaryConnectionString { get; set; }
@@ -125,11 +145,6 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// The number of buckets to offset by for important replicas. This effectively makes important replicas look younger.
         /// </summary>
         public int ImportantReplicaBucketOffset { get; set; } = 2;
-
-        /// <summary>
-        /// Indicates whether important replicas should be preserved.
-        /// </summary>
-        public bool PreserveImportantReplicas { get; set; } = true;
 
         /// <summary>
         /// Age buckets for use with tiered eviction
@@ -305,21 +320,10 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public TimeSpan? RetryWindow { get; set; }
 
         /// <summary>
-        /// For testing purposes only. This is used for testing to prevent machine registration when
-        /// using from production resources. Primary usage is for consuming checkpoints from production.
-        /// </summary>
-        public bool DisallowRegisterMachine { get; set; }
-
-        /// <summary>
         /// Gets prefix used for checkpoints key which uniquely identifies a checkpoint lineage (i.e. changing this value indicates
         /// all prior checkpoints/cluster state are discarded and a new set of checkpoints is created)
         /// </summary>
         internal string? GetCheckpointPrefix() => CentralStore?.CentralStateKeyBase + EventStore?.Epoch;
-
-        /// <summary>
-        /// Whether to randomize elements in machine list, while still respecting reputation and other priorizations.
-        /// </summary>
-        public bool RandomizeMachineList { get; set; }
 
         /// <summary>
         /// Whether to prioritize designated locations in machine lists, so that they are the first elements.
@@ -335,6 +339,22 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// Indicates whether content hash lists should be touched after retrieval
         /// </summary>
         public bool TouchContentHashLists { get; set; }
+
+        /// <summary>
+        /// If this unsafe option is true, then the system works in a special benchmark-like mode:
+        /// i.e. the instance will process the events but it want create the checkpoints.
+        /// </summary>
+        public bool MasterThroughputCheckMode { get; set; } = false;
+
+        /// <summary>
+        /// The start cursor position in Event Hub stream.
+        /// </summary>
+        public DateTime? EventHubCursorPosition { get; set; }
+
+        /// <summary>
+        /// Whether to create a separate Redis connection for blob operations.
+        /// </summary>
+        public bool UseSeparateConnectionForRedisBlobs { get; set; } = false;
     }
 
     /// <summary>
@@ -375,7 +395,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public int PropagationIterations { get; set; } = 3;
 
         /// <summary>
-        /// See <see cref="BuildXL.Cache.ContentStore.Stores.ContentStoreSettings.TraceFileSystemContentStoreDiagnosticMessages"/>
+        /// See <see cref="ContentStoreSettings.TraceFileSystemContentStoreDiagnosticMessages"/>
         /// </summary>
         public bool TraceFileSystemContentStoreDiagnosticMessages = false;
 
@@ -493,14 +513,6 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public int IncrementalCheckpointDegreeOfParallelism { get; set; } = 1;
 
         /// <summary>
-        /// The working directory used by checkpoint manager for staging checkpoints before upload and restore.
-        /// </summary>
-        /// <remarks>
-        /// If null then checkpointing is disabled.
-        /// </remarks>
-        public AbsolutePath CheckpointWorkingDirectory => WorkingDirectory / "checkpoints";
-
-        /// <summary>
         /// The time period before the master lease expires and is eligible to be taken by another machine.
         /// </summary>
         public TimeSpan MasterLeaseExpiryTime { get; set; } = TimeSpan.FromMinutes(5);
@@ -526,6 +538,11 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public TimeSpan RestoreCheckpointAgeThreshold { get; set; }
 
         /// <summary>
+        /// Time after which a restore checkpoint operation is automatically cancelled.
+        /// </summary>
+        public TimeSpan? RestoreCheckpointTimeout { get; set; }
+
+        /// <summary>
         /// The interval by which LLS' heartbeat will update the cluster state. Default is to do it on every heartbeat.
         /// </summary>
         public TimeSpan? UpdateClusterStateInterval { get; set; }
@@ -545,7 +562,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// </summary>
         public bool PacemakerUseRandomIdentifier { get; set; } = false;
 
-        /// <inheritdoc />
+        /// <nodoc />
         public CheckpointConfiguration(AbsolutePath workingDirectory) => WorkingDirectory = workingDirectory;
     }
 }

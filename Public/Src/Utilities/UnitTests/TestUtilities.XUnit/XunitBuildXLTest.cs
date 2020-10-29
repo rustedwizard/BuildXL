@@ -31,12 +31,17 @@ namespace Test.BuildXL.TestUtilities.Xunit
         Justification = "Test follow different pattern with Initialize and Cleanup.")]
     public abstract class XunitBuildXLTest : BuildXLTestBase, IDisposable
     {
-        private static readonly Lazy<ISandboxConnection> s_sandboxConnection =  new Lazy<ISandboxConnection>(() =>
+        private static readonly Lazy<ISandboxConnection> s_sandboxConnection =  new Lazy<ISandboxConnection>(() => CreateSandboxConnection(isInTestMode: true));
+
+        /// <summary>
+        /// Creates a new sandbox connection.
+        /// </summary>
+        public static ISandboxConnection CreateSandboxConnection(bool isInTestMode)
         {
             ISandboxConnection sandboxConnection;
             if (OperatingSystemHelper.IsLinuxOS)
             {
-                sandboxConnection = new SandboxConnectionLinuxDetours(FailureCallback, isInTestMode: true);
+                sandboxConnection = new SandboxConnectionLinuxDetours(FailureCallback, isInTestMode: isInTestMode);
             }
             else if (OperatingSystemHelper.IsMacOS)
             {
@@ -51,13 +56,13 @@ namespace Test.BuildXL.TestUtilities.Xunit
                             FailureCallback = FailureCallback,
                             KextConfig = new KextConfig
                             {
-                                EnableCatalinaDataPartitionFiltering = OperatingSystemHelper.IsMacOSCatalinaOrHigher
+                                EnableCatalinaDataPartitionFiltering = OperatingSystemHelper.IsMacWithoutKernelExtensionSupport
                             }
                         });
                 }
                 else
                 {
-                    sandboxConnection = new SandboxConnection(kind, isInTestMode: true, measureCpuTimes: true);
+                    sandboxConnection = new SandboxConnection(kind, isInTestMode: isInTestMode, measureCpuTimes: true);
                 }
             }
             else
@@ -65,8 +70,8 @@ namespace Test.BuildXL.TestUtilities.Xunit
                 sandboxConnection = null;
             }
 
-            return sandboxConnection; 
-        });
+            return sandboxConnection;
+        }
 
         private static void FailureCallback(int status, string description)
         {
@@ -83,7 +88,7 @@ namespace Test.BuildXL.TestUtilities.Xunit
                         ? SandboxKind.MacOsHybrid
                         : SandboxKind.MacOsKext;
 
-            if (!OperatingSystemHelper.IsMacOSCatalinaOrHigher && 
+            if (!OperatingSystemHelper.IsMacWithoutKernelExtensionSupport &&
                 (kind == SandboxKind.MacOsEndpointSecurity || kind == SandboxKind.MacOsHybrid))
             {
                 throw new NotSupportedException("EndpointSecurity and Hybrid sandbox types can't be run on system older than macOS Catalina (10.15+).");

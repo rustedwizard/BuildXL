@@ -60,7 +60,7 @@ namespace BuildXL.SandboxedProcessExecutor
         {
             // Show the exception to the user
             m_logger.LogError(exception.ToString());
-            
+
             // Log the exception to telemetry
             if (AriaV2StaticState.IsEnabled)
             {
@@ -123,22 +123,21 @@ namespace BuildXL.SandboxedProcessExecutor
 
         private bool TryReadSandboxedProcessInfo(out SandboxedProcessInfo sandboxedProcessInfo)
         {
-            sandboxedProcessInfo = null;
-            sandboxedProcessInfo = ExceptionUtilities.HandleRecoverableIOException(
-               () =>
-               {
-                   using (FileStream stream = File.OpenRead(Path.GetFullPath(m_configuration.SandboxedProcessInfoInputFile)))
-                   {
-                       // TODO: Custom DetoursEventListener?
-                       return SandboxedProcessInfo.Deserialize(stream, m_loggingContext, detoursEventListener: null);
-                   }
-               },
-               ex =>
-               {
-                   m_logger.LogError(ex.ToString());
-               });
+            SandboxedProcessInfo localSandboxedProcessInfo = null;
 
-            return sandboxedProcessInfo != null;
+            bool success = Helpers.RetryOnFailure(
+                attempt => {
+                    using (FileStream stream = File.OpenRead(Path.GetFullPath(m_configuration.SandboxedProcessInfoInputFile)))
+                    {
+                        // TODO: Custom DetoursEventListener?
+                        localSandboxedProcessInfo = SandboxedProcessInfo.Deserialize(stream, m_loggingContext, detoursEventListener: null);
+                        return true;
+                    }
+                });
+
+            sandboxedProcessInfo = localSandboxedProcessInfo;
+
+            return success;
         }
 
         private bool TryWriteSandboxedProcessResult(PathTable pathTable, SandboxedProcessResult result)
@@ -159,7 +158,7 @@ namespace BuildXL.SandboxedProcessExecutor
             // For Unix, we need to give a special care of path serialization.
             bool isWindows = !OperatingSystemHelper.IsUnixOS;
 
-            Action<BuildXLWriter, AbsolutePath> writePath = (writer, path) => 
+            Action<BuildXLWriter, AbsolutePath> writePath = (writer, path) =>
             {
                 if (isWindows)
                 {
@@ -208,7 +207,7 @@ namespace BuildXL.SandboxedProcessExecutor
             {
                 Analysis.IgnoreResult(FileUtilities.TryDeleteFile(info.FileAccessManifest.InternalDetoursErrorNotificationFile));
             }
-            
+
             if (info.GetCommandLine().Length > SandboxedProcessInfo.MaxCommandLineLength)
             {
                 m_logger.LogError($"Process command line is longer than {SandboxedProcessInfo.MaxCommandLineLength} characters: {info.GetCommandLine().Length}");
@@ -245,7 +244,7 @@ namespace BuildXL.SandboxedProcessExecutor
                         {
                             ReportQueueSizeMB = ReportQueueSizeForKextMB,
 #if PLATFORM_OSX
-                            EnableCatalinaDataPartitionFiltering = OperatingSystemHelper.IsMacOSCatalinaOrHigher
+                            EnableCatalinaDataPartitionFiltering = OperatingSystemHelper.IsMacWithoutKernelExtensionSupport
 #endif
                         }
                     });
@@ -455,7 +454,7 @@ namespace BuildXL.SandboxedProcessExecutor
                 {
                     return new MemoryStream(CharUtilities.Utf8NoBomNoThrow.GetBytes(info.StandardInputSourceInfo.Data));
                 }
-                else  
+                else
                 {
                     Contract.Assert(info.StandardInputSourceInfo.File != null);
 

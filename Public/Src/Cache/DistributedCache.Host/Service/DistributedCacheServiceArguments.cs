@@ -5,6 +5,8 @@ using System;
 using System.Diagnostics.ContractsLight;
 using System.Threading;
 using BuildXL.Cache.ContentStore.Distributed;
+using BuildXL.Cache.ContentStore.FileSystem;
+using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.Host.Configuration;
 
@@ -18,37 +20,33 @@ namespace BuildXL.Cache.Host.Service
     ///     created on the side of whoever is using the cache, and will be processed by the cache to build all of the
     ///     required objects.
     /// </remarks>
-    public class DistributedCacheServiceArguments
+    public class DistributedCacheServiceArguments : LoggerFactoryArguments
     {
         /// <nodoc />
         public DistributedCacheServiceHostOverrides Overrides { get; set; } = DistributedCacheServiceHostOverrides.Default;
 
-        /// <nodoc />
-        public ILogger Logger { get; internal set; }
-
         /// <summary>
         ///     When this functor is present, and assuming the cache replaces the host's logger with its own, it is
-        ///     expected to buid <see cref="Copier"/>, <see cref="PathTransformer"/>, and <see cref="CopyRequester"/>.
+        ///     expected to buid <see cref="Copier"/> and <see cref="CopyRequester"/>.
         ///     
         ///     This is done this way because constructing those elements requires access to an <see cref="ILogger"/>,
         ///     which will be replaced cache-side.
         /// </summary>
         public Func<ILogger, (
-            IAbsolutePathFileCopier Copier,
-            IAbsolutePathTransformer PathTransformer,
+            IRemoteFileCopier Copier,
             IContentCommunicationManager CopyRequester)> BuildCopyInfrastructure { get; set; } = null;
 
         /// <nodoc />
-        public IAbsolutePathFileCopier Copier { get; internal set; }
-
-        /// <nodoc />
-        public IAbsolutePathTransformer PathTransformer { get; internal set; }
+        public IRemoteFileCopier Copier { get; internal set; }
 
         /// <nodoc />
         public IContentCommunicationManager CopyRequester { get; internal set; }
 
         /// <nodoc />
         public IDistributedCacheServiceHost Host { get; }
+
+        /// <nodoc />
+        public IAbsFileSystem FileSystem { get; }
 
         /// <nodoc />
         public HostInfo HostInfo { get; }
@@ -65,21 +63,19 @@ namespace BuildXL.Cache.Host.Service
         /// <nodoc />
         public string Keyspace { get; }
 
-        /// <nodoc />
-        public ITelemetryFieldsProvider TelemetryFieldsProvider { get; set; }
-
         /// <inheritdoc />
         public DistributedCacheServiceArguments(
             ILogger logger,
-            IAbsolutePathFileCopier copier,
-            IAbsolutePathTransformer pathTransformer,
+            IRemoteFileCopier copier,
             IContentCommunicationManager copyRequester,
             IDistributedCacheServiceHost host,
             HostInfo hostInfo,
             CancellationToken cancellation,
             string dataRootPath,
             DistributedCacheServiceConfiguration configuration,
-            string keyspace)
+            string keyspace,
+            IAbsFileSystem fileSystem = null)
+            : base(logger, host, configuration.LoggingSettings)
         {
             Contract.RequiresNotNull(logger);
             Contract.RequiresNotNull(host);
@@ -89,12 +85,12 @@ namespace BuildXL.Cache.Host.Service
             Logger = logger;
             Copier = copier;
             CopyRequester = copyRequester;
-            PathTransformer = pathTransformer;
             Host = host;
             HostInfo = hostInfo;
             Cancellation = cancellation;
             DataRootPath = dataRootPath;
             Configuration = configuration;
+            FileSystem = fileSystem ?? new PassThroughFileSystem(logger);
 
             Keyspace = ComputeKeySpace(hostInfo, configuration, keyspace);
         }

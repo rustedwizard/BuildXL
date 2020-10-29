@@ -3,11 +3,12 @@
 
 using System;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Linq;
 using System.Runtime.Serialization;
+using BuildXL.Cache.ContentStore.Grpc;
 using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
+using BuildXL.Cache.ContentStore.Interfaces.Utils;
 
 namespace BuildXL.Cache.Host.Configuration
 {
@@ -54,10 +55,28 @@ namespace BuildXL.Cache.Host.Configuration
         }
 
         /// <summary>
+        /// Settings for running deployment launcher
+        /// </summary>
+        [DataMember]
+        public LauncherSettings LauncherSettings { get; set; } = null;
+
+        /// <summary>
         /// Feature flag to turn on distributed content tracking (L2/datacenter cache).
         /// </summary>
         [DataMember]
         public bool IsDistributedContentEnabled { get; set; }
+
+        /// <summary>
+        /// Grpc port for backing cache service instance
+        /// </summary>
+        [DataMember]
+        public int? BackingGrpcPort { get; set; } = null;
+
+        /// <summary>
+        /// Grpc port for backing cache service instance
+        /// </summary>
+        [DataMember]
+        public string BackingScenario { get; set; } = null;
 
         /// <summary>
         /// The amount of time for nagling GetBulk (locations) for proactive copy operations
@@ -104,15 +123,14 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public bool UseRingIsolation { get; set; } = false;
 
+        // Redis-related configuration
+
         /// <summary>
         /// TTL to be set in Redis for memoization entries.
         /// </summary>
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int RedisMemoizationExpiryTimeMinutes { get; set; } = 1500;
-
-        [DataMember]
-        public string ContentAvailabilityGuarantee { get; set; }
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
@@ -123,17 +141,31 @@ namespace BuildXL.Cache.Host.Configuration
         public int? RedisConnectionErrorLimit { get; set; }
 
         [DataMember]
+        public bool? UseRedisPreventThreadTheftFeature { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? RedisMemoizationDatabaseOperationTimeoutInSeconds { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? RedisMemoizationSlowOperationCancellationTimeoutInSeconds { get; set; }
+
+        [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? RedisReconnectionLimitBeforeServiceRestart { get; set; }
 
         [DataMember]
-        public bool? TraceRedisFailures { get; set; }
-
-        [DataMember]
-        public bool? TraceRedisTransientFailures { get; set; }
+        public double? DefaultRedisOperationTimeoutInSeconds { get; set; }
 
         [DataMember]
         public TimeSpan? MinRedisReconnectInterval { get; set; }
+
+        [DataMember]
+        public bool? CancelBatchWhenMultiplexerIsClosed { get; set; }
+
+        [DataMember]
+        public bool? TreatObjectDisposedExceptionAsTransient { get; set; }
 
         [DataMember]
         [Validation.Range(-1, int.MaxValue)]
@@ -142,6 +174,29 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         [Validation.Range(0, int.MaxValue)]
         public int? RedisGetCheckpointStateTimeoutInSeconds { get; set; }
+
+        // Redis retry configuration
+        [DataMember]
+        [Validation.Range(0, int.MaxValue, minInclusive: false)]
+        public int? RedisFixedIntervalRetryCount { get; set; }
+
+        // Just setting this value is enough to configure a custom exponential back-off policy with default min/max/interval.
+        [DataMember]
+        [Validation.Range(0, int.MaxValue, minInclusive: false)]
+        public int? RedisExponentialBackoffRetryCount { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? RedisExponentialBackoffMinIntervalInSeconds { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? RedisExponentialBackoffMaxIntervalInSeconds { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? RedisExponentialBackoffDeltaIntervalInSeconds { get; set; }
+
 
         // TODO: file a work item to remove the flag!
         [DataMember]
@@ -189,10 +244,11 @@ namespace BuildXL.Cache.Host.Configuration
         public bool UseNativeBlobEnumeration { get; set; } = false;
 
         [DataMember]
-        public bool IsRepairHandlingEnabled { get; set; } = false;
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? ReserveSpaceTimeoutInMinutes { get; set; }
 
         [DataMember]
-        public bool IsTouchEnabled { get; set; } = false;
+        public bool IsRepairHandlingEnabled { get; set; } = false;
 
         [DataMember]
         public bool UseMdmCounters { get; set; } = true;
@@ -226,6 +282,20 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         [Validation.Range(0, long.MaxValue)]
         public long MaxBlobCapacity { get; set; } = 1024 * 1024 * 1024;
+
+        /// <summary>
+        /// The span of time that will delimit the operation count limit for blob operations.
+        /// </summary>
+        [DataMember]
+        [Validation.Range(0, int.MaxValue)]
+        public int? BlobOperationLimitSpanSeconds { get; set; }
+
+        /// <summary>
+        /// The amount of blob operations that we allow to go to Redis in a given period of time.
+        /// </summary>
+        [DataMember]
+        [Validation.Range(0, int.MaxValue)]
+        public long? BlobOperationLimitCount { get; set; }
 
         /// <summary>
         /// Amount of entries to compute evictability metric for in a single pass. The larger this is, the faster the
@@ -304,6 +374,10 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(1, int.MaxValue)]
         public int RestrictedCopyReplicaCount { get; set; } = 3;
 
+        [DataMember]
+        [Validation.Range(0, double.MaxValue)]
+        public double PeriodicCopyTracingIntervalMinutes { get; set; } = 5.0;
+
         /// <summary>
         /// After the first raided redis instance completes, the second instance is given a window of time to complete before the retries are cancelled.
         /// Default to always wait for both instances to complete.
@@ -357,22 +431,92 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(1, int.MaxValue)]
         public int MaxRetryCount { get; set; } = 32;
 
-        #region Grpc Copier
+        [DataMember]
+        public bool UseUnsafeByteStringConstruction { get; set; } = false;
+
         /// <summary>
-        /// Whether or not GZip is enabled for GRPC copies.
+        /// This flag is meant to test whether we can remove an old lock that has no telemetry as to usage but is in a
+        /// very hot path.
         /// </summary>
         [DataMember]
-        public bool UseCompressionForCopies { get; set; } = false;
+        public bool Unsafe_DisableDeprecatedConcurrentAccessLock { get; set; } = false;
+
+        #region Grpc File Copier
+
+        [DataMember]
+        public string GrpcFileCopierGrpcCopyClientInvalidationPolicy { get; set; }
+
+        #endregion
+
+        #region Grpc Copy Client Cache
+
+        [DataMember]
+        [Validation.Range(0, 2)]
+        public int? GrpcCopyClientCacheResourcePoolVersion { get; set; }
 
         /// <summary>
         /// Upper bound on number of cached GRPC clients.
         /// </summary>
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
-        public int MaxGrpcClientCount { get; set; } = DefaultMaxConcurrentCopyOperations;
+        public int? MaxGrpcClientCount { get; set; }
+
+        /// <summary>
+        /// Maximum cached age for GRPC clients.
+        /// </summary>
+        [DataMember]
+        [Validation.Range(1, double.MaxValue)]
+        public double? MaxGrpcClientAgeMinutes { get; set; }
 
         [DataMember]
-        public bool UseUnsafeByteStringConstruction { get; set; } = false;
+        [Validation.Range(1, double.MaxValue)]
+        public double? GrpcCopyClientCacheGarbageCollectionPeriodMinutes { get; set; }
+
+        [DataMember]
+        public bool? GrpcCopyClientCacheEnableInstanceInvalidation { get; set; }
+
+        #endregion
+
+        #region Grpc Copy Client
+
+        [DataMember]
+        [Validation.Range(0, int.MaxValue)]
+        public int? GrpcCopyClientBufferSizeBytes { get; set; }
+
+        [DataMember]
+        public bool? GrpcCopyClientUseGzipCompression { get; set; }
+
+        [DataMember]
+        public bool? GrpcCopyClientConnectOnStartup { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue)]
+        public double? TimeToFirstByteTimeoutInSeconds { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue)]
+        public double? GrpcCopyClientDisconnectionTimeoutSeconds { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue)]
+        public double? GrpcCopyClientConnectionTimeoutSeconds { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue)]
+        public double? GrpcCopyClientOperationDeadlineSeconds { get; set; }
+
+        [DataMember]
+        public bool? GrpcCopyClientPropagateCallingMachineName { get; set; }
+
+        /// <remarks>
+        /// It is OK to embed serializable types with no DataContract inside
+        /// </remarks>
+        [DataMember]
+        public GrpcCoreClientOptions GrpcCopyClientGrpcCoreClientOptions { get; set; }
+
+        #endregion
+
+        #region Distributed Eviction
 
         /// <summary>
         /// When set to true, we will shut down the quota keeper before hibernating sessions to prevent a race condition of evicting pinned content
@@ -380,15 +524,6 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public bool ShutdownEvictionBeforeHibernation { get; set; } = false;
 
-        /// <summary>
-        /// Maximum cached age for GRPC clients.
-        /// </summary>
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int MaxGrpcClientAgeMinutes { get; set; } = 55;
-        #endregion
-
-        #region Distributed Eviction
         [DataMember]
         public bool IsDistributedEvictionEnabled { get; set; } = false;
 
@@ -396,13 +531,6 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(1, int.MaxValue)]
         public int? ReplicaCreditInMinutes { get; set; } = 180;
 
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int? MinReplicaCountToSafeEvict { get; set; }
-
-        [DataMember]
-        [Validation.Range(1, int.MaxValue)]
-        public int? MinReplicaCountToImmediateEvict { get; set; }
         #endregion
 
         #region Bandwidth Check
@@ -428,6 +556,9 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int HistoricalBandwidthRecordsStored { get; set; } = 64;
+
+        [DataMember]
+        public BandwidthConfiguration[] BandwidthConfigurations { get; set; }
         #endregion
 
         #region Pin Better
@@ -438,8 +569,14 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(1, int.MaxValue)]
         public int? PinMinUnverifiedCount { get; set; }
 
+        /// <summary>
+        /// Obsolete: will be removed in favor of AsyncCopyOnPinThreshold.
+        /// </summary>
         [DataMember]
         public int? StartCopyWhenPinMinUnverifiedCountThreshold { get; set; }
+
+        [DataMember]
+        public int? AsyncCopyOnPinThreshold { get; set; }
 
         [DataMember]
         [Validation.Range(0, 1, minInclusive: false, maxInclusive: false)]
@@ -537,8 +674,11 @@ namespace BuildXL.Cache.Host.Configuration
         [Validation.Range(1, int.MaxValue)]
         public int? ContentLocationDatabaseLogsBackupRetentionMinutes { get; set; }
 
+        /// <remarks>
+        /// 0 means infinite here (i.e. there won't be any compactions)
+        /// </remarks>
         [DataMember]
-        [Validation.Range(1, int.MaxValue)]
+        [Validation.Range(0, int.MaxValue)]
         public double? FullRangeCompactionIntervalMinutes { get; set; }
 
         [DataMember]
@@ -549,16 +689,15 @@ namespace BuildXL.Cache.Host.Configuration
         public byte? FullRangeCompactionByteIncrementStep { get; set; }
 
         [DataMember]
+        public bool? ContentLocationDatabaseEnableDynamicLevelTargetSizes { get; set; }
+
+        [DataMember]
         [Validation.Range(1, long.MaxValue)]
         public long? ContentLocationDatabaseEnumerateSortedKeysFromStorageBufferSize { get; set; }
 
         [DataMember]
         [Validation.Range(1, long.MaxValue)]
         public long? ContentLocationDatabaseEnumerateEntriesWithSortedKeysFromStorageBufferSize { get; set; }
-
-        // Key Vault Settings
-        [DataMember]
-        public string KeyVaultSettingsString { get; set; }
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
@@ -630,6 +769,10 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         [Validation.Range(0, double.MaxValue, minInclusive: false)]
+        public double? RestoreCheckpointTimeoutMinutes { get; set; }
+
+        [DataMember]
+        [Validation.Range(0, double.MaxValue, minInclusive: false)]
         public double? UpdateClusterStateIntervalSeconds { get; set; }
 
         [DataMember]
@@ -683,19 +826,15 @@ namespace BuildXL.Cache.Host.Configuration
         public long ParallelHashingFileSizeBoundary { get; set; } = -1;
 
         [DataMember]
-        [Validation.Range(-1, long.MaxValue)]
-        public long CacheFileExistenceTimeoutInCopySec { get; set; } = -1;
-
-        [DataMember]
-        [Validation.Range(-1, long.MaxValue)]
-        public long CacheFileExistenceSizeBytes { get; set; } = -1;
-
-        [DataMember]
         public bool UseRedundantPutFileShortcut { get; set; } = false;
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int MaxConcurrentCopyOperations { get; set; } = DefaultMaxConcurrentCopyOperations;
+
+        [DataMember]
+        [Validation.Enum(typeof(SemaphoreOrder))]
+        public string OrderForCopies { get; set; } = SemaphoreOrder.NonDeterministic.ToString();
 
         /// <summary>
         /// Gets or sets whether to override Unix file access modes.
@@ -707,11 +846,18 @@ namespace BuildXL.Cache.Host.Configuration
         public bool TraceFileSystemContentStoreDiagnosticMessages { get; set; } = false;
 
         [DataMember]
+        public bool? UseAsynchronousFileStreamOptionByDefault { get; set; }
+
+        [DataMember]
         public bool TraceProactiveCopy { get; set; } = false;
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int? SilentOperationDurationThreshold { get; set; }
+
+        [DataMember]
+        [Validation.Range(1, int.MaxValue)]
+        public int? DefaultPendingOperationTracingIntervalInMinutes { get; set; }
 
         [DataMember]
         public bool UseFastHibernationPin { get; set; } = false;
@@ -733,17 +879,41 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public bool UseRedisMetadataStore { get; set; } = false;
 
+        [DataMember]
+        public bool UseRoxisMetadataStore { get; set; } = false;
+
+        [DataMember]
+        public string RoxisMetadataStoreHost { get; set; } = null;
+
+        [DataMember]
+        public int? RoxisMetadataStorePort { get; set; } = null;
+
         /// <summary>
         /// Gets or sets the time period between logging incremental stats
         /// </summary>
         [DataMember]
         public TimeSpan? LogIncrementalStatsInterval { get; set; }
 
+        [DataMember]
+        public string[] IncrementalStatisticsCounterNames { get; set; }
+
         /// <summary>
         /// Gets or sets the time period between logging machine-specific performance statistics.
         /// </summary>
         [DataMember]
         public TimeSpan? LogMachineStatsInterval { get; set; }
+
+        [DataMember]
+        public bool? Unsafe_MasterThroughputCheckMode { get; set; }
+
+        [DataMember]
+        public DateTime? Unsafe_EventHubCursorPosition { get; set; }
+
+        [DataMember]
+        public bool? Unsafe_IgnoreEpoch { get; set; }
+
+        [DataMember]
+        public bool? TraceServiceGrpcOperations { get; set; }
 
         #endregion
 
@@ -752,6 +922,10 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
         public int MaxConcurrentProactiveCopyOperations { get; set; } = DefaultMaxConcurrentCopyOperations;
+
+        [DataMember]
+        [Validation.Enum(typeof(SemaphoreOrder))]
+        public string OrderForProactiveCopies { get; set; } = SemaphoreOrder.NonDeterministic.ToString();
 
         /// <summary>
         /// Valid values: Disabled, InsideRing, OutsideRing, Both (See ProactiveCopyMode enum)
@@ -799,28 +973,143 @@ namespace BuildXL.Cache.Host.Configuration
 
         [DataMember]
         [Validation.Range(1, int.MaxValue)]
-        public double TimeoutForProactiveCopiesMinutes { get; set; } = 15;
+        public int ProactiveCopyIOGateTimeoutSeconds { get; set; } = 900;
+
+        [DataMember]
+        [Validation.Enum(typeof(MultiplexMode))]
+        public string MultiplexStoreMode { get; set; } = nameof(MultiplexMode.Legacy);
+
+        /// <summary>
+        /// Indicates whether machine locations should use universal format (i.e. uri) which
+        /// allows communication across machines of different platforms
+        /// </summary>
+        [DataMember]
+        public bool UseUniversalLocations { get; set; }
+
+        public MultiplexMode GetMultiplexMode()
+        {
+            if (UseUniversalLocations)
+            {
+                // Universal locations don't distinguish cache paths, so just use unified multiplex mode
+                return MultiplexMode.Unified;
+            }
+
+            return (MultiplexMode)Enum.Parse(typeof(MultiplexMode), MultiplexStoreMode);
+        }
 
         #endregion        
         /// <summary>
         /// The map of drive paths to alternate paths to access them
         /// </summary>
         [DataMember]
-        private IDictionary<string, string> AlternateDriveMap { get; set; }
+        public Dictionary<string, string> AlternateDriveMap { get; set; } = new Dictionary<string, string>();
 
         [DataMember]
         public bool TouchContentHashLists { get; set; }
 
-        public IReadOnlyDictionary<string, string> GetAutopilotAlternateDriveMap()
-        {
-            if (AlternateDriveMap != null)
-            {
-                return new ReadOnlyDictionary<string, string>(AlternateDriveMap);
-            }
-            else
-            {
-                return new Dictionary<string, string>();
-            }
-        }
+        [DataMember]
+        public bool EnableCacheActivityTracker { get; set; }
+
+        [DataMember]
+        public TimeSpan TrackingActivityWindow { get; set; } = TimeSpan.FromMinutes(1);
+
+        [DataMember]
+        public TimeSpan TrackingSnapshotPeriod { get; set; } = TimeSpan.FromSeconds(30);
+
+        [DataMember]
+        public TimeSpan TrackingReportPeriod { get; set; } = TimeSpan.FromSeconds(30);
+        
+        [DataMember]
+        public bool? UseSeparateConnectionForRedisBlobs { get; set; }
+
+        /// <summary>
+        /// Indicates whether distributed content store operates in special mode where content is only consumed from other machines but
+        /// not available as a content replica from which other machines can copy content.
+        ///
+        /// In this mode, the machine does not register itself as a part of the distributed network and thus is not
+        /// discoverable as a content replica for any content on the machine. This is useful for scenarios where distributed network
+        /// partially composed of machines which are short-lived and thus should not participate in the distributed network for the
+        /// sake of avoid churn. The machines can still pull content from other machines by querying LLS DB/Redis and getting replicas
+        /// on machines which are long-lived (and this flag is false).
+        /// </summary>
+        [DataMember]
+        public bool? DistributedContentConsumerOnly { get; set; }
+    }
+
+    /// <summary>
+    /// Specifies which multiplexing cache topology to use multiplex between drives.
+    /// </summary>
+    public enum MultiplexMode
+    {
+        /// <summary>
+        /// Defines the legacy multiplexing mode with a single multiplexed store at the root
+        /// 
+        ///     MultiplexedContentStore
+        ///         DistributedContentStore (LLS Machine Location = D:\)
+        ///             FileSystemContentStore (D:\)
+        ///         DistributedContentStore (LLS Machine Location = K:\)
+        ///             FileSystemContentStore (K:\)
+        ///
+        ///     LLS settings = (PrimaryMachineLocation = D:\, AdditionalMachineLocations = [K:\])
+        /// </summary>
+        Legacy,
+
+        /// <summary>
+        /// Defines the transitioning multiplexing mode with root distributed store nesting multiplexed file system stores
+        /// but still maintaining LLS machine locations for all drives 
+        ///
+        ///     DistributedContentStore (LLS Machine Location = D:\)
+        ///         MultiplexedContentStore
+        ///             FileSystemContentStore (D:\)
+        ///             FileSystemContentStore (K:\)
+        ///
+        ///     LLS settings = (PrimaryMachineLocation = D:\, AdditionalMachineLocations = [K:\])
+        ///     
+        ///     Keeps same LLS settings so it continues to heartbeat to keep K:\ (secondary) drive alive
+        ///     During reconcile, content from K:\ drive will be added to D:\ (primary) machine location
+        ///     NOTE: GRPC content server does not care or know about machine locations, it will try to retrieve content from all drives.
+        /// </summary>
+        Transitional,
+
+        /// <summary>
+        /// Defines the transitioning multiplexing mode with root distributed store nesting multiplexed file system stores
+        /// with only a single lls machine location for the primary drive
+        ///
+        ///     DistributedContentStore (LLS Machine Location = D:\)
+        ///         MultiplexedContentStore
+        ///             FileSystemContentStore (D:\)
+        ///             FileSystemContentStore (K:\)
+        ///
+        ///     LLS settings = (PrimaryMachineLocation = D:\, AdditionalMachineLocations = [])
+        ///
+        ///     Finally, LLS settings only mention the single primary (D:\) machine location, and all content for the machine (on all drives) is
+        ///     now registered under that machine location after going through the Transitional state.
+        ///     NOTE: GRPC content server does not care or know about machine locations, it will try to retrieve content from all drives.
+        /// </summary>
+        Unified,
+    }
+
+    /// <nodoc />
+    public class BandwidthConfiguration
+    {
+        /// <summary>
+        /// Whether to invalidate Grpc Copy Client in case of an error.
+        /// </summary>
+        public bool? InvalidateOnTimeoutError { get; set; }
+
+        /// <summary>
+        /// Gets an optional connection timeout that can be used to reject the copy more aggressively during early copy attempts.
+        /// </summary>
+        public double? ConnectionTimeoutInSeconds { get; set; }
+
+        /// <summary>
+        /// The interval between the copy progress is checked.
+        /// </summary>
+        public double IntervalInSeconds { get; set; }
+
+        /// <summary>
+        /// The number of required bytes that should be copied within a given interval. Otherwise the copy would be canceled.
+        /// </summary>
+        public long RequiredBytes { get; set; }
     }
 }

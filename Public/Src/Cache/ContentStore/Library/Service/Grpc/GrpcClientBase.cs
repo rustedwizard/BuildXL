@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics.ContractsLight;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
@@ -15,7 +16,7 @@ using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Cache.ContentStore.Utils;
-using BuildXL.Utilities.Tasks;
+using BuildXL.Utilities.Tracing;
 using ContentStore.Grpc;
 using Grpc.Core;
 
@@ -29,17 +30,10 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
     public abstract class GrpcClientBase : StartupShutdownSlimBase
     {
         private const string HeartbeatName = "Heartbeat";
-        private const int DefaultHeartbeatIntervalMinutes = 1;
 
-        private readonly ServiceClientRpcConfiguration _configuration;
-        private readonly TimeSpan _heartbeatInterval;
         private Capabilities _clientCapabilities;
         private Capabilities _serviceCapabilities;
         private IntervalTimer? _heartbeatTimer;
-        private readonly TimeSpan _heartbeatTimeout;
-
-        // The timeout after which the heartbeat async operation will be canceled.
-        private TimeSpan HeartbeatHardTimeout => TimeSpan.FromMilliseconds(_heartbeatTimeout.TotalMilliseconds * 1.2);
 
         private bool _serviceUnavailable;
 
@@ -50,10 +44,13 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         protected readonly IAbsFileSystem FileSystem;
 
         /// <nodoc />
-        protected readonly string? Scenario;
+        protected readonly ServiceClientContentSessionTracer ServiceClientTracer;
 
         /// <nodoc />
-        protected readonly ServiceClientContentSessionTracer ServiceClientTracer;
+        protected readonly ServiceClientRpcConfiguration Configuration;
+
+        /// <nodoc />
+        protected readonly string? Scenario;
 
         /// <nodoc />
         protected SessionState? SessionState;
@@ -71,16 +68,12 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         {
             FileSystem = fileSystem;
             ServiceClientTracer = tracer;
-            _configuration = configuration;
+            Configuration = configuration;
             Scenario = scenario;
-
-            GrpcEnvironment.InitializeIfNeeded();
-            Channel = new Channel(configuration.GrpcHost ?? GrpcEnvironment.Localhost, configuration.GrpcPort, ChannelCredentials.Insecure, GrpcEnvironment.DefaultConfiguration);
             _clientCapabilities = clientCapabilities;
-            _heartbeatInterval = _configuration.HeartbeatInterval ?? TimeSpan.FromMinutes(DefaultHeartbeatIntervalMinutes);
 
-            // By default, the heartbeat timeout is the half of the heartbeat interval
-            _heartbeatTimeout = _configuration.HeartbeatTimeout ?? TimeSpan.FromMilliseconds(_heartbeatInterval.TotalMilliseconds / 2);
+            GrpcEnvironment.WaitUntilInitialized();
+            Channel = new Channel(configuration.GrpcHost, configuration.GrpcPort, ChannelCredentials.Insecure, GrpcEnvironment.GetClientOptions(configuration.GrpcCoreClientOptions));
         }
 
         /// <nodoc />
@@ -128,7 +121,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
 
                 if (_serviceUnavailable)
                 {
-                    context.TracingContext.Debug("Skipping session shutdown because service is unavailable.");
+                    Tracer.Debug(context, "Skipping session shutdown because service is unavailable.");
                 }
                 else
                 {
@@ -138,7 +131,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                     }
                     catch (RpcException e)
                     {
-                        context.TracingContext.Error($"Failed to shut down session with error: {e}");
+                        Tracer.Error(context, $"Failed to shut down session with error: {e}");
                     }
                 }
 
@@ -173,19 +166,21 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
 
             // Can't use original session id, because it may have changed due to reconnect.
             var sessionId= sessionContext.Value.SessionId;
-            await operationContext.PerformOperationAsync(
+            await operationContext.PerformOperationWithTimeoutAsync(
                     Tracer,
-                    () => sendHeartbeatAsync(sessionContext.Value).WithTimeoutAsync(HeartbeatHardTimeout),
+                    nestedContext => sendHeartbeatAsync(nestedContext, sessionContext.Value),
+                    timeout: Configuration.HardHeartbeatTimeout,
                     extraStartMessage: $"SessionId={sessionId}",
                     extraEndMessage: r => $"SessionId={sessionId}")
                 .IgnoreFailure(); // The error was already traced.
 
-            async Task<BoolResult> sendHeartbeatAsync(SessionContext localSessionContext)
+            async Task<BoolResult> sendHeartbeatAsync(OperationContext context, SessionContext localSessionContext)
             {
-                using var timeoutCancellationSource = new CancellationTokenSource(_heartbeatTimeout);
+                using var softTimeoutCancellationTokenSource = new CancellationTokenSource(Configuration.HeartbeatTimeout);
+                using var cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(context.Token, softTimeoutCancellationTokenSource.Token);
                 try
                 {
-                    HeartbeatResponse response = await HeartbeatAsync(new HeartbeatRequest { Header = localSessionContext.CreateHeader() }, timeoutCancellationSource.Token);
+                    HeartbeatResponse response = await HeartbeatAsync(new HeartbeatRequest { Header = localSessionContext.CreateHeader() }, cancellationTokenSource.Token);
 
                     // Check for null header here as a workaround to a known service bug, which returns null headers on successful heartbeats.
                     if (response?.Header != null && !response.Header.Succeeded)
@@ -202,9 +197,9 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 }
                 catch (Exception ex)
                 {
-                    if (timeoutCancellationSource.IsCancellationRequested)
+                    if (cancellationTokenSource.IsCancellationRequested)
                     {
-                        return new BoolResult(ex, $"Heartbeat timed out out after '{_heartbeatTimeout}'.");
+                        return new BoolResult(ex, $"Heartbeat timed out out after '{Configuration.HeartbeatTimeout}'.");
                     }
 
                     string message = (ex is RpcException rpcEx) && (rpcEx.Status.StatusCode == StatusCode.Unavailable)
@@ -217,7 +212,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
 
         /// <nodoc />
         public async Task<BoolResult> CreateSessionAsync(
-            Context context,
+            OperationContext context,
             string name,
             string cacheName,
             ImplicitPin implicitPin)
@@ -241,7 +236,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 if ((_serviceCapabilities & Capabilities.Heartbeat) != 0 &&
                     (_clientCapabilities & Capabilities.Heartbeat) != 0)
                 {
-                    _heartbeatTimer = new IntervalTimer(() => HeartbeatAsync(context, sessionId), _heartbeatInterval, message =>
+                    _heartbeatTimer = new IntervalTimer(() => HeartbeatAsync(context, sessionId), Configuration.HeartbeatInterval, message =>
                     {
                         Tracer.Debug(context, $"[{HeartbeatName}] {message}. OriginalSessionId={sessionId}");
                     });
@@ -263,8 +258,8 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         {
             try
             {
-                var targetMachine = _configuration.GrpcHost ?? GrpcEnvironment.Localhost;
-                context.Info($"Starting up GRPC client against service on '{targetMachine}' on port {_configuration.GrpcPort} with timeout {waitMs}.");
+                var targetMachine = Configuration.GrpcHost;
+                context.Info($"Starting up GRPC client against service on '{targetMachine}' on port {Configuration.GrpcPort} with timeout {waitMs}.");
 
                 if (!LocalContentServer.EnsureRunning(context, Scenario, waitMs))
                 {
@@ -438,26 +433,63 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         }
 
         /// <nodoc />
-        protected async Task<TResult> PerformOperationAsync<TResult>(OperationContext context, Func<SessionContext, Task<TResult>> operation) where TResult : ResultBase
+        protected async Task<TResult> PerformOperationAsync<TResult>(OperationContext context, Func<SessionContext, Task<TResult>> operation, Func<string>? startMessageFactory = null, [CallerMemberName]string? caller = null) where TResult : ResultBase
         {
-            var sessionContext = await CreateSessionContextAsync(context, context.Token);
-
-            if (!sessionContext)
-            {
-                return new ErrorResult(sessionContext).AsResult<TResult>();
-            }
+            var stopwatch = StopwatchSlim.Start();
+            TraceStartIfEnabled(context, caller!, startMessageFactory);
 
             try
             {
-                return await operation(sessionContext.Value);
+                var result = await performOperationCoreAsync();
+                TraceStopIfEnabled(context, result, stopwatch.Elapsed, caller!);
+                return result;
             }
-            catch (ResultPropagationException error)
+            catch (Exception e)
             {
-                return new ErrorResult(error).AsResult<TResult>();
+                // This can be only ClientCanRetryException.
+                // Still tracing it explicitly.
+                var error = new ErrorResult(e).AsResult<TResult>();
+                TraceStopIfEnabled(context, error, stopwatch.Elapsed, caller!);
+                throw;
             }
-            catch (Exception e) when (!(e is ClientCanRetryException))
+
+            async Task<TResult> performOperationCoreAsync()
             {
-                return new ErrorResult(e).AsResult<TResult>();
+                var sessionContext = await CreateSessionContextAsync(context, context.Token);
+
+                if (!sessionContext)
+                {
+                    return new ErrorResult(sessionContext).AsResult<TResult>();
+                }
+
+                try
+                {
+                    return await operation(sessionContext.Value);
+                }
+                catch (ResultPropagationException error)
+                {
+                    return new ErrorResult(error).AsResult<TResult>();
+                }
+                catch (Exception e) when (!(e is ClientCanRetryException))
+                {
+                    return new ErrorResult(e).AsResult<TResult>();
+                }
+            }
+        }
+
+        private void TraceStartIfEnabled(OperationContext context, string operation, Func<string>? startMessageFactory)
+        {
+            if (Configuration.TraceGrpcCalls)
+            {
+                Tracer.OperationStarted(context, operation, enabled: true, startMessageFactory?.Invoke());
+            }
+        }
+
+        private void TraceStopIfEnabled(OperationContext context, ResultBase result, TimeSpan duration, string operationName)
+        {
+            if (Configuration.TraceGrpcCalls)
+            {
+                Tracer.OperationFinished(context, result, duration, operationName, traceErrorsOnly: false);
             }
         }
 

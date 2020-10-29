@@ -36,11 +36,7 @@ namespace BuildXL.Scheduler.Distribution
 
         private const double MaxLoadFactor = 2;
 
-        private readonly ReadOnlyArray<double> m_workerBalancedLoadFactors =
-
-            // Workers are given progressively heavier loads when acquiring resources
-            // in order to load balance between workers by
-            ReadOnlyArray<double>.FromWithoutCopy(0.25, 0.5, 1, 1.5, MaxLoadFactor);
+        private readonly ReadOnlyArray<double> m_workerBalancedLoadFactors;
 
         private readonly FileContentManager m_fileContentManager;
 
@@ -90,22 +86,49 @@ namespace BuildXL.Scheduler.Distribution
 
         private int m_totalProcessSlots;
 
-        private readonly bool m_enableSetupCost;
+        private readonly IScheduleConfiguration m_scheduleConfig;
+
+        private readonly Dictionary<ModuleId, (int NumPips, List<Worker> Workers)> m_moduleWorkerMapping;
+        private readonly PathTable m_pathTable;
+
+        /// <summary>
+        /// Number of modules exceeding max workers due to availability
+        /// </summary>
+        private int m_numModulesExceedingMaxWorkers;
 
         public ChooseWorkerCpu(
             LoggingContext loggingContext,
-            int maxParallelDegree,
-            bool enableSetupCostWhenChoosingWorker,
+            IScheduleConfiguration config,
             IReadOnlyList<Worker> workers,
             IPipQueue pipQueue,
             PipGraph pipGraph,
-            FileContentManager fileContentManager) : base(loggingContext, workers, pipQueue, DispatcherKind.ChooseWorkerCpu, maxParallelDegree)
+            FileContentManager fileContentManager,
+            PathTable pathTable,
+            Dictionary<ModuleId, (int, List<Worker>)> moduleWorkerMapping) : base(loggingContext, workers, pipQueue, DispatcherKind.ChooseWorkerCpu, config.MaxChooseWorkerCpu, config.ModuleAffinityEnabled())
         {
             m_pipTable = pipGraph.PipTable;
             m_executedProcessOutputs = new ContentTrackingSet(pipGraph);
             m_fileContentManager = fileContentManager;
-            m_pipSetupCostPool = new ObjectPool<PipSetupCosts>(() => new PipSetupCosts(this), costs => costs, size: maxParallelDegree);
-            m_enableSetupCost = enableSetupCostWhenChoosingWorker;
+            m_pipSetupCostPool = new ObjectPool<PipSetupCosts>(
+                () => new PipSetupCosts(this), 
+                costs => costs, 
+                size: config.ModuleAffinityEnabled() ? config.MaxChooseWorkerCpu : config.MaxChooseWorkerCpu * workers.Count);
+            m_scheduleConfig = config;
+
+            m_pathTable = pathTable;
+
+            if (config.ModuleAffinityEnabled())
+            {
+                m_moduleWorkerMapping = moduleWorkerMapping;
+                // We use load-factor as 2 by default in case of module affinity. There is no rationale behind that. It is just based on MaxLoadFactor. 
+                m_workerBalancedLoadFactors = ReadOnlyArray<double>.FromWithoutCopy(EngineEnvironmentSettings.BuildXLModuleAffinityMultiplier.Value ?? MaxLoadFactor);
+            }
+            else
+            {
+                // Workers are given progressively heavier loads when acquiring resources
+                // in order to load balance between workers by
+                m_workerBalancedLoadFactors = ReadOnlyArray<double>.FromWithoutCopy(0.25, 0.5, 1, 1.5, MaxLoadFactor);
+            }
         }
 
         /// <summary>
@@ -142,7 +165,7 @@ namespace BuildXL.Scheduler.Distribution
             using (var pooledPipSetupCost = m_pipSetupCostPool.GetInstance())
             {
                 var pipSetupCost = pooledPipSetupCost.Instance;
-                if (m_enableSetupCost)
+                if (m_scheduleConfig.EnableSetupCostWhenChoosingWorker)
                 {
                     pipSetupCost.EstimateAndSortSetupCostPerWorker(runnablePip);
                 }
@@ -206,11 +229,6 @@ namespace BuildXL.Scheduler.Distribution
                 }
             }
 
-            double? disableLoadBalanceMultiplier = EngineEnvironmentSettings.DisableLoadBalanceMultiplier;
-
-            // Disable load-balance if there is a multiplier specified including 0.
-            loadBalanceWorkers &= !disableLoadBalanceMultiplier.HasValue;
-
             long setupCostForBestWorker = workerSetupCosts[0].SetupBytes;
 
             limitingResource = null;
@@ -222,6 +240,16 @@ namespace BuildXL.Scheduler.Distribution
                     continue;
                 }
 
+                var moduleId = runnablePip.Pip.Provenance.ModuleId;
+
+                if (m_scheduleConfig.ModuleAffinityEnabled() &&
+                    m_moduleWorkerMapping.TryGetValue(moduleId, out var assignedWorkers) &&
+                    assignedWorkers.Workers.Count > 0)
+                {
+                    // If there are no workers assigned to the module, proceed with normal chooseworker logic.
+                    return ChooseWorkerForModuleAffinity(runnablePip, workerSetupCosts, loadFactor, out limitingResource);
+                }
+
                 for (int i = 0; i < workerSetupCosts.Length; i++)
                 {
                     var worker = workerSetupCosts[i].Worker;
@@ -230,22 +258,65 @@ namespace BuildXL.Scheduler.Distribution
                         runnablePip.Performance.SetInputMaterializationCost(ByteSizeFormatter.ToMegabytes((ulong)setupCostForBestWorker), ByteSizeFormatter.ToMegabytes((ulong)workerSetupCosts[i].SetupBytes));
                         return worker;
                     }
+                }
+            }
 
-                    // If the worker is not chosen due to the lack of process slots,
-                    // do not try the next worker immediately if 'BuildXLDisableLoadBalanceMultiplier' is specified.
-                    // We first check whether the number of pips waiting for a worker is less than the total slots times with the multiplier.
-                    // For example, if the multiplier is 1 and totalWorkerSlots is 100, then we do not try the next worker 
-                    // if there are less than 100 pips waiting for a worker. 
-                    // For Cosine builds, executing pips on a new worker is expensive due to the input materialization.
-                    // It is usually faster to wait for the busy worker to be available compared to trying on another worker.
-                    if (limitingResource == WorkerResource.AvailableProcessSlots && 
-                        disableLoadBalanceMultiplier.HasValue &&
-                        pendingWorkerSelectionPipCount < (worker.TotalProcessSlots * disableLoadBalanceMultiplier.Value))
+            return null;
+        }
+
+        private Worker ChooseWorkerForModuleAffinity(RunnablePip runnablePip, WorkerSetupCost[] workerSetupCosts, double loadFactor, out WorkerResource? limitingResource)
+        {
+            limitingResource = null;
+
+            var moduleId = runnablePip.Pip.Provenance.ModuleId;
+            var assignedWorkers = m_moduleWorkerMapping[moduleId].Workers;
+
+            int numAssignedWorkers = assignedWorkers.Count;
+            foreach (var worker in assignedWorkers.OrderBy(a => a.AcquiredProcessSlots))
+            {
+                if (worker.TryAcquire(runnablePip, out limitingResource, loadFactor: loadFactor, moduleAffinityEnabled: true))
+                {
+                    return worker;
+                }
+            }
+
+            bool isAnyAvailable = assignedWorkers.Any(a => a.IsAvailable);
+
+            var limitingResourceForAssigned = limitingResource;
+
+            var potentialWorkers = workerSetupCosts
+                .Select(a => a.Worker)
+                .Except(assignedWorkers)
+                .Where(a => a.IsAvailable)
+                .Where(a => a.AcquiredProcessSlots < a.TotalProcessSlots)
+                .Where(a => a.AcquiredMaterializeInputSlots < a.TotalMaterializeInputSlots)
+                .OrderBy(a => a.AcquiredProcessSlots);
+
+            // If there are no assigned workers in "Available status", we should choose one regardless not to block scheduler.
+            if (numAssignedWorkers < m_scheduleConfig.MaxWorkersPerModule || !isAnyAvailable)
+            {
+                foreach (var worker in potentialWorkers)
+                {
+                    if (worker.TryAcquire(runnablePip, out limitingResource, loadFactor: loadFactor, moduleAffinityEnabled: true))
                     {
-                        limitingResource = WorkerResource.DisableLoadBalance;
-                        return null;
+                        assignedWorkers.Add(worker);
+                        Logger.Log.AddedNewWorkerToModuleAffinity(LoggingContext, $"Added a new worker due to {(isAnyAvailable ? "Rebalance" : "Availability")} - {limitingResourceForAssigned}: {runnablePip.Description} - {moduleId.Value.ToString(m_pathTable.StringTable)} - WorkerId: {worker.WorkerId}, MaterializeInputSlots: {worker.AcquiredMaterializeInputSlots}, AcquiredProcessSlots: {worker.AcquiredProcessSlots}");
+
+                        if (assignedWorkers.Count > m_scheduleConfig.MaxWorkersPerModule)
+                        {
+                            // If none of the assigned workers are available due to worker connection issues or earlyWorkerRelease, 
+                            // we need to add a new worker even though it exceeds the max worker count per module. 
+                            // This is to prevent Scheduler from being blocked.
+                            m_numModulesExceedingMaxWorkers++;
+                        }
+                        
+                        return worker;
                     }
                 }
+            }
+            else if (potentialWorkers.Any())
+            {
+                limitingResource = WorkerResource.ModuleAffinity;
             }
 
             return null;
@@ -292,6 +363,8 @@ namespace BuildXL.Scheduler.Distribution
             {
                 statistics.Add($"LimitingResource_{kvp.Key}", kvp.Value);
             }
+
+            statistics.Add($"NumModulesExceedingMaxWorkers", m_numModulesExceedingMaxWorkers);
 
             Logger.Log.LimitingResourceStatistics(LoggingContext, limitingResourceStats);
         }

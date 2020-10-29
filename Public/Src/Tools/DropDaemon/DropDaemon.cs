@@ -5,10 +5,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.ContractsLight;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Ipc.Common;
 using BuildXL.Ipc.ExternalApi;
 using BuildXL.Ipc.Interfaces;
@@ -21,7 +23,6 @@ using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tasks;
 using Microsoft.VisualStudio.Services.Common;
 using Microsoft.VisualStudio.Services.Drop.WebApi;
-using Microsoft.VisualStudio.Services.Graph;
 using Microsoft.VisualStudio.Services.WebApi;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -38,8 +39,6 @@ namespace Tool.DropDaemon
     {
         private const int ServicePointParallelismForDrop = 200;
 
-        private const string IncludeAllFilter = ".*";
-
         /// <summary>Prefix for the error message of the exception that gets thrown when a symlink is attempted to be added to drop.</summary>
         internal const string SymlinkAddErrorMessagePrefix = "SymLinks may not be added to drop: ";
 
@@ -53,6 +52,8 @@ namespace Tool.DropDaemon
         private static readonly int s_minWorkerThreadsForDrop = Environment.ProcessorCount * 10;
 
         internal static readonly List<Option> DropConfigOptions = new List<Option>();
+
+        private const string DropBuildManifestPath = "/_manifest/manifest.json"; // This folder is placed directly under the drop root
 
         /// <summary>Drop configuration.</summary>
         public DropConfig DropConfig { get; }
@@ -148,6 +149,54 @@ namespace Tool.DropDaemon
             DefaultValue = DropConfig.DefaultEnableChunkDedup,
         });
 
+        internal static readonly NullableIntOption OptionalDropDomainId = RegisterDropConfigOption(new NullableIntOption("domainId")
+        {
+            ShortName = "ddid",
+            HelpText = "Optional drop domain id setting.",
+            IsRequired = false,
+            DefaultValue = null,
+        });
+
+        internal static readonly BoolOption EnableBuildManifestCreation = RegisterDropConfigOption(new BoolOption("enableBuildManifestCreation")
+        {
+            ShortName = "bm",
+            HelpText = "Generate Build Manifest",
+            IsRequired = false,
+            DefaultValue = DropConfig.DefaultEnableBuildManifestCreation,
+        });
+
+        internal static readonly StrOption Repo = RegisterDropConfigOption(new StrOption("repo")
+        {
+            ShortName = "r",
+            HelpText = "Repo location",
+            IsRequired = false,
+            DefaultValue = string.Empty,
+        });
+
+        internal static readonly StrOption Branch = RegisterDropConfigOption(new StrOption("branch")
+        {
+            ShortName = "b",
+            HelpText = "Git branch name",
+            IsRequired = false,
+            DefaultValue = string.Empty,
+        });
+
+        internal static readonly StrOption CommitId = RegisterDropConfigOption(new StrOption("commitId")
+        {
+            ShortName = "ci",
+            HelpText = "Git CommitId",
+            IsRequired = false,
+            DefaultValue = string.Empty,
+        });
+
+        internal static readonly StrOption CloudBuildId = RegisterDropConfigOption(new StrOption("cloudBuildId")
+        {
+            ShortName = "cbid",
+            HelpText = "RelativeActivityId",
+            IsRequired = false,
+            DefaultValue = string.Empty,
+        });
+
         // ==============================================================================
         // 'addfile' and 'addartifacts' parameters
         // ==============================================================================
@@ -211,6 +260,11 @@ namespace Tool.DropDaemon
                    return -1;
                }
 
+               if (!VerifyBuildManifestRequirements(conf, dropConfig))
+               {
+                   return -1;
+               }
+
                using (var client = CreateClient(conf.Get(IpcServerMonikerOptional), daemonConf))
                using (var daemon = new DropDaemon(
                    parser: conf.Config.Parser,
@@ -223,7 +277,7 @@ namespace Tool.DropDaemon
                    daemon.Completion.GetAwaiter().GetResult();
                    return 0;
                }
-           });        
+           });
 
         internal static readonly Command StartDaemonCmd = RegisterCommand(
            name: "start-daemon",
@@ -268,6 +322,17 @@ namespace Tool.DropDaemon
             {
                 var daemon = dropDaemon as DropDaemon;
                 daemon.Logger.Info("[FINALIZE] Started at" + daemon.DropConfig.Service + "/" + daemon.DropName);
+
+                if (daemon.DropConfig.EnableBuildManifestCreation)
+                {
+                    var buildManifestResult = await GenerateAndUploadBuildManifestFileAsync(daemon);
+                    if (!buildManifestResult.Succeeded)
+                    {
+                        daemon.Logger.Info($"[FINALIZE] Failure occured during Build Manifest upload: {buildManifestResult.Payload}");
+                        return buildManifestResult;
+                    }
+                }
+
                 IIpcResult result = await daemon.FinalizeAsync();
                 daemon.Logger.Info("[FINALIZE] " + result);
                 return result;
@@ -355,6 +420,42 @@ namespace Tool.DropDaemon
             }
         }
 
+        internal static bool VerifyBuildManifestRequirements(ConfiguredCommand conf, DropConfig dropConfig)
+        {
+            if (dropConfig.EnableBuildManifestCreation == true)
+            {
+                List<string> missingFields = new List<string>();
+
+                if (string.IsNullOrEmpty(dropConfig.Repo))
+                {
+                    missingFields.Add("repo");
+                }
+
+                if (string.IsNullOrEmpty(dropConfig.Branch))
+                {
+                    missingFields.Add("branch");
+                }
+
+                if (string.IsNullOrEmpty(dropConfig.CommitId))
+                {
+                    missingFields.Add("commitId");
+                }
+
+                if (string.IsNullOrEmpty(dropConfig.CloudBuildId))
+                {
+                    missingFields.Add("cloudBuildId");
+                }
+
+                if (missingFields.Count != 0)
+                {
+                    conf.Logger.Error($"EnableBuildManifestCreation set to true, but the following required fields are missing: {string.Join(", ", missingFields)}");
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         /// <summary>
         /// Synchronous version of <see cref="CreateAsync"/>
         /// </summary>
@@ -404,6 +505,73 @@ namespace Tool.DropDaemon
                 AddFileResult result = await dropClient.AddFileAsync(dropItem);
                 return IpcResult.Success(I($"File '{dropItem.FullFilePath}' {result} under '{dropItem.RelativeDropPath}' in drop '{DropName}'."));
             });
+        }
+
+        /// <summary>
+        /// Generates and uploads the Manifest.json on the master using all file hashes computed and stored 
+        /// by workers using <see cref="RegisterFileForBuildManifestAsync"/> for the given drop.
+        /// Should be called only when DropConfig.EnableBuildManifestCreation is true.
+        /// </summary>
+        public async static Task<IIpcResult> GenerateAndUploadBuildManifestFileAsync(DropDaemon daemon)
+        {
+            Contract.Requires(daemon.DropConfig.EnableBuildManifestCreation == true, "GenerateBuildManifestData API called even though Build Manifest Generation is Disabled in DropConfig");
+
+            var bxlResult = await daemon.ApiClient.GenerateBuildManifestData(daemon.DropName);
+            if (!bxlResult.Succeeded)
+            {
+                return new IpcResult(IpcResultStatus.ExecutionError, $"GenerateBuildManifestData API call failed for Drop: {daemon.DropName}. Failure: {bxlResult.Failure}");
+            }
+
+            string localFilePath;
+            string buildManifestJsonStr = GenerateBuildManifestFileViaLibrary(daemon, bxlResult.Result);
+
+            try
+            {
+                localFilePath = Path.GetTempFileName();
+                System.IO.File.WriteAllText(localFilePath, buildManifestJsonStr);
+            }
+            catch (Exception ex)
+            {
+                return new IpcResult(IpcResultStatus.ExecutionError, $"Exception while trying to store Build Manifest locally before drop upload: {ex}");
+            }
+
+            var dropItem = new DropItemForFile(localFilePath, relativeDropPath: DropBuildManifestPath);
+            return await daemon.AddFileAsync(dropItem);
+        }
+
+        /// <summary>
+        /// Generates the Build Manifest as a json string for the specified Drop. 
+        /// This function will be moved to an external library common between BuildXL and QuickBuild
+        /// </summary>
+        public static string GenerateBuildManifestFileViaLibrary(DropDaemon daemon, BuildManifestData data)
+        {
+            var outputsAsJson = data.Outputs.Select(output => {
+                return new
+                {
+                    Source = output.RelativePath.Replace('\\', '/'),
+                    AzureArtifactsHash = output.AzureArtifactsHash,
+                    Sha256Hash = output.BuildManifestHash
+                };
+            }).ToArray();
+
+            var buildManifestObj = new
+            {
+                Version = data.Version,
+                Timestamp = data.Timestamp,
+                CloudBuildId = daemon.DropConfig.CloudBuildId,
+                Repo = daemon.DropConfig.Repo,
+                Branch = daemon.DropConfig.Branch,
+                CommitId = daemon.DropConfig.CommitId,
+                Outputs = outputsAsJson
+            };
+
+            using (var writer = new StringWriter())
+            {
+                writer.NewLine = "\r\n";
+                var serializer = JsonSerializer.Create(new JsonSerializerSettings { Formatting = Formatting.Indented });
+                serializer.Serialize(writer, buildManifestObj);
+                return writer.ToString();
+            }
         }
 
         /// <summary>
@@ -581,7 +749,7 @@ namespace Tool.DropDaemon
             }
             catch (DropServiceException e)
             {
-                var status = e.Message.Contains("already exists") 
+                var status = e.Message.Contains("already exists")
                     ? IpcResultStatus.InvalidInput
                     : IpcResultStatus.TransmissionError;
                 return errorValueFactory("[DROP SERVICE ERROR] " + e.Message, status);
@@ -648,6 +816,12 @@ namespace Tool.DropDaemon
 
         internal static DropConfig CreateDropConfig(ConfiguredCommand conf)
         {
+            byte? domainId;
+            checked
+            {
+                domainId = (byte?) conf.Get(OptionalDropDomainId);
+            }
+
             return new DropConfig(
                 dropName: conf.Get(DropNameOption),
                 serviceEndpoint: conf.Get(DropEndpoint),
@@ -659,7 +833,13 @@ namespace Tool.DropDaemon
                 enableChunkDedup: conf.Get(EnableChunkDedup),
                 logDir: conf.Get(LogDir),
                 artifactLogName: conf.Get(ArtifactLogName),
-                batchSize: conf.Get(BatchSize));
+                batchSize: conf.Get(BatchSize),
+                dropDomainId: domainId,
+                enableBuildManifestCreation: conf.Get(EnableBuildManifestCreation),
+                repo: conf.Get(Repo),
+                branch: conf.Get(Branch),
+                commitId: conf.Get(CommitId),
+                cloudBuildId: conf.Get(CloudBuildId));
         }
 
         private static T RegisterDropConfigOption<T>(T option) where T : Option => RegisterOption(DropConfigOptions, option);
@@ -697,29 +877,36 @@ namespace Tool.DropDaemon
                     I($"Directory counts don't match: #directories = {directoryPaths.Length}, #directoryIds = {directoryIds.Length}, #dropPaths = {directoryDropPaths.Length}, #directoryFilters = {directoryFilters.Length}"));
             }
 
-            (Regex[] initializedFilters, string filterInitError) = InitializeDirectoryFilters(directoryFilters);
-            if (filterInitError != null)
+            var possibleFilters = InitializeFilters(directoryFilters);
+            if (!possibleFilters.Succeeded)
             {
-                return new IpcResult(IpcResultStatus.ExecutionError, filterInitError);
+                return new IpcResult(IpcResultStatus.ExecutionError, possibleFilters.Failure.Describe());
+            }
+
+            var registerFilesResult = await RegisterFilesForBuildManifestInternalAsync(daemon, dropPaths, fileIds, files, hashes);
+            if (!registerFilesResult.Succeeded)
+            {
+                return registerFilesResult;
             }
 
             var dropFileItemsKeyedByIsAbsent = Enumerable
                 .Range(0, files.Length)
                 .Select(i => new DropItemForBuildXLFile(
                     daemon.ApiClient,
-                    chunkDedup: conf.Get(EnableChunkDedup),
                     filePath: files[i],
                     fileId: fileIds[i],
                     fileContentInfo: FileContentInfo.Parse(hashes[i]),
-                    relativeDropPath: dropPaths[i])).ToLookup(f => WellKnownContentHashUtilities.IsAbsentFileHash(f.Hash));
+                    relativeDropPath: dropPaths[i]))
+                .ToLookup(f => WellKnownContentHashUtilities.IsAbsentFileHash(f.Hash));
 
             // If a user specified a particular file to be added to drop, this file must be a part of drop.
             // The missing files will not get into the drop, so we emit an error.
             if (dropFileItemsKeyedByIsAbsent[true].Any())
             {
+                string missingFiles = string.Join(Environment.NewLine, dropFileItemsKeyedByIsAbsent[true].Select(f => $"{f.FullFilePath} ({f})"));
                 return new IpcResult(
                     IpcResultStatus.InvalidInput,
-                    I($"The following files are missing, but they are a part of the drop command:{Environment.NewLine}{string.Join(Environment.NewLine, dropFileItemsKeyedByIsAbsent[true])}"));
+                    I($"Cannot add the following files to drop because they do not exist:{Environment.NewLine}{missingFiles}"));
             }
 
             (IEnumerable<DropItemForBuildXLFile> dropDirectoryMemberItems, string error) = await CreateDropItemsForDirectoriesAsync(
@@ -728,7 +915,7 @@ namespace Tool.DropDaemon
                 directoryPaths,
                 directoryIds,
                 directoryDropPaths,
-                initializedFilters);
+                possibleFilters.Result);
 
             if (error != null)
             {
@@ -754,21 +941,73 @@ namespace Tool.DropDaemon
             return await AddDropItemsAsync(daemon, dropFileItemsKeyedByIsAbsent[false].Concat(groupedDirectoriesContent[false]));
         }
 
-        private static (Regex[], string error) InitializeDirectoryFilters(string[] filters)
+        private static async Task<IIpcResult> RegisterFilesForBuildManifestInternalAsync(
+            DropDaemon daemon,
+            string[] dropPaths,
+            string[] fileIds,
+            string[] files,
+            string[] hashes)
         {
-            try
+            if (daemon.DropConfig.EnableBuildManifestCreation)
             {
-                var initializedFilters = filters.Select(
-                    filter => filter == IncludeAllFilter
-                        ? null
-                        : new Regex(filter, RegexOptions.Compiled | RegexOptions.IgnoreCase));
+                ContentHash[] parsedHashes;
 
-                return (initializedFilters.ToArray(), null);
+                try
+                {
+                    parsedHashes = hashes.Select(hash => FileContentInfo.Parse(hash).Hash).ToArray();
+                }
+                catch (ArgumentException e)
+                {
+                    return new IpcResult(IpcResultStatus.InvalidInput, $"Content Hash Parsing exception: {e}");
+                }
+
+                var buildManifestHashTasks = Enumerable
+                .Range(0, parsedHashes.Length)
+                .Select(i => RegisterFileForBuildManifestAsync(daemon,
+                    dropPaths[i],
+                    parsedHashes[i],
+                    BuildXL.Ipc.ExternalApi.FileId.Parse(fileIds[i]),
+                    files[i]));
+
+                var buildManifestHashes = await TaskUtilities.SafeWhenAll(buildManifestHashTasks);
+
+                if (buildManifestHashes.Any(h => h == false))
+                {
+                    string[] failedFiles = Enumerable
+                        .Range(0, parsedHashes.Length)
+                        .Where(i => buildManifestHashes[i] == false)
+                        .Select(i => files[i])
+                        .ToArray();
+
+                    return new IpcResult(IpcResultStatus.ExecutionError, $"Failure during BuildManifest Hash generation for files: '{string.Join("', '", failedFiles)}'");
+                }
+
+                return new IpcResult(IpcResultStatus.Success, "Registered {files.Length} files via RegisterFileForBuildManifest");
             }
-            catch (Exception e)
+
+            return new IpcResult(IpcResultStatus.Success, "Build manifest generation is disabled");
+        }
+
+        /// <summary>
+        /// Takes a hash as string and registers it's corresponding SHA-256 ContentHash using BuildXL Api
+        /// Should be called only when DropConfig.EnableBuildManifestCreation is true
+        /// </summary>
+        private async static Task<bool> RegisterFileForBuildManifestAsync(
+            DropDaemon daemon,
+            string relativePath,
+            ContentHash hash,
+            FileArtifact fileId,
+            string fullFilePath)
+        {
+            Contract.Requires(daemon.DropConfig.EnableBuildManifestCreation == true, "RegisterFileForBuildManifest API called even though Build Manifest Generation is Disabled in DropConfig");
+            var bxlResult = await daemon.ApiClient.RegisterFileForBuildManifest(daemon.DropName, relativePath, hash, fileId, fullFilePath);
+            if (!bxlResult.Succeeded)
             {
-                return (null, e.ToString());
+                daemon.Logger.Log(LogLevel.Verbose, $"ApiClient.RegisterFileForBuildManifest unsuccessful for '{fullFilePath}'. Failure: {bxlResult.Failure.Describe()}");
+                return false;
             }
+
+            return bxlResult.Result;
         }
 
         private static async Task<(DropItemForBuildXLFile[], string error)> CreateDropItemsForDirectoryAsync(
@@ -806,7 +1045,13 @@ namespace Tool.DropDaemon
                 directoryContent = filteredContent;
             }
 
-            return (directoryContent.Select(file =>
+            List<DropItemForBuildXLFile> dropItemForBuildXLFiles = new List<DropItemForBuildXLFile>();
+
+            var files = directoryContent
+                // SharedOpaque directories might contain 'absent' output files. These are not real files, so we are excluding them.
+                .Where(file => !WellKnownContentHashUtilities.IsAbsentFileHash(file.ContentInfo.Hash) || file.Artifact.IsSourceFile);
+
+            foreach (SealedDirectoryFile file in files)
             {
                 // We need to convert '\' into '/' because this path would be a part of a drop url
                 // The dropPath can be an empty relative path (i.e. '.') which we need to remove since even though it is not a valid
@@ -814,14 +1059,24 @@ namespace Tool.DropDaemon
                 var resolvedDropPath = dropPath == "." ? string.Empty : I($"{dropPath}/");
                 var remoteFileName = I($"{resolvedDropPath}{GetRelativePath(directoryPath, file.FileName).Replace('\\', '/')}");
 
-                return new DropItemForBuildXLFile(
+                if (daemon.DropConfig.EnableBuildManifestCreation)
+                {
+                    var buildManifestHashResult = await RegisterFileForBuildManifestAsync(daemon, remoteFileName, file.ContentInfo.Hash, file.Artifact, file.FileName);
+                    if (!buildManifestHashResult)
+                    {
+                        return (null, $"Failure during BuildManifest Hash generation for file: '{file.FileName}'");
+                    }
+                }
+
+                dropItemForBuildXLFiles.Add(new DropItemForBuildXLFile(
                     daemon.ApiClient,
                     file.FileName,
                     BuildXL.Ipc.ExternalApi.FileId.ToString(file.Artifact),
-                    conf.Get(EnableChunkDedup),
                     file.ContentInfo,
-                    remoteFileName);
-            }).ToArray(), null);
+                    remoteFileName));
+            }
+
+            return (dropItemForBuildXLFiles.ToArray(), null);
         }
 
         private static string GetRelativePath(string root, string file)
@@ -864,13 +1119,13 @@ namespace Tool.DropDaemon
 
         private static (IEnumerable<DropItemForBuildXLFile>, string error) DedupeDropItems(IEnumerable<DropItemForBuildXLFile> dropItems)
         {
-            var dropItemsByDropPaths = new Dictionary<string, DropItemForBuildXLFile>(StringComparer.OrdinalIgnoreCase);
+            var dropItemsByDropPaths = new Dictionary<string, DropItemForBuildXLFile>(OperatingSystemHelper.PathComparer);
 
             foreach (var dropItem in dropItems)
             {
                 if (dropItemsByDropPaths.TryGetValue(dropItem.RelativeDropPath, out var existingDropItem))
                 {
-                    if (!string.Equals(dropItem.FullFilePath, existingDropItem.FullFilePath, StringComparison.OrdinalIgnoreCase))
+                    if (!string.Equals(dropItem.FullFilePath, existingDropItem.FullFilePath, OperatingSystemHelper.PathComparison))
                     {
                         return (
                           null,

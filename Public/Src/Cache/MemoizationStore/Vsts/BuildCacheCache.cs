@@ -21,6 +21,7 @@ using BuildXL.Cache.MemoizationStore.Interfaces.Caches;
 using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
 using BuildXL.Cache.MemoizationStore.Vsts.Adapters;
+using Microsoft.VisualStudio.Services.BlobStore.Common;
 
 namespace BuildXL.Cache.MemoizationStore.Vsts
 {
@@ -32,7 +33,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         private readonly IAbsFileSystem _fileSystem;
         private readonly string _cacheNamespace;
         private readonly IBuildCacheHttpClientFactory _buildCacheHttpClientFactory;
-        private readonly IContentStore _backingContentStore;
+        private readonly BackingContentStore _backingContentStore;
         private readonly TimeSpan _minimumTimeToKeepContentHashLists;
         private readonly TimeSpan _rangeOfTimeToKeepContentHashLists;
         private readonly int _maxFingerprintSelectorsToFetch;
@@ -49,6 +50,13 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         private readonly TimeSpan _inlineFingerprintIncorporationExpiry;
         private readonly TimeSpan _eagerFingerprintIncorporationNagleInterval;
         private readonly int _eagerFingerprintIncorporationNagleBatchSize;
+
+        /// <summary>
+        /// BuildCache may be unable to pin the content for us when we want the content to be backed.
+        /// This may be because it is in DedupStore or because we're using a custom domain.
+        /// BuildCache only supports BlobStore with the default domain.
+        /// </summary>
+        private readonly bool _manuallyExtendContentLifetime;
 
         private bool _disposed;
 
@@ -69,16 +77,17 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         /// <param name="fingerprintIncorporationEnabled">Feature flag to enable fingerprints incorporation on shutdown</param>
         /// <param name="maxDegreeOfParallelismForIncorporateRequests">Throttle the number of fingerprints chunks sent in parallel</param>
         /// <param name="maxFingerprintsPerIncorporateRequest">Max fingerprints allowed per chunk</param>
+        /// <param name="domain">Domain ID to use against BlobStore or DedupStore</param>
         /// <param name="writeThroughContentStoreFunc">Optional write-through store to allow writing-behind to BlobStore</param>
         /// <param name="sealUnbackedContentHashLists">If true, the client will attempt to seal any unbacked ContentHashLists that it sees.</param>
         /// <param name="useBlobContentHashLists">use blob based content hash lists.</param>
-        /// <param name="downloadBlobsThroughBlobStore">If true, gets blobs through BlobStore. If false, gets blobs from the Azure Uri.</param>
         /// <param name="useDedupStore">If true, gets content through DedupStore. If false, gets content from BlobStore.</param>
         /// <param name="overrideUnixFileAccessMode">If true, overrides default Unix file access modes.</param>
         /// <param name="enableEagerFingerprintIncorporation"><see cref="BuildCacheServiceConfiguration.EnableEagerFingerprintIncorporation"/></param>
         /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiry"/></param>
         /// <param name="eagerFingerprintIncorporationNagleInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleInterval"/></param>
         /// <param name="eagerFingerprintIncorporationNagleBatchSize"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleBatchSize"/></param>
+        /// <param name="downloadBlobsUsingHttpClient"><see cref="BuildCacheServiceConfiguration.DownloadBlobsUsingHttpClient"/></param>
         public BuildCacheCache(
             IAbsFileSystem fileSystem,
             string cacheNamespace,
@@ -94,16 +103,17 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             bool fingerprintIncorporationEnabled,
             int maxDegreeOfParallelismForIncorporateRequests,
             int maxFingerprintsPerIncorporateRequest,
+            IDomainId domain,
             Func<IContentStore> writeThroughContentStoreFunc = null,
             bool sealUnbackedContentHashLists = false,
             bool useBlobContentHashLists = false,
-            bool downloadBlobsThroughBlobStore = false,
             bool useDedupStore = false,
             bool overrideUnixFileAccessMode = false,
             bool enableEagerFingerprintIncorporation = false,
             TimeSpan inlineFingerprintIncorporationExpiry = default,
             TimeSpan eagerFingerprintIncorporationNagleInterval = default,
-            int eagerFingerprintIncorporationNagleBatchSize = 100)
+            int eagerFingerprintIncorporationNagleBatchSize = 100,
+            bool downloadBlobsUsingHttpClient = false)
         {
             Contract.Requires(fileSystem != null);
             Contract.Requires(buildCacheHttpClientFactory != null);
@@ -115,20 +125,40 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             _tracer = new BuildCacheCacheTracer(logger, nameof(BuildCacheCache));
 
             _backingContentStore = new BackingContentStore(
-                fileSystem, backingContentStoreHttpClientFactory, timeToKeepUnreferencedContent, pinInlineThreshold, ignorePinThreshold, downloadBlobsThroughBlobStore, useDedupStore);
+                new BackingContentStoreConfiguration()
+                {
+                    FileSystem = fileSystem,
+                    ArtifactHttpClientFactory = backingContentStoreHttpClientFactory,
+                    TimeToKeepContent = timeToKeepUnreferencedContent,
+                    PinInlineThreshold = pinInlineThreshold,
+                    IgnorePinThreshold = ignorePinThreshold,
+                    UseDedupStore = useDedupStore,
+                    DownloadBlobsUsingHttpClient = downloadBlobsUsingHttpClient
+                });
+
+            _manuallyExtendContentLifetime = false;
 
             if (useDedupStore)
             {
                 // Guaranteed content is only available for BlobSessions. (bug 144396)
                 _sealUnbackedContentHashLists = false;
 
-                // BlobBuildCacheHttpClient is incompatible with Dedup hashes. (bug 1458510)
+                // BuildCache is incompatible with Dedup hashes.
+                // This is because BuildCache would not know to look for the blob in DedupStore instead of BlobStore
                 _useBlobContentHashLists = false;
+                _manuallyExtendContentLifetime = true;
             }
             else
             {
                 _sealUnbackedContentHashLists = sealUnbackedContentHashLists;
                 _useBlobContentHashLists = useBlobContentHashLists;
+            }
+
+            if (!domain.Equals(WellKnownDomainIds.OriginalDomainId))
+            {
+                // BuildCache is incompatible with multi-domain
+                _useBlobContentHashLists = false;
+                _manuallyExtendContentLifetime = true;
             }
 
             _maxFingerprintSelectorsToFetch = maxFingerprintSelectorsToFetch;
@@ -187,7 +217,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 }
                 else
                 {
-                    context.Debug($"Getting stats failed: [{statsResult}]");
+                    _tracer.Debug(context, $"Getting stats failed: [{statsResult}]");
                 }
 
                 var backingContentStoreTask = Task.Run(async () => await _backingContentStore.ShutdownAsync(context).ConfigureAwait(false));
@@ -235,6 +265,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             return StartupCall<BuildCacheCacheTracer>.RunAsync(_tracer, context, async () =>
             {
                 BoolResult result;
+
+                _tracer.Debug(context, $"Creating ContentHashListAdapterFactory with {nameof(_useBlobContentHashLists)}={_useBlobContentHashLists}");
                 _contentHashListAdapterFactory = await ContentHashListAdapterFactory.CreateAsync(
                     context, _buildCacheHttpClientFactory, _useBlobContentHashLists);
                 Id =
@@ -344,7 +376,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                         _enableEagerFingerprintIncorporation,
                         _inlineFingerprintIncorporationExpiry,
                         _eagerFingerprintIncorporationNagleInterval,
-                        _eagerFingerprintIncorporationNagleBatchSize));
+                        _eagerFingerprintIncorporationNagleBatchSize,
+                        _manuallyExtendContentLifetime));
             });
         }
 
@@ -394,7 +427,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                         _enableEagerFingerprintIncorporation,
                         _inlineFingerprintIncorporationExpiry,
                         _eagerFingerprintIncorporationNagleInterval,
-                        _eagerFingerprintIncorporationNagleBatchSize));
+                        _eagerFingerprintIncorporationNagleBatchSize,
+                        _manuallyExtendContentLifetime));
             });
         }
 
@@ -423,7 +457,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 }
                 if (_backingContentStore != null)
                 {
-                    var backingContentStoreStats = await _backingContentStore.GetStatsAsync(context);
+                    var backingContentStoreStats = _backingContentStore.GetStats();
                     if (backingContentStoreStats.Succeeded)
                     {
                         aggregateStats.Merge(backingContentStoreStats.CounterSet, "BackingContentStore.");

@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.IO;
@@ -18,6 +19,7 @@ using BuildXL.Utilities.Tracing;
 using JetBrains.Annotations;
 using Microsoft.Win32.SafeHandles;
 using static BuildXL.Utilities.FormattableStringEx;
+using UnixIO = BuildXL.Interop.Unix.IO;
 
 namespace BuildXL.Native.IO
 {
@@ -345,6 +347,16 @@ namespace BuildXL.Native.IO
         }
 
         /// <summary>
+        /// Returns true if given file attributes denote a reparse point that points to a directory.
+        /// </summary>
+        public static bool IsDirectorySymlinkOrJunction(FileAttributes attributes) 
+        {
+            return
+                    ((attributes & FileAttributes.Directory) == FileAttributes.Directory) &&
+                    ((attributes & FileAttributes.ReparsePoint) != 0);
+        }
+
+        /// <summary>
         /// Checks if a directory exists.
         /// </summary>
         /// <remarks>
@@ -460,7 +472,7 @@ namespace BuildXL.Native.IO
             Contract.Requires(!string.IsNullOrWhiteSpace(sourcePath));
             Contract.Requires(!string.IsNullOrWhiteSpace(destinationPath));
 
-            if (string.Compare(sourcePath, destinationPath, StringComparison.OrdinalIgnoreCase) == 0)
+            if (string.Compare(sourcePath, destinationPath, OperatingSystemHelper.PathComparison) == 0)
             {
                 return Task.FromResult(FileDuplicationResult.Existed); // Nothing to do.
             }
@@ -614,10 +626,10 @@ namespace BuildXL.Native.IO
 
         #region Soft- (Junction) and Hardlink functions
 
-        /// <see cref="IFileSystem.CreateJunction(string, string)"/>
-        public static void CreateJunction(string junctionPoint, string targetDir)
+        /// <see cref="IFileSystem.CreateJunction(string, string, bool, bool)"/>
+        public static void CreateJunction(string junctionPoint, string targetDir, bool createDirectoryForJunction = true, bool allowNonExistentTarget = false)
         {
-            s_fileSystem.CreateJunction(junctionPoint, targetDir);
+            s_fileSystem.CreateJunction(junctionPoint, targetDir, createDirectoryForJunction, allowNonExistentTarget);
         }
 
         /// <see cref="IFileSystem.TryCreateSymbolicLink(string, string, bool)"/>
@@ -627,23 +639,21 @@ namespace BuildXL.Native.IO
         }
 
         /// <summary>
-        /// Tries to create a symlink if it does not exist or targets do not match.
+        /// Tries to create a reparse point if it does not exist or targets do not match.
         /// </summary>
-        public static Possible<Unit> TryCreateSymlinkIfNotExistsOrTargetsDoNotMatch(string symlink, string symlinkTarget, bool isTargetFile, out bool created)
+        public static Possible<Unit> TryCreateReparsePointIfNotExistsOrTargetsDoNotMatch(string reparsePoint, string reparsePointTarget, ReparsePointType type, out bool created)
         {
             created = false;
-            var possibleReparsePoint = TryGetReparsePointType(symlink);
-
             bool shouldCreate = true;
 
-            if (possibleReparsePoint.Succeeded && IsReparsePointActionable(possibleReparsePoint.Result))
+            if (IsReparsePointActionable(type))
             {
                 var openResult = TryCreateOrOpenFile(
-                    symlink,
+                    reparsePoint,
                     FileDesiredAccess.GenericRead,
                     FileShare.Read | FileShare.Delete,
                     FileMode.Open,
-                    FileFlagsAndAttributes.FileFlagOverlapped | FileFlagsAndAttributes.FileFlagOpenReparsePoint,
+                    FileFlagsAndAttributes.FileFlagOverlapped | FileFlagsAndAttributes.FileFlagOpenReparsePoint | FileFlagsAndAttributes.FileFlagBackupSemantics,
                     out SafeFileHandle handle);
 
                 if (openResult.Succeeded)
@@ -651,11 +661,12 @@ namespace BuildXL.Native.IO
                     using (handle)
                     {
                         // Do not attempt to convert the target path to absolute path - always compare raw targets
-                        var possibleExistingSymlinkTarget = TryGetReparsePointTarget(handle, symlink);
+                        var possibleExistingSymlinkTarget = TryGetReparsePointTarget(handle, reparsePoint);
+                        var possibleExistingSymlinkType = TryGetReparsePointType(reparsePoint);
 
-                        if (possibleExistingSymlinkTarget.Succeeded)
+                        if (possibleExistingSymlinkTarget.Succeeded && possibleExistingSymlinkType.Succeeded)
                         {
-                            shouldCreate = !string.Equals(symlinkTarget, possibleExistingSymlinkTarget.Result, StringComparison.OrdinalIgnoreCase);
+                            shouldCreate = !string.Equals(reparsePointTarget, possibleExistingSymlinkTarget.Result, OperatingSystemHelper.PathComparison) || type != possibleExistingSymlinkType.Result;
                         }
                     }
                 }
@@ -663,13 +674,28 @@ namespace BuildXL.Native.IO
 
             if (shouldCreate)
             {
-                s_fileUtilities.DeleteFile(symlink, waitUntilDeletionFinished: true);
-                CreateDirectory(Path.GetDirectoryName(symlink));
-                var maybeSymbolicLink = s_fileSystem.TryCreateSymbolicLink(symlink, symlinkTarget, isTargetFile: isTargetFile);
+                s_fileUtilities.DeleteFile(reparsePoint, waitUntilDeletionFinished: true);
 
-                if (!maybeSymbolicLink.Succeeded)
+                if (type == ReparsePointType.Junction)
                 {
-                    return maybeSymbolicLink.Failure;
+                    try
+                    {
+                        s_fileSystem.CreateJunction(reparsePoint, reparsePointTarget, allowNonExistentTarget: true);
+                    }
+                    catch (Exception e)
+                    {
+                        return new Failure<Exception>(e);
+                    }
+                }
+                else
+                {
+                    CreateDirectory(Path.GetDirectoryName(reparsePoint));
+                    
+                    var maybeSymbolicLink = s_fileSystem.TryCreateSymbolicLink(reparsePoint, reparsePointTarget, isTargetFile: type != ReparsePointType.DirectorySymlink);
+                    if (!maybeSymbolicLink.Succeeded)
+                    {
+                        return maybeSymbolicLink.Failure;
+                    }
                 }
 
                 created = true;
@@ -694,12 +720,6 @@ namespace BuildXL.Native.IO
         public static bool IsReparsePointActionable(ReparsePointType reparsePointType)
         {
             return s_fileSystem.IsReparsePointActionable(reparsePointType);
-        }
-
-        /// <see cref="IFileSystem.IsReparsePointSymbolicLink(ReparsePointType)"/>
-        public static bool IsReparsePointSymbolicLink(ReparsePointType reparsePointType)
-        {
-            return s_fileSystem.IsReparsePointSymbolicLink(reparsePointType);
         }
 
         /// <see cref="IFileSystem.TryGetReparsePointType(string)"/>
@@ -1302,11 +1322,11 @@ namespace BuildXL.Native.IO
 
             string directoryHandlePath = GetFinalPathNameByHandle(directoryHandle, volumeGuidPath: false);
 
-            if (!string.Equals(referenceFullPath, directoryHandlePath, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(referenceFullPath, directoryHandlePath, OperatingSystemHelper.PathComparison))
             {
                 string commonPath = referenceFullPath.Substring(2); // Include '\' of '<Drive>:\'  for searching.
                 substTarget = referenceFullPath.Substring(0, 3);    // Include '\' of '<Drive>:\' in the substTarget.
-                int commonIndex = directoryHandlePath.IndexOf(commonPath, 0, StringComparison.OrdinalIgnoreCase);
+                int commonIndex = directoryHandlePath.IndexOf(commonPath, 0, OperatingSystemHelper.PathComparison);
 
                 if (commonIndex == -1)
                 {
@@ -1319,6 +1339,43 @@ namespace BuildXL.Native.IO
             }
 
             return !string.IsNullOrWhiteSpace(substSource) && !string.IsNullOrWhiteSpace(substTarget);
+        }
+
+        /// <summary>
+        /// Unix only (no-op on windows): sets u+x on <paramref name="fileName"/>.  Throws if file doesn't exists and <paramref name="throwIfNotFound"/> is true.
+        /// </summary>
+        /// <returns>
+        /// true if file exists and already has execute permissions or execute permissions were set. Otherwise, false.
+        /// </returns>
+        public static bool TrySetExecutePermissionIfNeeded(string fileName, bool throwIfNotFound = true)
+        {
+            if (OperatingSystemHelper.IsUnixOS)
+            {
+                var mode = UnixIO.GetFilePermissionsForFilePath(fileName, followSymlink: false);
+                if (mode < 0)
+                {
+                    if (throwIfNotFound)
+                    {
+                        throw new BuildXLException($"Process creation failed: File '{fileName}' not found", new Win32Exception(0x2));
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+
+                var filePermissions = checked((UnixIO.FilePermissions)mode);
+                UnixIO.FilePermissions exePermission = UnixIO.FilePermissions.S_IXUSR;
+                if (!filePermissions.HasFlag(exePermission))
+                {
+                    var result = UnixIO.SetFilePermissionsForFilePath(fileName, (filePermissions | exePermission));
+                    return result >= 0;
+                }
+
+                return true;
+            }
+
+            return true;
         }
 
         /// <summary>

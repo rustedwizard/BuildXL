@@ -33,6 +33,7 @@ namespace Engine {
             importFrom("BuildXL.Cache.ContentStore").UtilitiesCore.dll,
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
             importFrom("BuildXL.Cache.ContentStore").Library.dll,
+            importFrom("BuildXL.Cache.ContentStore").Grpc.dll,
             importFrom("BuildXL.Cache.MemoizationStore").Interfaces.dll,
             importFrom("BuildXL.Pips").dll,
             importFrom("BuildXL.Ide").Generator.dll,
@@ -46,9 +47,7 @@ namespace Engine {
             importFrom("BuildXL.Utilities").Storage.dll,
             importFrom("BuildXL.Utilities").Script.Constants.dll,
             importFrom("BuildXL.FrontEnd").Sdk.dll,
-            importFrom("Google.Protobuf").pkg,
-            importFrom("Grpc.Core").pkg,
-            importFrom("Grpc.Core.Api").pkg,
+            ...importFrom("BuildXL.Cache.ContentStore").getGrpcPackages(true),
             importFrom("Newtonsoft.Json").pkg,
         ],
         internalsVisibleTo: [

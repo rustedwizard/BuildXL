@@ -5,6 +5,7 @@ using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
@@ -30,20 +31,24 @@ namespace ContentStoreTest.Utils
 
         private static double MbPerSec(double bytesPerSec) => bytesPerSec / (1024 * 1024);
 
-        private static async Task<CopyFileResult> CopyRandomToStreamAtSpeed(CancellationToken token, Stream stream, long totalBytes, double mbPerSec)
+        private static async Task<CopyFileResult> CopyRandomToStreamAtSpeed(CancellationToken token, Stream stream, long totalBytes, double mbPerSec, CopyOptions options)
         {
             var interval = TimeSpan.FromSeconds(0.1);
             var copied = 0;
             var bytesPerInterval = (int)BytesPerInterval(mbPerSec, interval);
+
             Assert.True(bytesPerInterval > 0);
             var buffer = new byte[bytesPerInterval];
+
             while (!token.IsCancellationRequested)
             {
                 var intervalTask = Task.Delay(interval);
 
                 Random.NextBytes(buffer);
                 await stream.WriteAsync(buffer, 0, bytesPerInterval);
+                
                 copied += bytesPerInterval;
+                options.UpdateTotalBytesCopied(copied);
 
                 if (copied >= totalBytes)
                 {
@@ -90,7 +95,8 @@ namespace ContentStoreTest.Utils
 
                             throw new Exception("1");
                         }),
-                    destinationStream: stream);
+                    options: new CopyOptions(bandwidthConfiguration: null),
+                    getErrorResult: diagnostics => new CopyFileResult(CopyResultCode.CopyBandwidthTimeoutError, diagnostics));
 
                 await Task.Delay(10);
                 try
@@ -116,7 +122,7 @@ namespace ContentStoreTest.Utils
                 // in memory indefinitely.
                 TaskScheduler.UnobservedTaskException -= taskSchedulerOnUnobservedTaskException;
             }
-            
+
             // This test is not 100% bullet proof, and it is possible that the test will pass even when the issue is still in the code.
             // But the original issue was very consistent and the test was failing even from the IDE in Debug mode all the time.
             numberOfUnobservedExceptions.Should().Be(0);
@@ -135,7 +141,12 @@ namespace ContentStoreTest.Utils
 
             using (var stream = new MemoryStream())
             {
-                var result = await checker.CheckBandwidthAtIntervalAsync(_context, token => CopyRandomToStreamAtSpeed(token, stream, totalBytes, actualBandwidth), stream);
+                var options = new CopyOptions(bandwidthConfiguration: null);
+                var result = await checker.CheckBandwidthAtIntervalAsync(
+                    _context,
+                    token => CopyRandomToStreamAtSpeed(token, stream, totalBytes, actualBandwidth, options),
+                    options,
+                    getErrorResult: diagnostics => new CopyFileResult(CopyResultCode.CopyBandwidthTimeoutError, diagnostics));
                 Assert.True(result.Succeeded);
             }
         }
@@ -153,7 +164,41 @@ namespace ContentStoreTest.Utils
 
             using (var stream = new MemoryStream())
             {
-                var result = await checker.CheckBandwidthAtIntervalAsync(_context, token => CopyRandomToStreamAtSpeed(token, stream, totalBytes, actualBandwidth), stream);
+                var options = new CopyOptions(bandwidthConfiguration: null);
+                var result = await checker.CheckBandwidthAtIntervalAsync(
+                    _context,
+                    token => CopyRandomToStreamAtSpeed(token, stream, totalBytes, actualBandwidth, options),
+                    options,
+                    getErrorResult: diagnostics => new CopyFileResult(CopyResultCode.CopyBandwidthTimeoutError, diagnostics));
+                Assert.Equal(CopyResultCode.CopyBandwidthTimeoutError, result.Code);
+            }
+        }
+
+        [Fact]
+        public async Task BandwidthCheckTimesOutOnSlowCopyByUsingCopyToOptions()
+        {
+            var checkInterval = TimeSpan.FromSeconds(1);
+            var actualBandwidthBytesPerSec = 1024;
+            var actualBandwidth = MbPerSec(bytesPerSec: actualBandwidthBytesPerSec);
+            var bandwidthLimit = MbPerSec(bytesPerSec: actualBandwidthBytesPerSec / 2); // Making sure the actual bandwidth checking options more permissive.
+            var totalBytes = actualBandwidthBytesPerSec * 2;
+            var checkerConfig = new BandwidthChecker.Configuration(checkInterval, bandwidthLimit, maxBandwidthLimit: null, bandwidthLimitMultiplier: null, historicalBandwidthRecordsStored: null);
+            var checker = new BandwidthChecker(checkerConfig);
+
+            using (var stream = new MemoryStream())
+            {
+                var bandwidthConfiguration = new BandwidthConfiguration()
+                {
+                    Interval = checkInterval,
+                    RequiredBytes = actualBandwidthBytesPerSec * 2,
+                };
+
+                var options = new CopyOptions(bandwidthConfiguration);
+                var result = await checker.CheckBandwidthAtIntervalAsync(
+                    _context,
+                    token => CopyRandomToStreamAtSpeed(token, stream, totalBytes, actualBandwidth, options),
+                    options,
+                    getErrorResult: diagnostics => new CopyFileResult(CopyResultCode.CopyBandwidthTimeoutError, diagnostics));
                 Assert.Equal(CopyResultCode.CopyBandwidthTimeoutError, result.Code);
             }
         }

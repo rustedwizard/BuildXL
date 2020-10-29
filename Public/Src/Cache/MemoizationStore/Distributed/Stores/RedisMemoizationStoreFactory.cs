@@ -14,7 +14,8 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
     /// <nodoc />
     public class RedisMemoizationStoreFactory : ContentLocationStoreFactory
     {
-        private readonly TimeSpan _memoizationExpiryTime;
+        /// <nodoc />
+        protected new RedisMemoizationStoreConfiguration Configuration => (RedisMemoizationStoreConfiguration)base.Configuration;
 
         /// <nodoc />
         public RedisMemoizationStoreFactory(
@@ -23,19 +24,26 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Stores
             IDistributedContentCopier copier)
             : base(clock, configuration, copier)
         {
-            _memoizationExpiryTime = configuration.MemoizationExpiryTime;
         }
 
         /// <nodoc />
         public IMemoizationStore CreateMemoizationStore(ILogger logger)
         {
-            var redisDatabaseFactory = RedisDatabaseFactoryForRedisGlobalStore;
+            var primaryRedisDatabaseFactory = RedisDatabaseFactoryForRedisGlobalStore;
+            Contract.Assert(primaryRedisDatabaseFactory != null);
+            var primaryRedisDatabaseAdapter = CreateDatabase(primaryRedisDatabaseFactory);
 
-            Contract.Assert(redisDatabaseFactory != null);
+            var secondaryRedisDatabaseFactory = RedisDatabaseFactoryForRedisGlobalStoreSecondary;
+            Contract.Assert(secondaryRedisDatabaseFactory != null);
+            var secondaryRedisDatabaseAdapter = CreateDatabase(secondaryRedisDatabaseFactory, optional: true);
 
-            var redisDatabaseAdapter = CreateDatabase(redisDatabaseFactory);
-
-            var memoizationDb = new RedisMemoizationDatabase(redisDatabaseAdapter, Clock, _memoizationExpiryTime);
+            var memoizationDb = new RedisMemoizationDatabase(
+                primaryRedisDatabaseAdapter,
+                secondaryRedisDatabaseAdapter,
+                Clock,
+                Configuration.MemoizationExpiryTime,
+                Configuration.MemoizationOperationTimeout,
+                Configuration.MemoizationSlowOperationCancellationTimeout);
             return new RedisMemoizationStore(logger, memoizationDb);
         }
 

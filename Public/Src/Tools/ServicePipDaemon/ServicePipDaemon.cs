@@ -9,6 +9,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Ipc;
@@ -30,18 +31,21 @@ namespace Tool.ServicePipDaemon
     public abstract class ServicePipDaemon : IDisposable, IIpcOperationExecutor
     {
         /// <nodoc/>
-        protected internal static readonly IIpcProvider IpcProvider = IpcFactory.GetProvider();
+        public const string LogPrefix = "(SPD) ";
 
-        private static readonly List<Option> s_daemonConfigOptions = new List<Option>();
-
-        /// <summary>Initialized commands</summary>
-        protected static readonly Dictionary<string, Command> Commands = new Dictionary<string, Command>();
+        /// <nodoc/>
+        protected const string IncludeAllFilter = ".*";
 
         private const string LogFileName = "ServiceDaemon";
         private const char ResponseFilePrefix = '@';
 
         /// <nodoc/>
-        public const string LogPrefix = "(SPD) ";
+        protected internal static readonly IIpcProvider IpcProvider = IpcFactory.GetProvider();
+
+        /// <summary>Initialized commands</summary>
+        protected static readonly Dictionary<string, Command> Commands = new Dictionary<string, Command>();
+
+        private static readonly List<Option> s_daemonConfigOptions = new List<Option>();
 
         /// <summary>Daemon configuration.</summary>
         public DaemonConfig Config { get; }
@@ -440,6 +444,7 @@ namespace Tool.ServicePipDaemon
             TimeSpan queueDuration = operation.Timestamp.Daemon_BeforeExecuteTime - operation.Timestamp.Daemon_AfterReceivedTime;
             m_counters.AddToCounter(DaemonCounter.QueueDurationMs, (long)queueDuration.TotalMilliseconds);
 
+            m_logger.Verbose($"Request #{id} processed in {queueDuration}, Result: {result.ExitCode}");
             return result;
         }
 
@@ -589,7 +594,7 @@ namespace Tool.ServicePipDaemon
         private static string ToPayload(ConfiguredCommand cmd) => ToPayload(cmd.Command.Name, cmd.Config);
 
         /// <nodoc/>
-        protected static void SetupThreadPoolAndServicePoint(int minWorkerThreads, int minIoThreads, int minServicePointParallelism)
+        protected static void SetupThreadPoolAndServicePoint(int minWorkerThreads, int minIoThreads, int? minServicePointParallelism)
         {
             int workerThreads, ioThreads;
             ThreadPool.GetMinThreads(out workerThreads, out ioThreads);
@@ -598,7 +603,30 @@ namespace Tool.ServicePipDaemon
             ioThreads = Math.Max(ioThreads, minIoThreads);
             ThreadPool.SetMinThreads(workerThreads, ioThreads);
 
-            ServicePointManager.DefaultConnectionLimit = Math.Max(minServicePointParallelism, ServicePointManager.DefaultConnectionLimit);
+            if (minServicePointParallelism.HasValue)
+            {
+                ServicePointManager.DefaultConnectionLimit = Math.Max(minServicePointParallelism.Value, ServicePointManager.DefaultConnectionLimit);
+            }
+        }
+
+        /// <summary>
+        /// Takes a list of strings and returns a initialized regular expressions
+        /// </summary>
+        protected static Possible<Regex[]> InitializeFilters(string[] filters)
+        {
+            try
+            {
+                var initializedFilters = filters.Select(
+                    filter => filter == IncludeAllFilter
+                        ? null
+                        : new Regex(filter, RegexOptions.IgnoreCase));
+
+                return initializedFilters.ToArray();
+            }
+            catch (Exception e)
+            {
+                return new Failure<string>(e.DemystifyToString());
+            }
         }
     }
 }

@@ -13,7 +13,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MonitorNtCreateFile = true;
             UnexpectedFileAccessesAreErrors = true;
             IgnoreReparsePoints = false;
-            IgnoreFullSymlinkResolving = true;
+            IgnoreFullReparsePointResolving = true;
             IgnorePreloadedDlls = false;
             SandboxKind = SandboxKind.Default;
 
@@ -63,7 +63,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             IgnoreNonCreateFileReparsePoints = template.IgnoreNonCreateFileReparsePoints;
             IgnoreSetFileInformationByHandle = template.IgnoreSetFileInformationByHandle;
             IgnoreReparsePoints = template.IgnoreReparsePoints;
-            IgnoreFullSymlinkResolving = template.IgnoreFullSymlinkResolving;
+            IgnoreFullReparsePointResolving = template.IgnoreFullReparsePointResolving;
             IgnorePreloadedDlls = template.IgnorePreloadedDlls;
             SandboxKind = template.SandboxKind;
             ExistingDirectoryProbesAsEnumerations = template.ExistingDirectoryProbesAsEnumerations;
@@ -76,6 +76,8 @@ namespace BuildXL.Utilities.Configuration.Mutable
             IgnoreCreateProcessReport = template.IgnoreCreateProcessReport;
             ProbeDirectorySymlinkAsDirectory = template.ProbeDirectorySymlinkAsDirectory;
             ProcessSymlinkedAccesses = template.ProcessSymlinkedAccesses;
+            SkipFlaggingSharedOpaqueOutputs = template.SkipFlaggingSharedOpaqueOutputs;
+            EnableFullReparsePointResolving = template.EnableFullReparsePointResolving;
         }
 
         /// <inheritdoc />
@@ -101,9 +103,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public bool IgnoreReparsePoints { get; set; }
-        
+
         /// <inheritdoc />
-        public bool IgnoreFullSymlinkResolving { get; set; }
+        public bool IgnoreFullReparsePointResolving { get; set; }
 
         /// <inheritdoc />
         public bool IgnorePreloadedDlls { get; set; }
@@ -130,7 +132,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public DynamicWriteOnAbsentProbePolicy IgnoreDynamicWritesOnAbsentProbes { get; set; }
 
         /// <inheritdoc />
-        public DoubleWritePolicy? DoubleWritePolicy { get; set; }
+        public RewritePolicy? DoubleWritePolicy { get; set; }
 
         /// <inheritdoc />
         public bool IgnoreUndeclaredAccessesUnderSharedOpaques { get; set; }
@@ -143,6 +145,12 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public bool? ProcessSymlinkedAccesses { get; set; }
+
+        /// <inheritdoc />
+        public bool? EnableFullReparsePointResolving { get; set; }
+
+        /// <inheritdoc/>
+        public bool? SkipFlaggingSharedOpaqueOutputs { get; set; }
 
     }
 }

@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.IO.Compression;
@@ -24,7 +23,6 @@ using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.Utils;
-using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tracing;
 using ContentStore.Grpc;
 using Google.Protobuf;
@@ -40,11 +38,11 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
     {
         /// <nodoc />
         [CounterType(CounterType.Stopwatch)]
-        NormalByteStringConstructionInStreamContent,
+        StreamContentReadFromDiskDuration,
 
         /// <nodoc />
         [CounterType(CounterType.Stopwatch)]
-        OptimizedByteStringConstructionInStreamContent,
+        StreamContentDuration,
     }
 
     /// <summary>
@@ -103,7 +101,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         /// </summary>
         private readonly int _ongoingPushCountLimit;
 
-        private readonly bool _useUnsafeByteStringConstruction;
+        private readonly bool _traceGrpcOperations;
 
         /// <nodoc />
         public GrpcContentServer(
@@ -117,11 +115,10 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
 
             _serviceCapabilities = serviceCapabilities;
             _contentStoreByCacheName = storesByName;
-            _bufferSize = localServerConfiguration?.BufferSizeForGrpcCopies ?? ContentStore.Grpc.CopyConstants.DefaultBufferSize;
+            _bufferSize = localServerConfiguration?.BufferSizeForGrpcCopies ?? ContentStore.Grpc.GrpcConstants.DefaultBufferSizeBytes;
             _gzipSizeBarrier = localServerConfiguration?.GzipBarrierSizeForGrpcCopies ?? (_bufferSize * 8);
             _ongoingPushCountLimit = localServerConfiguration?.ProactivePushCountLimit ?? LocalServerConfiguration.DefaultProactivePushCountLimit;
-            _useUnsafeByteStringConstruction = localServerConfiguration?.UseUnsafeByteStringConstruction ?? false;
-
+            _traceGrpcOperations = localServerConfiguration?.TraceGrpcOperations ?? false;
             _pool = new ByteArrayPool(_bufferSize);
             ContentSessionHandler = sessionHandler;
 
@@ -335,7 +332,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                     default:
                         throw new NotImplementedException($"Unknown result.Code '{result.Code}'.");
                 }
-                
+
                 // Send the response headers.
                 await context.WriteResponseHeadersAsync(headers);
 
@@ -356,10 +353,32 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                             _tracer,
                             () => streamContent(result.Stream!, buffer, secondaryBuffer, responseStream, operationContext.Token),
                             traceOperationStarted: false, // Tracing only stop messages
-                            extraEndMessage: r => $"Hash={hash.ToShortString()}, GZip={(compression == CopyCompression.Gzip ? "on" : "off")}, Size=[{size}], Sender=[{context.Host}].")
+                            extraEndMessage: r => $"Hash={hash.ToShortString()}, GZip={(compression == CopyCompression.Gzip ? "on" : "off")}, Size=[{size}], Sender=[{GetSender(context)}], ReadTime=[{GetFileIODuration(result.Stream)}].",
+                            counter: Counters[GrpcContentServerCounters.StreamContentDuration])
                         .IgnoreFailure(); // The error was already logged.
                 }
             }
+        }
+
+        private static string? GetSender(ServerCallContext context)
+        {
+            if (context.RequestHeaders.TryGetCallingMachineName(out var result))
+            {
+                return result;
+            }
+
+            return context.Host;
+        }
+
+        private string GetFileIODuration(Stream? resultStream)
+        {
+            if (resultStream is TrackingFileStream tfs)
+            {
+                Counters.AddToCounter(GrpcContentServerCounters.StreamContentReadFromDiskDuration, tfs.ReadDuration);
+                return $"{tfs.ReadDuration.TotalMilliseconds}ms";
+            }
+
+            return string.Empty;
         }
 
         /// <summary>
@@ -474,12 +493,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                         // From the docs: On the server side, MoveNext() does not throw exceptions.
                         // In case of a failure, the request stream will appear to be finished (MoveNext will return false)
                         // and the CancellationToken associated with the call will be cancelled to signal the failure.
-                        while (await requestStream.MoveNext(token))
-                        {
-                            var request = requestStream.Current;
-                            var bytes = request.Content.ToByteArray();
-                            await tempFile.Stream.WriteAsync(bytes, 0, bytes.Length, token);
-                        }
+                        await GrpcExtensions.CopyChunksToStreamAsync(requestStream, tempFile.Stream, request => request.Content, cancellationToken: token);
                     }
 
                     if (token.IsCancellationRequested)
@@ -493,7 +507,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                         }
 
                         var cancellationSource = callContext.CancellationToken.IsCancellationRequested ? "caller" : "handler";
-                        cacheContext.Debug($"{nameof(HandlePushFileAsync)}: Copy of {hash.ToShortString()} cancelled by {cancellationSource}.");
+                        _tracer.Debug(cacheContext, $"{nameof(HandlePushFileAsync)}: Copy of {hash.ToShortString()} cancelled by {cancellationSource}.");
                         return;
                     }
 
@@ -519,68 +533,11 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
 
         private async Task<Result<(long Chunks, long Bytes)>> StreamContentAsync(Stream input, byte[] buffer, byte[] secondaryBuffer, IServerStreamWriter<CopyFileResponse> responseStream, CancellationToken ct)
         {
-            long chunks = 0L;
-            long bytes = 0L;
-
-            byte[] inputBuffer = buffer;
-
-            // Pre-fill buffer with the file's first chunk
-            int chunkSize = await readNextChunk(input, inputBuffer, ct);
-
-            while (true)
+            return await GrpcExtensions.CopyStreamToChunksAsync(input, responseStream, (content, chunks) => new CopyFileResponse()
             {
-                ct.ThrowIfCancellationRequested();
-
-                if (chunkSize == 0) { break; }
-
-                // Created ByteString can reuse the buffer.
-                // To avoid double writes we need two buffers:
-                // * One buffer is used as the output buffer
-                // * And another buffer is used as the input buffer.
-                (ByteString content, bool bufferReused) = CreateByteStringForStreamContent(inputBuffer, chunkSize);
-                CopyFileResponse response = new CopyFileResponse() { Content = content, Index = chunks };
-
-                if (bufferReused)
-                {
-                    // If the buffer is reused we need to swap the input buffer with the secondary buffer.
-                    inputBuffer = inputBuffer == buffer ? secondaryBuffer : buffer;
-                }
-
-                bytes += chunkSize;
-                chunks++;
-
-                // Read the next chunk while waiting for the response
-                var readNextChunkTask = readNextChunk(input, inputBuffer, ct);
-                await Task.WhenAll(readNextChunkTask, responseStream.WriteAsync(response));
-
-                chunkSize = await readNextChunkTask;
-            }
-
-            return (chunks, bytes);
-
-            static async Task<int> readNextChunk(Stream input, byte[] buffer, CancellationToken token) { return await input.ReadAsync(buffer, 0, buffer.Length, token); }
-        }
-
-        private (ByteString result, bool bufferReused) CreateByteStringForStreamContent(byte[] buffer, int chunkSize)
-        {
-            // In some cases ByteString construction can be very expensive both in terms CPU and memory.
-            // For instance, during the content streaming we understand and control the ownership of the buffers
-            // and in that case we can avoid extra copy done by ByteString.CopyFrom call.
-            //
-            // But we can use an unsafe version only when the chunk size is the same as the buffer size.
-            if (_useUnsafeByteStringConstruction && chunkSize == buffer.Length)
-            {
-                // The feature is configured, and we can pass the entire buffer into the unsafely created ByteString
-                using (Counters[GrpcContentServerCounters.OptimizedByteStringConstructionInStreamContent].Start())
-                {
-                    return (ByteStringExtensions.UnsafeCreateFromBytes(buffer), bufferReused: true);
-                }
-            }
-
-            using (Counters[GrpcContentServerCounters.NormalByteStringConstructionInStreamContent].Start())
-            {
-                return (ByteString.CopyFrom(buffer, 0, chunkSize), bufferReused: false);
-            }
+                Content = content,
+                Index = chunks,
+            }, buffer, secondaryBuffer, cancellationToken: ct);
         }
 
         private async Task<Result<(long Chunks, long Bytes)>> StreamContentWithCompressionAsync(Stream input, byte[] buffer, byte[] secondaryBuffer, IServerStreamWriter<CopyFileResponse> responseStream, CancellationToken ct)
@@ -785,7 +742,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 (context, errorMessage) => new HeartbeatResponse { Header = ResponseHeader.Failure(context.StartTime, errorMessage) },
                 token,
                 // It is important to trace heartbeat messages because lack of them will cause sessions to expire.
-                trace: true);
+                traceStartAndStop: true);
         }
 
         private async Task<DeleteContentResponse> DeleteAsync(DeleteContentRequest request, CancellationToken ct)
@@ -831,7 +788,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                     response.Result = code;
                     return response;
                 },
-                (context, errorMessage) => new DeleteContentResponse() {Header = ResponseHeader.Failure(context.StartTime, errorMessage)},
+                (context, errorMessage) => new DeleteContentResponse() { Header = ResponseHeader.Failure(context.StartTime, errorMessage) },
                 token: ct
                 );
         }
@@ -854,10 +811,12 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             Func<RequestContext, IContentSession, Task<T>> taskFunc,
             Func<RequestContext, string, T> failFunc,
             CancellationToken token,
-            bool trace = false,
+            bool? traceStartAndStop = null,
             bool obtainSession = true,
-            [CallerMemberName]string? caller = null)
+            [CallerMemberName] string? caller = null)
         {
+            bool trace = traceStartAndStop ?? _traceGrpcOperations;
+
             var tracingContext = new Context(Guid.Parse(header.TraceId), Logger);
             using var shutdownTracker = TrackShutdown(tracingContext, token);
 
@@ -878,19 +837,18 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             // Detaching from the calling thread to (potentially) avoid IO Completion port thread exhaustion
             await Task.Yield();
 
-            
             try
             {
                 if (trace)
                 {
-                    tracingContext.Debug($"Starting GRPC operation {caller} for session {sessionId}.");
+                    Tracer.Debug(tracingContext, $"Starting GRPC operation {caller} for session {sessionId}.");
                 }
 
                 var result = await taskFunc(context, session!);
 
                 if (trace)
                 {
-                    tracingContext.Debug($"GRPC operation {caller} is finished in {sw.Elapsed.TotalMilliseconds}ms for session {sessionId}.");
+                    Tracer.Debug(tracingContext, $"GRPC operation {caller} is finished in {sw.Elapsed.TotalMilliseconds}ms for session {sessionId}.");
                 }
 
                 return result;
@@ -898,12 +856,12 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             catch (TaskCanceledException)
             {
                 var message = $"The GRPC server operation {caller} was canceled in {sw.Elapsed.TotalMilliseconds}ms.";
-                tracingContext.Info(message);
+                Tracer.Info(tracingContext, message);
                 return failFunc(context, message);
             }
             catch (Exception e)
             {
-                tracingContext.Error($"GRPC server operation {caller} failed in {sw.Elapsed.TotalMilliseconds}ms. {e}");
+                Tracer.Error(tracingContext, $"GRPC server operation {caller} failed in {sw.Elapsed.TotalMilliseconds}ms. {e}");
                 return failFunc(context, e.ToString());
             }
         }
@@ -915,7 +873,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             CancellationToken token)
         {
             return RunFuncAsync(
-                new RequestHeader(traceId, sessionId: -1), 
+                new RequestHeader(traceId, sessionId: -1),
                 (context, _) => taskFunc(context),
                 failFunc,
                 token,

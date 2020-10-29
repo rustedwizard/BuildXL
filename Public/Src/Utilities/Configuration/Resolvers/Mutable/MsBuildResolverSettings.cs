@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Collections.Generic;
+using BuildXL.Utilities.Configuration.Resolvers;
 
 namespace BuildXL.Utilities.Configuration.Mutable
 {
@@ -33,6 +34,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             UntrackedDirectoryScopes = resolverSettings.UntrackedDirectoryScopes;
             UntrackedFiles = resolverSettings.UntrackedFiles;
             UntrackedDirectories = resolverSettings.UntrackedDirectories;
+            UntrackedGlobalDirectoryScopes = resolverSettings.UntrackedGlobalDirectoryScopes;
             RunInContainer = resolverSettings.RunInContainer;
             MsBuildSearchLocations = resolverSettings.MsBuildSearchLocations;
             FileNameEntryPoints = resolverSettings.FileNameEntryPoints;
@@ -70,13 +72,13 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public IReadOnlyList<DirectoryArtifact> AdditionalOutputDirectories { get; set; }
 
         /// <inheritdoc/>
-        public IReadOnlyList<DirectoryArtifact> UntrackedDirectoryScopes { get; set; }
+        public IReadOnlyList<DiscriminatingUnion<DirectoryArtifact, RelativePath>> UntrackedDirectoryScopes { get; set; }
 
         /// <inheritdoc/>
         public IReadOnlyList<FileArtifact> UntrackedFiles { get; set; }
 
         /// <inheritdoc/>
-        public IReadOnlyList<DirectoryArtifact> UntrackedDirectories { get; set; }
+        public IReadOnlyList<DiscriminatingUnion<DirectoryArtifact, RelativePath>> UntrackedDirectories { get; set; }
 
         /// <inheritdoc/>
         public bool RunInContainer { get; set; }
@@ -91,7 +93,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public IReadOnlyList<string> InitialTargets { get; set; }
 
         /// <inheritdoc/>
-        public IReadOnlyDictionary<string, DiscriminatingUnion<string, UnitValue>> Environment { get; set; }
+        public IReadOnlyDictionary<string, EnvironmentData> Environment { get; set; }
 
         /// <inheritdoc/>
         public IReadOnlyDictionary<string, string> GlobalProperties { get; set; }
@@ -115,7 +117,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public bool? UseLegacyProjectIsolation { get; set; }
 
         /// <inheritdoc/>
-        public DoubleWritePolicy? DoubleWritePolicy { get; set; }
+        public RewritePolicy? DoubleWritePolicy { get; set; }
 
         /// <inheritdoc/>
         public bool? AllowProjectsToNotSpecifyTargetProtocol { get; set; }
@@ -128,5 +130,8 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc/>
         public bool? UseManagedSharedCompilation { get; set; }
+
+        /// <inheritdoc />
+        public IReadOnlyList<RelativePath> UntrackedGlobalDirectoryScopes { get; set; }
     }
 }

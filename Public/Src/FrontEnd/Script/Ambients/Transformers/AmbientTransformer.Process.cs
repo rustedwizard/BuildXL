@@ -45,11 +45,18 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
         };
 
         // Keep in sync with Transformer.Execute.dsc DoubleWritePolicy definition
-        private static readonly Dictionary<string, DoubleWritePolicy> s_doubleWritePolicyMap = new Dictionary<string, DoubleWritePolicy>(StringComparer.Ordinal)
+        private static readonly Dictionary<string, RewritePolicy> s_doubleWritePolicyMap = new Dictionary<string, RewritePolicy>(StringComparer.Ordinal)
         {
-            ["doubleWritesAreErrors"] = DoubleWritePolicy.DoubleWritesAreErrors,
-            ["allowSameContentDoubleWrites"] = DoubleWritePolicy.AllowSameContentDoubleWrites,
-            ["unsafeFirstDoubleWriteWins"] = DoubleWritePolicy.UnsafeFirstDoubleWriteWins,
+            ["doubleWritesAreErrors"] = RewritePolicy.DoubleWritesAreErrors,
+            ["allowSameContentDoubleWrites"] = RewritePolicy.AllowSameContentDoubleWrites,
+            ["unsafeFirstDoubleWriteWins"] = RewritePolicy.UnsafeFirstDoubleWriteWins,
+        };
+
+        // Keep in sync with Transformer.Execute.dsc DoubleWritePolicy definition
+        private static readonly Dictionary<string, RewritePolicy> s_fileRewritePolicyMap = new Dictionary<string, RewritePolicy>(StringComparer.Ordinal)
+        {
+            ["sourceRewritesAreErrors"] = RewritePolicy.SourceRewritesAreErrors,
+            ["safeSourceRewritesAreAllowed"] = RewritePolicy.SafeSourceRewritesAreAllowed,
         };
 
         private static readonly Dictionary<string, bool> s_privilegeLevel = new Dictionary<string, bool>(StringComparer.Ordinal)
@@ -88,13 +95,17 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
         private SymbolAtom m_executeAcquireMutexes;
         private SymbolAtom m_executeSuccessExitCodes;
         private SymbolAtom m_executeRetryExitCodes;
+        private SymbolAtom m_retryAttemptEnvironmentVariable;
         private SymbolAtom m_executeTempDirectory;
         private SymbolAtom m_executeUnsafe;
         private SymbolAtom m_executeIsLight;
         private SymbolAtom m_executeRunInContainer;
         private SymbolAtom m_executeContainerIsolationLevel;
         private SymbolAtom m_executeDoubleWritePolicy;
+        private SymbolAtom m_executeSourceRewritePolicy;
         private SymbolAtom m_executeAllowUndeclaredSourceReads;
+        private SymbolAtom m_preservePathSetCasing;
+        private SymbolAtom m_processRetries;
         private SymbolAtom m_executeKeepOutputsWritable;
         private SymbolAtom m_privilegeLevel;
         private SymbolAtom m_disableCacheLookup;
@@ -230,13 +241,17 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
             m_executeAcquireMutexes = Symbol("acquireMutexes");
             m_executeSuccessExitCodes = Symbol("successExitCodes");
             m_executeRetryExitCodes = Symbol("retryExitCodes");
+            m_retryAttemptEnvironmentVariable = Symbol("retryAttemptEnvironmentVariable");
             m_executeTempDirectory = Symbol("tempDirectory");
             m_executeUnsafe = Symbol("unsafe");
             m_executeIsLight = Symbol("isLight");
             m_executeRunInContainer = Symbol("runInContainer");
             m_executeContainerIsolationLevel = Symbol("containerIsolationLevel");
             m_executeDoubleWritePolicy = Symbol("doubleWritePolicy");
+            m_executeSourceRewritePolicy = Symbol("sourceRewritePolicy");
             m_executeAllowUndeclaredSourceReads = Symbol("allowUndeclaredSourceReads");
+            m_preservePathSetCasing = Symbol("preservePathSetCasing");
+            m_processRetries = Symbol("processRetries");
             m_executeAbsentPathProbeInUndeclaredOpaqueMode = Symbol("absentPathProbeInUndeclaredOpaquesMode");
 
             m_executeKeepOutputsWritable = Symbol("keepOutputsWritable");
@@ -337,7 +352,7 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
 
         private bool TryScheduleProcessPip(Context context, ObjectLiteral obj, ServicePipKind serviceKind, out ProcessOutputs processOutputs, out Process pip)
         {
-            using (var processBuilder = ProcessBuilder.Create(context.PathTable, context.FrontEndContext.GetPipDataBuilder()))
+            using (var processBuilder = ProcessBuilder.Create(context.PathTable, context.FrontEndContext.GetPipDataBuilder(), context.FrontEndHost.Configuration))
             {
                 ProcessExecuteArguments(context, obj, processBuilder, serviceKind);
 
@@ -362,18 +377,6 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
             processBuilder.Usage = string.IsNullOrEmpty(description)
                 ? PipData.Invalid
                 : PipDataBuilder.CreatePipData(context.StringTable, string.Empty, PipDataFragmentEscaping.NoEscaping, description);
-
-            // Timeouts.
-            var timeout = Converter.ExtractOptionalInt(obj, m_toolTimeoutInMilliseconds);
-            if (timeout.HasValue)
-            {
-                processBuilder.Timeout = TimeSpan.FromMilliseconds(timeout.Value);
-            }
-            var warningTimeout = Converter.ExtractOptionalInt(obj, m_toolWarningTimeoutInMilliseconds);
-            if (warningTimeout.HasValue)
-            {
-                processBuilder.WarningTimeout = TimeSpan.FromMilliseconds(warningTimeout.Value);
-            }
 
             // Arguments.
             var arguments = Converter.ExtractArrayLiteral(obj, m_executeArguments);
@@ -509,6 +512,13 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
             processBuilder.SuccessExitCodes = ProcessOptionalIntArray(obj, m_executeSuccessExitCodes);
             processBuilder.RetryExitCodes = ProcessOptionalIntArray(obj, m_executeRetryExitCodes);
 
+            // Retry attempt environment variable.
+            string retryAttemptEnvVar = Converter.ExtractString(obj, m_retryAttemptEnvironmentVariable, allowUndefined: true);
+            if (!string.IsNullOrWhiteSpace(retryAttemptEnvVar))
+            {
+                processBuilder.SetRetryAttemptEnvironmentVariable(StringId.Create(StringTable, retryAttemptEnvVar));
+            }
+
             // Temporary directory.
             var tempDirectory = Converter.ExtractDirectory(obj, m_executeTempDirectory, allowUndefined: true);
             if (tempDirectory.IsValid)
@@ -634,17 +644,40 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
                     containerIsolationLevel.Value :
                     context.FrontEndHost.Configuration.Sandbox.ContainerConfiguration.ContainerIsolationLevel();
 
-            // Container double write policy
+            // Double write policy
             // The value is set based on the default but overridden if the field is explicitly defined for the pip
-            var doubleWritePolicy = Converter.ExtractStringLiteral(obj, m_executeDoubleWritePolicy, s_doubleWritePolicyMap.Keys, allowUndefined: true);
-            processBuilder.DoubleWritePolicy = doubleWritePolicy != null ?
-                    s_doubleWritePolicyMap[doubleWritePolicy] :
+            var doubleWritePolicyString = Converter.ExtractStringLiteral(obj, m_executeDoubleWritePolicy, s_doubleWritePolicyMap.Keys, allowUndefined: true);
+            var doubleWritePolicy = doubleWritePolicyString != null ?
+                    s_doubleWritePolicyMap[doubleWritePolicyString] :
                     context.FrontEndHost.Configuration.Sandbox.UnsafeSandboxConfiguration.DoubleWritePolicy();
+
+            // Source rewrite write policy
+            // The value is set based on the default but overridden if the field is explicitly defined for the pip
+            var sourceRewritePolicyString = Converter.ExtractStringLiteral(obj, m_executeSourceRewritePolicy, s_fileRewritePolicyMap.Keys, allowUndefined: true);
+            
+            var sourceRewritePolicy = sourceRewritePolicyString != null ?
+                    s_fileRewritePolicyMap[sourceRewritePolicyString] :
+                    context.FrontEndHost.Configuration.Sandbox.UnsafeSandboxConfiguration.SourceWritePolicy();
+
+            processBuilder.RewritePolicy = doubleWritePolicy | sourceRewritePolicy;
 
             // Allow undeclared source reads flag
             if (Converter.ExtractOptionalBoolean(obj, m_executeAllowUndeclaredSourceReads) == true)
             {
                 processBuilder.Options |= Process.Options.AllowUndeclaredSourceReads;
+            }
+
+            // Preserve path set casing flag
+            if (Converter.ExtractOptionalBoolean(obj, m_preservePathSetCasing) == true)
+            {
+                processBuilder.Options |= Process.Options.PreservePathSetCasing;
+            }
+
+            // Process retries
+            int? retries = Converter.ExtractOptionalInt(obj, m_processRetries);
+            if (retries.HasValue)
+            {
+                processBuilder.SetProcessRetries(retries.Value);
             }
 
             // disableCacheLookup flag
@@ -765,8 +798,22 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
                 {
                     var cacheEntry = new CachedToolDefinition();
                     ProcessCachedTool(context, tool, cacheEntry);
+                    // Timeouts.
+                    var timeout = Converter.ExtractOptionalInt(tool, m_toolTimeoutInMilliseconds);
+                    if (timeout.HasValue)
+                    {
+                        cacheEntry.Timeout = TimeSpan.FromMilliseconds(timeout.Value);
+                    }
+                    var warningTimeout = Converter.ExtractOptionalInt(tool, m_toolWarningTimeoutInMilliseconds);
+                    if (warningTimeout.HasValue)
+                    {
+                        cacheEntry.WarningTimeout = TimeSpan.FromMilliseconds(warningTimeout.Value);
+                    }
                     return cacheEntry;
                 });
+
+            processBuilder.Timeout = cachedTool.Timeout;
+            processBuilder.WarningTimeout = cachedTool.WarningTimeout;
 
             processBuilder.Executable = cachedTool.Executable;
             processBuilder.ToolDescription = cachedTool.ToolDescription;

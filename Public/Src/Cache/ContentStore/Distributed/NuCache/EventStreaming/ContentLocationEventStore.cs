@@ -58,6 +58,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
         private readonly CentralStorage _storage;
         private readonly Interfaces.FileSystem.AbsolutePath _workingDirectory;
+        
         private readonly IAbsFileSystem _fileSystem;
         private readonly DisposableDirectory _workingDisposableDirectory;
 
@@ -81,13 +82,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
             Interfaces.FileSystem.AbsolutePath workingDirectory,
             IClock clock)
         {
-            Contract.RequiresNotNull(configuration);
-            Contract.RequiresNotNull(name);
-            Contract.RequiresNotNull(eventHandler);
-            Contract.RequiresNotNull(centralStorage);
-            Contract.RequiresNotNull(workingDirectory);
-            Contract.RequiresNotNull(clock);
-
             _configuration = configuration;
             _fileSystem = new PassThroughFileSystem();
             _storage = centralStorage;
@@ -99,7 +93,17 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
             Tracer = tracer;
 
             ValidationMode validationMode = configuration.SelfCheckSerialization ? (configuration.SelfCheckSerializationShouldFail ? ValidationMode.Fail : ValidationMode.Trace) : ValidationMode.Off;
-            EventDataSerializer = new ContentLocationEventDataSerializer(validationMode);
+
+            // EventDataSerializer is not thread-safe.
+            // This is usually not a problem, because the nagle queue that is used by this class
+            // kind of guarantees that it would be just a single thread responsible for sending the events
+            // to event hub.
+            // But this is not the case when the batch size is 1 (used by tests only).
+            // In this case a special version of a nagle queue is created, that doesn't have this guarantee.
+            // In this case this method can be called from multiple threads causing serialization/deserialization issues.
+            // So to prevent random test failures because of the state corruption we're using lock
+            // if the batch size is 1.
+            EventDataSerializer = new ContentLocationEventDataSerializer(validationMode, synchronize: _configuration.EventBatchSize == 1);
         }
 
         /// <summary>
@@ -128,8 +132,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
         /// <nodoc />
         protected async Task DispatchAsync(OperationContext context, ContentLocationEventData eventData, CounterCollection<ContentLocationEventStoreCounters> counters)
         {
-            Contract.RequiresNotNull(eventData);
-
             switch (eventData)
             {
                 case AddContentLocationEventData addContent:
@@ -179,35 +181,48 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
         private Task GetDeserializeAndDispatchBlobEventAsync(OperationContext context, BlobContentLocationEventData blobEvent, CounterCollection<ContentLocationEventStoreCounters> counters)
         {
+            int batchSize = -1;
+            TimeSpan? getAndDeserializedDuration = null;
+            TimeSpan? dispatchBlobEventDataDuration = null;
+
             return context.PerformOperationAsync(
                 Tracer,
                 async () =>
                 {
-                    IEnumerable<ContentLocationEventData> eventDatas;
+                    IReadOnlyList<ContentLocationEventData> eventDatas;
 
-                    using (counters[GetAndDeserializeEventData].Start())
+                    using (var timer = counters[GetAndDeserializeEventData].Start())
                     {
                         eventDatas = await getAndDeserializeLargeEventDataAsync();
+
+                        getAndDeserializedDuration = timer.Elapsed;
                     }
 
-                    foreach (var eventData in eventDatas)
+                    using (var timer = counters[DispatchBlobEventData].Start())
                     {
-                        if (eventData.Kind == EventKind.AddLocation
-                            || eventData.Kind == EventKind.AddLocationWithoutTouching
-                            || eventData.Kind == EventKind.RemoveLocation)
+                        batchSize = eventDatas.Count;
+                        foreach (var eventData in eventDatas)
                         {
-                            // Add or remove events only go through this code path if reconciling
-                            eventData.Reconciling = true;
+                            if (eventData.Kind == EventKind.AddLocation
+                                || eventData.Kind == EventKind.AddLocationWithoutTouching
+                                || eventData.Kind == EventKind.RemoveLocation)
+                            {
+                                // Add or remove events only go through this code path if reconciling
+                                eventData.Reconciling = true;
+                            }
+
+                            await DispatchAsync(context, eventData, counters);
                         }
 
-                        await DispatchAsync(context, eventData, counters);
+                        dispatchBlobEventDataDuration = timer.Elapsed;
                     }
 
                     return BoolResult.Success;
+                },
+                extraEndMessage: _ => $"BlobName={blobEvent.BlobId} Size=[{batchSize}] GetAndDeserializedDuration={getAndDeserializedDuration.GetValueOrDefault().TotalMilliseconds}ms DispatchBlobEventDuration={dispatchBlobEventDataDuration.GetValueOrDefault().TotalMilliseconds}ms")
+                .ThrowIfFailure();
 
-                }).ThrowIfFailure();
-
-            async Task<IEnumerable<ContentLocationEventData>> getAndDeserializeLargeEventDataAsync()
+            async Task<IReadOnlyList<ContentLocationEventData>> getAndDeserializeLargeEventDataAsync()
             {
                 var blobFilePath = _workingDirectory / Guid.NewGuid().ToString();
                 var blobName = blobEvent.BlobId;
@@ -222,6 +237,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                     FileOptions.DeleteOnClose,
                     AbsFileSystemExtension.DefaultFileStreamBufferSize);
                 using var reader = BuildXLReader.Create(stream, leaveOpen: true);
+
                 // Calling ToList to force materialization of IEnumerable to avoid access of disposed stream.
                 return EventDataSerializer.DeserializeEvents(reader).ToList();
             }
@@ -448,7 +464,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                 Tracer,
                 async () =>
                 {
-                    if (data.Entry.ContentHashListWithDeterminism.ContentHashList?.Hashes.Count < LargeUpdateMetadataEventHashCountThreshold)
+                    if ((data.Entry.ContentHashListWithDeterminism.ContentHashList?.Hashes.Count ?? 0) < LargeUpdateMetadataEventHashCountThreshold)
                     {
                         Publish(context, data);
                     }

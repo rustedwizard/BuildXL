@@ -17,6 +17,7 @@ using BuildXL.Storage.ChangeJournalService;
 using BuildXL.Storage.ChangeJournalService.Protocol;
 using BuildXL.Storage.Tracing;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
@@ -131,7 +132,10 @@ namespace BuildXL.Storage.ChangeTracking
         /// The path (presumably a directory at some point) has had child paths tracked.
         /// </summary>
         /// <remarks>
-        /// We allow 'supersede' semantics on tracking, but only on files (to avoid orphaning tracked children).
+        /// We allow 'supersede' semantics on tracking. When superseding is applied to all subpaths (not only files),
+        /// one has to ensure that no tracked children become orphan. For example, if D\f1 and D\f2 are tracked, then
+        /// when D is renamed to D1, the next journal scan has to notify that D\f1 and D\f2 have been removed, even though
+        /// D\f1 and D\f2 may have been re-created just before the journal scan.
         /// </remarks>
         private const HierarchicalNameTable.NameFlags Container = HierarchicalNameTable.NameFlags.Container;
 
@@ -214,7 +218,10 @@ namespace BuildXL.Storage.ChangeTracking
         /// A volume is capable if it is successfully opened (media present etc.), its filesystem supports change journaling,
         /// and the volume change journal is enabled. Attempts to track files on incapable volumes will fail.
         /// </summary>
-        public static FileChangeTrackingSet CreateForAllCapableVolumes(LoggingContext loggingContext, VolumeMap volumeMap, IChangeJournalAccessor journalAccessor)
+        public static FileChangeTrackingSet CreateForAllCapableVolumes(
+            LoggingContext loggingContext,
+            VolumeMap volumeMap,
+            IChangeJournalAccessor journalAccessor)
         {
             Contract.Requires(loggingContext != null);
             Contract.Requires(volumeMap != null);
@@ -277,8 +284,8 @@ namespace BuildXL.Storage.ChangeTracking
                 }
 
                 QueryUsnJournalResult journalStatus = response.Response;
-                Usn? maybeNextUsn = default(Usn?);
-                Usn? maybeCheckpoint = default(Usn?);
+                Usn? maybeNextUsn = default;
+                Usn? maybeCheckpoint = default;
 
                 if (journalStatus.Status == QueryUsnJournalStatus.Success)
                 {
@@ -876,6 +883,20 @@ namespace BuildXL.Storage.ChangeTracking
                                 TryEnumerateDirectoryAndTrackMembership(
                                     expandedPath,
                                     (name, attributes) => { },
+                                    // Passing null here by default makes the enumeration include all directory entries into the membership. 
+                                    // Output directories of pips can have untracked scopes/paths. Since file change tracking set does not
+                                    // have any knowledge about pips, this can cause unnecassary invalidation of incremental scheduling.
+                                    //
+                                    // For example, suppose that a pip has an output directory whose content is D\E\1.txt and D\E\2.txt, and
+                                    // the latter is specified to be untracked by the pip. Pip executor and file content manager has knowledge
+                                    // about pip, and thus it can exclude D\E\2.txt from the membership.
+                                    // Now, if there is a change that potentially updates the membership of D\E, e.g., adding D\E\3.txt and deleting
+                                    // it again, then, although in principle the membership of D\E does not change in the eye of the pip,
+                                    // but since the file change tracking set does not have any knowledge about the pip, it will signal that the
+                                    // membership of D\E has changed because it includes D\E\2.txt in the computed membership.
+                                    //
+                                    // We consider such an above change rare.
+                                    null,
                                     fingerprintFilter: directoryAndFingerprint.Value);
 
                             bool shouldEmitChange = true;
@@ -1283,8 +1304,7 @@ namespace BuildXL.Storage.ChangeTracking
         {
             const int ConflictDirectoryMembershipFingerprintMaxCount = 10;
 
-            // In addition to Enumerated (clearly the intent), this path is now also a Container in the sense that it has a child subscription (enumeration);
-            // paths with such children cannot be superseded.
+            // In addition to Enumerated (clearly the intent), this path is now also a Container in the sense that it has a child subscription (enumeration).
             m_internalPathTable.SetFlags(subscription.ChangeTrackingSetInternalPath.Value, Container | Enumerated);
 
             // We try to avoid a high false positive rate for enumeration dependencies by recording a single tracked fingerprint for each enumerated directory.
@@ -1360,7 +1380,9 @@ namespace BuildXL.Storage.ChangeTracking
         public Possible<EnumerationResult> TryEnumerateDirectoryAndTrackMembership(
             string path,
             Action<string, FileAttributes> handleEntry,
-            DirectoryMembershipTrackingFingerprint? fingerprintFilter = null)
+            Func<string, FileAttributes, bool> shouldIncludeEntry = null,
+            DirectoryMembershipTrackingFingerprint? fingerprintFilter = null,
+            bool supersedeWithStrongIdentity = false)
         {
             using (Counters.StartStopwatch(FileChangeTrackingCounter.TryEnumerateDirectoryAndTrackMembershipTime))
             {
@@ -1374,7 +1396,11 @@ namespace BuildXL.Storage.ChangeTracking
                 Func<SafeFileHandle, bool> enumerateAndCheckFingerprint =
                     handle =>
                     {
-                        var possibleFingerprintResult = DirectoryMembershipTrackingFingerprinter.ComputeFingerprint(path, handleEntry);
+                        var possibleFingerprintResult = DirectoryMembershipTrackingFingerprinter.ComputeFingerprint(
+                            path,
+                            handleEntry,
+                            shouldIncludeEntry);
+
                         if (!possibleFingerprintResult.Succeeded)
                         {
                             possibleEnumeration = possibleFingerprintResult.Failure;
@@ -1404,14 +1430,15 @@ namespace BuildXL.Storage.ChangeTracking
                         ExistenceTrackingFilter.TrackAlways,
                         existentFileFilter: enumerateAndCheckFingerprint);
 
-                return TrackDirectoryMembership(possibleTrackAndOpenResult, possibleEnumeration, internalPath);
+                return TrackDirectoryMembership(possibleTrackAndOpenResult, possibleEnumeration, internalPath, supersedeWithStrongIdentity);
             }
         }
 
         private Possible<EnumerationResult> TrackDirectoryMembership(
             Possible<TrackAndOpenResult> possibleTrackAndOpenResult,
             Possible<(DirectoryMembershipTrackingFingerprint, PathExistence)>? possibleEnumeration,
-            AbsolutePath internalPath)
+            AbsolutePath internalPath,
+            bool supersedeWithStrongIdentity)
         {
             return possibleTrackAndOpenResult.Then(
                 trackAndOpenResult =>
@@ -1433,6 +1460,14 @@ namespace BuildXL.Storage.ChangeTracking
                                         // TODO: trackAndOpenResult should have a subscription on it.
                                         //       We have an existent path and tracking succeeded, so we can safely invent one here.
                                         TrackDirectoryMembership(new FileChangeTrackingSubscription(internalPath), enumeration.Item1);
+
+                                        if (supersedeWithStrongIdentity)
+                                        {
+                                            Analysis.IgnoreResult(TryTrackChangesToFileInternal(
+                                                trackAndOpenResult.Handle,
+                                                internalPath,
+                                                updateMode: TrackingUpdateMode.Supersede));
+                                        }
                                     }
 
                                     // possibleEnumeration contains a (fingerprint, file-or-directory) pair.
@@ -1458,9 +1493,11 @@ namespace BuildXL.Storage.ChangeTracking
         /// </summary>
         public Possible<EnumerationResult> TryTrackDirectoryMembership(
             string path,
-            IReadOnlyList<(string, FileAttributes)> members)
+            IReadOnlyList<(string, FileAttributes)> members,
+            bool supersedeWithStrongIdentity = false)
         {
             AbsolutePath internalPath = AbsolutePath.Create(m_internalPathTable, path);
+
             DirectoryMembershipTrackingFingerprint fingerprint = DirectoryMembershipTrackingFingerprinter.ComputeFingerprint(members);
 
             Possible<TrackAndOpenResult> possibleTrackAndOpenResult = TryOpenAndTrackPathInternal(
@@ -1478,7 +1515,7 @@ namespace BuildXL.Storage.ChangeTracking
                     fingerprint,
                     possibleTrackAndOpenResult.Result.Existent ? PathExistence.ExistsAsDirectory : PathExistence.Nonexistent);
 
-            return TrackDirectoryMembership(possibleTrackAndOpenResult, possibleEnumeration, internalPath);
+            return TrackDirectoryMembership(possibleTrackAndOpenResult, possibleEnumeration, internalPath, supersedeWithStrongIdentity);
         }
 
         #endregion
@@ -1555,7 +1592,7 @@ namespace BuildXL.Storage.ChangeTracking
             Contract.Requires(childPath.IsValid);
             Contract.Requires(pathExistence != PathExistence.Nonexistent);
 
-            // Since this path will have dependent children (marked Absent), it is a 'container' and so may not be superseded (that orphan its children).
+            // Since this path will have dependent children (marked Absent), it is a 'container'.
             if (pathExistence == PathExistence.ExistsAsDirectory)
             {
                 // Some tool likes probing path D/f.txt, where D is in fact a file. If D is marked as 'container', then it may not be superseded.
@@ -2102,6 +2139,7 @@ namespace BuildXL.Storage.ChangeTracking
 
             m_internalPathTable.StringTable.Serialize(writer);
             m_internalPathTable.Serialize(writer);
+            
             int numberOfMembershipEntries = m_directoryMembershipTrackingFingerprints.Count;
             Contract.Assume(numberOfMembershipEntries >= 0);
 
@@ -2516,11 +2554,12 @@ namespace BuildXL.Storage.ChangeTracking
             }
 
             private Possible<FileChangeTrackingSubscription> TryTrackChangesToParentPath(
+                TrackingUpdateMode updateMode,
                 SafeFileHandle handle,
                 AbsolutePath path,
                 VersionedFileIdentity identity)
             {
-                return TryTrackChangesToPath(TrackingUpdateMode.Preserve, handle, path, identity, true);
+                return TryTrackChangesToPath(updateMode, handle, path, identity, true);
             }
 
             private Possible<FileChangeTrackingSubscription> TryTrackChangesToPath(
@@ -2553,7 +2592,7 @@ namespace BuildXL.Storage.ChangeTracking
                     {
                         bool superseding = !isPathContainer && updateMode == TrackingUpdateMode.Supersede;
 
-                        // Note that the intent of superseding is only relevant for a file that is already tracked (or there is nothing to supersede).
+                        // Note that the intent of superseding is only relevant for a path that is already tracked (or else there is nothing to supersede).
                         if (superseding)
                         {
                             Contract.Assert(currentPathHierarchicalNameId == path.Value);
@@ -2624,7 +2663,11 @@ namespace BuildXL.Storage.ChangeTracking
 
                                 Contract.Assert(otherVolumeTrackingSet != null);
 
-                                Possible<FileChangeTrackingSubscription> maybetrackingParent = otherVolumeTrackingSet.TryTrackChangesToParentPath(currentPathHandle, currentPath, currentPathIdentity);
+                                Possible<FileChangeTrackingSubscription> maybetrackingParent = otherVolumeTrackingSet.TryTrackChangesToParentPath(
+                                    TrackingUpdateMode.Preserve,
+                                    currentPathHandle,
+                                    currentPath,
+                                    currentPathIdentity);
 
                                 if (!maybetrackingParent.Succeeded)
                                 {
@@ -2637,12 +2680,12 @@ namespace BuildXL.Storage.ChangeTracking
                     }
 
                     AddRecordForFile(currentPathIdentity.FileId, currentPathIdentity.Usn, currentPath);
+                    
                     added = !isPathContainer ? true : added;
 
                     // We've succeeded in adding a file record sufficient to invalidate this path later. Marking the path notes this, so that we don't
                     // bother opening a handle to the same path later. See the check on containerOfCurrentPathAndFlagsOfCurrentPath at the top of the loop.
-                    // In the event this is a parent path of the path we are directly tracking, ensure that that parent path is marked as a 'container' and so
-                    // may not be superseded (we would orphan its children).
+                    // In the event this is a parent path of the path we are directly tracking, ensure that that parent path is marked as a 'container'.
                     m_internalPathTable.SetFlags(currentPathHierarchicalNameId, Tracked | (isPathContainer ? Container : HierarchicalNameTable.NameFlags.None));
 
                     currentPathHierarchicalNameId = containerOfCurrentPathAndFlagsOfCurrentPath.nameId;
@@ -2887,10 +2930,7 @@ namespace BuildXL.Storage.ChangeTracking
                 var impactedContainerQueue = new Queue<HierarchicalNameId>();
                 var visitedContainers = new HashSet<AbsolutePath>();
 
-                // We remember all relevent file ids due to the following reasons:
-                // 1. They can be removed from m_recordsByFileId once they are processed.
-                // 2. We need to report their latest USNs for file content table. 
-                var relevantFileIds = new HashSet<FileId>();
+                var lastTrackedUsnByFileId = new Dictionary<FileId, Usn>();
 
                 var queryResult = journalAccessor.QueryJournal(new QueryJournalRequest(VolumeGuidPath));
                 var readRequest = new ReadJournalRequest(
@@ -2911,9 +2951,22 @@ namespace BuildXL.Storage.ChangeTracking
                     {
                         numberOfUsnRecordsProcessed++;
                         bool relevant = false;
+                        Usn? lastTrackedUsnOfFileId = default;
 
                         LinkImpact linkImpact = usnRecord.Reason.LinkImpact();
                         MembershipImpact membershipImpact = usnRecord.Reason.MembershipImpact();
+
+                        // Records in m_recordsByFileId can be removed when they are impacted by the change, see PopImpactedRecordsIfPresent.
+                        // So, we need to record the last tracked USN before the last record is popped off m_recordsByFileId.
+                        if (lastTrackedUsnByFileId.TryGetValue(usnRecord.FileId, out Usn fileIdUsn))
+                        {
+                            lastTrackedUsnOfFileId = fileIdUsn;
+                        }
+                        else if (m_recordsByFileId.TryGetValue(usnRecord.FileId, out FileChangeTrackingRecord fileIdTrackingRecord))
+                        {
+                            lastTrackedUsnByFileId.Add(usnRecord.FileId, fileIdTrackingRecord.Usn);
+                            lastTrackedUsnOfFileId = fileIdTrackingRecord.Usn;
+                        }
 
                         // Direct (link) impact: A tracked and existent file-link or directory may have been data-changed, deleted, renamed, etc.
                         //                       This can clear the Tracked flag *and all others* (we untrack the path altogether),
@@ -2928,8 +2981,7 @@ namespace BuildXL.Storage.ChangeTracking
                                 {
                                     numberOfLinkImpactRecords++;
                                     relevant = true;
-                                    relevantFileIds.Add(usnRecord.FileId);
-
+                                    
                                     var impactedPathChanges = (membershipImpact & MembershipImpact.Deletion) != 0
                                         ? PathChanges.Removed
                                         : PathChanges.DataOrMetadataChanged;
@@ -2940,7 +2992,6 @@ namespace BuildXL.Storage.ChangeTracking
                                     // (Example of the 'multiple' case: Tracking multiple paths to the same file (hardlinked), and the file's data is changed).
                                     foreach (FileChangeTrackingRecord impactedRecord in impactedRecordBuffer)
                                     {
-                                        var stringPath = impactedRecord.Path.ToString(m_internalPathTable);
                                         if (!impactedPathBuffer.Add(impactedRecord.Path))
                                         {
                                             continue;
@@ -3051,10 +3102,10 @@ namespace BuildXL.Storage.ChangeTracking
                             numberOfUsnRecordsRelevant++;
                         }
 
-                        if (relevantFileIds.Contains(usnRecord.FileId) || m_recordsByFileId.ContainsKey(usnRecord.FileId))
+                        if (lastTrackedUsnOfFileId.HasValue)
                         {
                             ReportChangedFileId(
-                                new ChangedFileIdInfo(new FileIdAndVolumeId(m_volumeSerialNumber, usnRecord.FileId), usnRecord));
+                                new ChangedFileIdInfo(new FileIdAndVolumeId(m_volumeSerialNumber, usnRecord.FileId), usnRecord, lastTrackedUsnOfFileId));
                         }
                     });
 
@@ -3133,9 +3184,9 @@ namespace BuildXL.Storage.ChangeTracking
                                         {
                                             // If childPath is non-existent, then it will be re-tracked by CheckAndMaybeInvalidateAntiDependencies.
                                             handleRelevantRecord(
-                                                    PathChanges.NewlyPresent,
-                                                    childPath,
-                                                    usnRecord);
+                                                PathChanges.NewlyPresent,
+                                                childPath,
+                                                usnRecord);
 
                                             if (FileUtilities.DirectoryExistsNoFollow(childPath.ToString(m_internalPathTable)))
                                             {
@@ -3157,13 +3208,39 @@ namespace BuildXL.Storage.ChangeTracking
                     }
 
                     // Deletion or Creation+Deletion may invalidate enumerated directories (the container itself).
-                    if (m_internalPathTable.SetFlags(containerPath.Value, Enumerated, clear: true))
+                    if (EmitMembershipChange(handleRelevantRecord, containerPath, ref usnRecord))
                     {
                         numberOfExistentialChanges++;
-                        handleRelevantRecord(PathChanges.MembershipChanged, containerPath, usnRecord);
                     }
                 }
             }
+
+            private bool EmitMembershipChange(
+                Action<PathChanges, AbsolutePath, UsnRecord> handle,
+                AbsolutePath containerPath,
+                ref UsnRecord record)
+            {
+                HierarchicalNameTable.NameFlags currentFlags = m_internalPathTable.GetContainerAndFlags(containerPath.Value).flags;
+
+                if ((Enumerated & currentFlags) == 0)
+                {
+                    return false;
+                }
+
+                Usn supersessionLowerBound;
+
+                if (m_pathSupersessionLimits.TryGetValue(containerPath, out supersessionLowerBound) &&
+                    record.Usn < supersessionLowerBound)
+                {
+                    return false;
+                }
+
+                m_internalPathTable.SetFlags(containerPath.Value, Enumerated, clear: true);
+                handle(PathChanges.MembershipChanged, containerPath, record);
+
+                return true;
+            }
+
 
             private bool EmitAllChangesIfTracked(
                 Action<PathChanges, AbsolutePath, UsnRecord> handle,
@@ -3213,9 +3290,15 @@ namespace BuildXL.Storage.ChangeTracking
                 }
 
                 // ifAnySet filter passed; for non-Container paths, we may additionally filter
-                // out changes preceding some supercede-level tracking. For reasoning on why
-                // the Container flag prevents this filtering, see remarks for Container.
-                if (respectSupersession && ((currentFlags & Container) == 0))
+                // out changes preceding some supercede-level tracking. When path is a container, we distinguish whether the change is rename or delete.
+                // If it's a rename, then we should not supersede because the tracked children can be left orphan (see remarks on Container).
+                // If it's a delete, all the children will be deleted as well, and so they will be untracked automatically.
+                bool shouldSupersede =
+                    respectSupersession                                                 // Supersession limit should be respected,
+                    && (((currentFlags & Container) == 0)                               // and, path is a file
+                        || (record.Reason & UsnChangeReasons.RenameOldName) == 0);      //      or change is not rename/move.
+
+                if (shouldSupersede)
                 {
                     Usn supersessionLowerBound;
 

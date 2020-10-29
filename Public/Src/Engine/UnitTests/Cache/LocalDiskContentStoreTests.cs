@@ -581,7 +581,10 @@ namespace Test.BuildXL.Engine.Cache
 
                 // Not try directory operations against the parent path. The assumption is that the directory is at or under the inclusion/exclusion root as well
                 var directoryPath = filePath.GetParent(pathTable);
-                var enumerationResult = harness.Store.TryEnumerateDirectoryAndTrackMembership(directoryPath, (name, attr) => { });
+                var enumerationResult = harness.Store.TryEnumerateDirectoryAndTrackMembership(
+                    directoryPath,
+                    (name, attr) => { },
+                    shouldIncludeEntry: null /* include all entries */);
                 XAssert.IsTrue(enumerationResult.Succeeded);
                 XAssert.AreEqual(PathExistence.ExistsAsDirectory, enumerationResult.Result);
 
@@ -695,7 +698,7 @@ namespace Test.BuildXL.Engine.Cache
             XAssert.IsTrue(contentDiscoveryResult.Succeeded);
 
             var substTargetPath = directoryTranslator.Translate(targetPath, harness.Context.PathTable);
-            var contentHash = ContentHashingUtilities.HashString(substTargetPath.ToString(harness.Context.PathTable).ToUpperInvariant());
+            var contentHash = ContentHashingUtilities.HashString(substTargetPath.ToString(harness.Context.PathTable).ToCanonicalizedPath());
 
             XAssert.AreEqual(contentHash, contentDiscoveryResult.Result.TrackedFileContentInfo.Hash);
         }
@@ -749,7 +752,7 @@ namespace Test.BuildXL.Engine.Cache
             Possible<ContentDiscoveryResult> contentDiscoveryResult = await harness.Store.TryDiscoverAsync(FileArtifact.CreateSourceFile(symlink));
             XAssert.IsTrue(contentDiscoveryResult.Succeeded);
 
-            var contentHash = ContentHashingUtilities.HashString(symLinkTarget.ToUpperInvariant());
+            var contentHash = ContentHashingUtilities.HashString(symLinkTarget.ToCanonicalizedPath());
             XAssert.AreEqual(contentHash, contentDiscoveryResult.Result.TrackedFileContentInfo.Hash);
 
             Directory.SetCurrentDirectory(currentDirectory);

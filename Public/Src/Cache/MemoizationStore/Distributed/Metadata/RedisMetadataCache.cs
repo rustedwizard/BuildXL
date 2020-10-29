@@ -101,7 +101,7 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Metadata
         protected override async Task<BoolResult> StartupCoreAsync(OperationContext context)
         {
             _taskTracker = new BackgroundTaskTracker(nameof(RedisMetadataCache), context.CreateNested(nameof(RedisMetadataCache)));
-            var redisDatabaseAdapter = new RedisDatabaseAdapter(await RedisDatabaseFactory.CreateAsync(context, ConnectionStringProvider), Keyspace);
+            var redisDatabaseAdapter = new RedisDatabaseAdapter(await RedisDatabaseFactory.CreateAsync(context, ConnectionStringProvider, logSeverity: BuildXL.Cache.ContentStore.Interfaces.Logging.Severity.Unknown, usePreventThreadTheft: false), Keyspace);
             _dbAdapter = redisDatabaseAdapter;
             _stringDatabaseAdapter = redisDatabaseAdapter;
             return BoolResult.Success;
@@ -161,7 +161,7 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Metadata
                         {
                             _cacheTracer.AddContentHashListStart(context);
                             bool result = await StringSetWithExpiryBumpAsync(context, cacheKey, cacheValue);
-                            context.Debug($"Added redis cache entry for {strongFingerprint}: {getResult}. Result: {result}");
+                            _tracer.Debug(context, $"Added redis cache entry for {strongFingerprint}: {getResult}. Result: {result}");
                         }
                         finally
                         {
@@ -199,8 +199,7 @@ namespace BuildXL.Cache.MemoizationStore.Distributed.Metadata
 
                 await _dbAdapter.ExecuteBatchOperationAsync(context, batch, CancellationToken.None).IgnoreFailure();
 
-                var strongDeleted = await deleteStrongFingerprint;
-                var weakDeleted = await deleteWeakFingerprint;
+                await Task.WhenAll(deleteStrongFingerprint, deleteWeakFingerprint);
 
                 return BoolResult.Success;
             }

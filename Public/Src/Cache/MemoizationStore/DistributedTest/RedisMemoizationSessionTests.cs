@@ -16,6 +16,7 @@ using BuildXL.Cache.MemoizationStore.Distributed.Stores;
 using Xunit;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using Xunit.Abstractions;
 
 namespace BuildXL.Cache.MemoizationStore.Test.Sessions
 {
@@ -30,8 +31,8 @@ namespace BuildXL.Cache.MemoizationStore.Test.Sessions
 
         private readonly List<LocalRedisProcessDatabase> _databasesToDispose = new List<LocalRedisProcessDatabase>();
 
-        public RedisMemoizationSessionTests(LocalRedisFixture redis)
-            : base(() => new PassThroughFileSystem(TestGlobal.Logger), TestGlobal.Logger)
+        public RedisMemoizationSessionTests(LocalRedisFixture redis, ITestOutputHelper helper)
+            : base(() => new PassThroughFileSystem(TestGlobal.Logger), TestGlobal.Logger, helper)
         {
             _redis = redis;
             _logger = TestGlobal.Logger;
@@ -40,16 +41,29 @@ namespace BuildXL.Cache.MemoizationStore.Test.Sessions
         protected override IMemoizationStore CreateStore(DisposableDirectory testDirectory)
         {
             var context = new Context(_logger);
-            var localDatabase = LocalRedisProcessDatabase.CreateAndStartEmpty(_redis, _logger, _clock);
-            var connectionString = localDatabase.ConnectionString;
+            var keySpace = Guid.NewGuid().ToString();
 
-            _databasesToDispose.Add(localDatabase);
+            var primaryRedisInstance = LocalRedisProcessDatabase.CreateAndStartEmpty(_redis, _logger, _clock);
+            _databasesToDispose.Add(primaryRedisInstance);
 
-            var connectionStringProvider = new LiteralConnectionStringProvider(connectionString);
-            var redisFactory = RedisDatabaseFactory.CreateAsync(context, connectionStringProvider).GetAwaiter().GetResult();
-            var redisAdapter = new RedisDatabaseAdapter(redisFactory, keySpace: Guid.NewGuid().ToString());
+            var primaryFactory = RedisDatabaseFactory.CreateAsync(
+                context,
+                provider: new LiteralConnectionStringProvider(primaryRedisInstance.ConnectionString),
+                logSeverity: Severity.Info,
+                usePreventThreadTheft: false).GetAwaiter().GetResult();
+            var primaryRedisAdapter = new RedisDatabaseAdapter(primaryFactory, keySpace: keySpace);
 
-            var memoizationDb = new RedisMemoizationDatabase(redisAdapter, _clock, _memoizationExpiryTime);
+            var secondaryRedisInstance = LocalRedisProcessDatabase.CreateAndStartEmpty(_redis, _logger, _clock);
+            _databasesToDispose.Add(secondaryRedisInstance);
+
+            var secondaryFactory = RedisDatabaseFactory.CreateAsync(
+                context,
+                provider: new LiteralConnectionStringProvider(secondaryRedisInstance.ConnectionString),
+                logSeverity: Severity.Info,
+                usePreventThreadTheft: false).GetAwaiter().GetResult();
+            var secondaryRedisAdapter = new RedisDatabaseAdapter(secondaryFactory, keySpace: keySpace);
+
+            var memoizationDb = new RedisMemoizationDatabase(primaryRedisAdapter, secondaryRedisAdapter, _clock, _memoizationExpiryTime, operationsTimeout: null, slowOperationRedisTimeout: null);
             return new RedisMemoizationStore(_logger, memoizationDb);
         }
 

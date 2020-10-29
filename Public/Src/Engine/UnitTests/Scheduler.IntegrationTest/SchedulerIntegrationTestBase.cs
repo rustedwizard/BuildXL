@@ -131,7 +131,7 @@ namespace Test.BuildXL.Scheduler
 
             // Disable currently enabled unsafe option.
             Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreCreateProcessReport = false;
-            
+
             // Populate file system capabilities.
             // Here, for example, we use copy-on-write instead of hardlinks when Unix file system supports copy-on-write.
             // Particular tests can override this by setting Configuration.Engine.UseHardlinks.
@@ -368,6 +368,7 @@ namespace Test.BuildXL.Scheduler
             PerformanceCollector performanceCollector = null,
             bool updateStatusTimerEnabled = false,
             Action<TestScheduler> verifySchedulerPostRun = default,
+            string runNameOrDescription = null,
             CancellationToken cancellationToken = default)
         {
             if (m_graphWasModified || LastGraph == null)
@@ -388,6 +389,7 @@ namespace Test.BuildXL.Scheduler
                 performanceCollector: performanceCollector,
                 updateStatusTimerEnabled: updateStatusTimerEnabled,
                 verifySchedulerPostRun: verifySchedulerPostRun,
+                runNameOrDescription: runNameOrDescription,
                 cancellationToken: cancellationToken);
         }
 
@@ -466,7 +468,9 @@ namespace Test.BuildXL.Scheduler
                 subst = FileUtilities.GetSubstDriveAndPath(substSource, substTarget);
             }
 
-            // Seal the translator if not sealed
+            DirectoryTranslator.AddDirectoryTranslationFromEnvironment();
+
+            // Seal the translator if not sealed yet
             DirectoryTranslator.Seal();
 
             // .....................................................................................
@@ -483,7 +487,7 @@ namespace Test.BuildXL.Scheduler
             testHooks.FingerprintStoreTestHooks ??= new FingerprintStoreTestHooks();
             Contract.Assert(!(config.Engine.CleanTempDirectories && tempCleaner == null));
 
-            using (var queue = new PipQueue(LoggingContext, config.Schedule))
+            using (var queue = new PipQueue(LoggingContext, config))
             using (var testQueue = new TestPipQueue(queue, localLoggingContext, initiallyPaused: constraintExecutionOrder != null))
             using (var testScheduler = new TestScheduler(
                 graph: graph,
@@ -534,6 +538,7 @@ namespace Test.BuildXL.Scheduler
                 }
 
                 testScheduler.Start(localLoggingContext);
+                testScheduler.UpdateStatus();
 
                 if (updateStatusTimerEnabled)
                 {
@@ -561,7 +566,7 @@ namespace Test.BuildXL.Scheduler
 
                 // Verify internal data of scheduler.
                 verifySchedulerPostRun?.Invoke(testScheduler);
-
+                
                 var runResult = new ScheduleRunResult
                 {
                     Graph = graph,
@@ -573,6 +578,7 @@ namespace Test.BuildXL.Scheduler
                     ProcessPipCountersByTelemetryTag = testScheduler.ProcessPipCountersByTelemetryTag,
                     SchedulerState = new SchedulerState(testScheduler),
                     Session = localLoggingContext.Session,
+                    FileSystemView = testScheduler.State?.FileSystemView
                 };
 
                 runResult.AssertSuccessMatchesLogging(localLoggingContext);
@@ -585,6 +591,12 @@ namespace Test.BuildXL.Scheduler
 
                 return runResult;
             }
+        }
+
+        /// <nodoc/>
+        public ProcessBuilder CreatePipBuilder(IEnumerable<Operation> processOperations, IEnumerable<string> tags = null, string description = null, IDictionary<string, string> environmentVariables = null)
+        {
+            return CreatePipBuilder(processOperations, tags, description, environmentVariables, ProcessBuilder.CreateForTesting(Context.PathTable, Configuration));
         }
 
         private Possible<global::BuildXL.Storage.ChangeJournalService.IChangeJournalAccessor> TryGetJournalAccessor(VolumeMap map)
@@ -669,9 +681,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         protected ProcessWithOutputs CreateAndScheduleSharedOpaqueProducer(
-            string sharedOpaqueDir, 
-            FileArtifact fileToProduceStatically, 
-            FileArtifact sourceFileToRead, 
+            string sharedOpaqueDir,
+            FileArtifact fileToProduceStatically,
+            FileArtifact sourceFileToRead,
             params Operation[] additionalOperations)
         {
             return SchedulePipBuilder(CreateSharedOpaqueProducer(sharedOpaqueDir, fileToProduceStatically, sourceFileToRead, additionalOperations));
@@ -763,7 +775,7 @@ namespace Test.BuildXL.Scheduler
             XAssert.ContainsNot(journaledWrites, pip.ProcessOutputs.GetOutputFiles().Select(f => f.Path).ToArray());
         }
 
-        protected string GetSidebandFile(ScheduleRunResult result, Process process) 
+        protected string GetSidebandFile(ScheduleRunResult result, Process process)
             => SidebandWriter.GetSidebandFileForProcess(Context.PathTable, result.Config.Layout.SharedOpaqueSidebandDirectory, process);
 
         protected AbsolutePath[] GetJournaledWritesForProcess(ScheduleRunResult result, Process process)

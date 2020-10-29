@@ -38,7 +38,7 @@ namespace BuildXL.Cache.ContentStore.App
     /// </summary>
     internal sealed partial class Application : IDisposable
     {
-        private const string HashTypeDescription = "Content hash type (SHA1/SHA256/MD5/Vso0/DedupChunk/DedupNode)";
+        private const string HashTypeDescription = "Content hash type (SHA1/SHA256/MD5/Vso0/DedupChunk/DedupNode/Dedup64K/Dedup1024K)";
 
         /// <summary>
         ///     The name of this service (sent to Kusto as the value of the 
@@ -87,6 +87,7 @@ namespace BuildXL.Cache.ContentStore.App
         private readonly Logger _logger;
         private readonly Tracer _tracer;
         private bool _waitForDebugger;
+        private bool _debug;
         private FileLog _fileLog;
         private CsvFileLog _csvFileLog;
         private KustoUploader _kustoUploader;
@@ -171,6 +172,15 @@ namespace BuildXL.Cache.ContentStore.App
         public void SetWaitForDebugger(bool waitForDebugger)
         {
             _waitForDebugger = waitForDebugger;
+        }
+
+        /// <summary>
+        ///     Set option to force attach debugger.
+        /// </summary>
+        [Global("LaunchDebugger", Description = "Calls Debugger.Launch during application initialization")]
+        public void LaunchDebugger(bool debug)
+        {
+            _debug = debug;
         }
 
         /// <summary>
@@ -345,6 +355,11 @@ namespace BuildXL.Cache.ContentStore.App
 
         private void Initialize()
         {
+            if (_debug)
+            {
+                Debugger.Launch();
+            }
+
             if (_waitForDebugger)
             {
                 _logger.Warning("Waiting for debugger to attach. Hit any key to bypass.");
@@ -599,8 +614,7 @@ namespace BuildXL.Cache.ContentStore.App
         }
 
         internal DistributedCacheServiceArguments CreateDistributedCacheServiceArguments(
-            IAbsolutePathFileCopier copier,
-            IAbsolutePathTransformer pathTransformer,
+            IRemoteFileCopier copier,
             IContentCommunicationManager copyRequester,
             DistributedContentSettings dcs,
             HostInfo host,
@@ -623,13 +637,12 @@ namespace BuildXL.Cache.ContentStore.App
                 cacheName: cacheName,
                 grpcPort: grpcPort,
                 grpcPortFileName: _scenario);
-            localCasSettings.PreferredCacheDrive = Path.GetPathRoot(cacheRootPath);
-            localCasSettings.ServiceSettings = new LocalCasServiceSettings(60, scenarioName: _scenario, grpcPort: grpcPort, grpcPortFileName: _scenario, bufferSizeForGrpcCopies: bufferSizeForGrpcCopies, gzipBarrierSizeForGrpcCopies: gzipBarrierSizeForGrpcCopies,
-                grpcThreadPoolSize: null);
+            localCasSettings.PreferredCacheDrive = new AbsolutePath(cacheRootPath).GetPathRoot();
+            localCasSettings.ServiceSettings = new LocalCasServiceSettings(60, scenarioName: _scenario, grpcPort: grpcPort, grpcPortFileName: _scenario, bufferSizeForGrpcCopies: bufferSizeForGrpcCopies, gzipBarrierSizeForGrpcCopies: gzipBarrierSizeForGrpcCopies);
 
             var config = new DistributedCacheServiceConfiguration(localCasSettings, dcs, loggingSettings);
 
-            return new DistributedCacheServiceArguments(_logger, copier, pathTransformer, copyRequester, distributedCacheServiceHost, host, ct, dataRootPath, config, null) {
+            return new DistributedCacheServiceArguments(_logger, copier, copyRequester, distributedCacheServiceHost, host, ct, dataRootPath, config, null) {
                 TelemetryFieldsProvider = telemetryFieldsProvider,
             };
         }

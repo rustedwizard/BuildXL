@@ -58,9 +58,14 @@ namespace BuildXL.Pips.Graph
         /// 81: Add OutputDirectoryContents for SealDirectories
         /// 82: Add ProcessSymlinkedAcceses in SandboxConfiguration
         /// 83: Add PreservePathSetCasing in Process.Options
-        /// 84: Added IgnoreFullSymlinkResolving in IUnsafeSandboxConfiguration.
+        /// 84: Added IgnoreFullReparsePointResolving in IUnsafeSandboxConfiguration.
         /// 85: Added WritingToStandardErrorFailsPip in Process.Options
+        /// 86: Normalize casing of ObservedAccessedFileNames.
+        /// 87: Changed the cleaning logic of SOD for retries.
+        /// 88: ObservationFlags are preserved for AbsentPathProbe.
+        /// 89: Add unsafe sandbox option SkipFlaggingSharedOpaqueOutputs
+        /// 90: Add RetryAttempEnvironmentVariable
         /// </remarks>
-        TwoPhaseV2 = 85,
+        TwoPhaseV2 = 90,
     }
 }

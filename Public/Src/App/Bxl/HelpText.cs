@@ -806,6 +806,21 @@ namespace BuildXL
                 HelpLevel.Verbose);
 
             hw.WriteOption(
+                "/fileContentTableFile:<path>",
+                Strings.HelpText_DisplayHelp_FileContentTableFile,
+                HelpLevel.Verbose);
+
+            hw.WriteOption(
+                "/fileContentTableEntryTimeToLive:<number>",
+                Strings.HelpText_DisplayHelp_FileContentTableEntryTimeToLive,
+                HelpLevel.Verbose);
+
+            hw.WriteOption(
+                "/updateFileContentTableByScanningChangeJournal[+|-]",
+                Strings.HelpText_DisplayHelp_UpdateFileContentTableByScanningChangeJournal,
+                HelpLevel.Verbose);
+
+            hw.WriteOption(
                 "/adminRequiredProcessExecutionMode:<mode>",
                 Strings.HelpText_DisplayHelp_AdminRequiredProcessExecutionMode,
                 HelpLevel.Verbose);
@@ -814,6 +829,12 @@ namespace BuildXL
                 "/vmConcurrencyLimit:<max number of processes executed in VM>",
                 Strings.HelpText_DisplayHelp_VmConcurrencyLimit,
                 HelpLevel.Verbose);
+
+            hw.WriteOption(
+                "/treatAbsentDirectoryAsExistentUnderOpaque[+|-]",
+                Strings.HelpText_DisplayHelp_TreatAbsentDirectoryAsExistentUnderOpaque,
+                HelpLevel.Verbose);
+
             #endregion
 
             hw.WriteBanner(
@@ -919,8 +940,8 @@ namespace BuildXL
                 HelpLevel.Verbose);
 
             hw.WriteOption(
-                "/unsafe_IgnoreFullSymlinkResolving[+|-]",
-                Strings.HelpText_DisplayHelp_IgnoreFullSymlinkResolving,
+                "/unsafe_IgnoreFullReparsePointResolving[+|-]",
+                Strings.HelpText_DisplayHelp_IgnoreFullReparsePointResolving,
                 HelpLevel.Verbose);
 
             hw.WriteOption(
@@ -1187,6 +1208,14 @@ namespace BuildXL
 
             hw.WriteOption("/numRetryFailedPipsOnAnotherWorker:<int>",
                Strings.HelpText_DisplayHelp_NumberofFailedPipRetry);
+
+            hw.WriteOption("/enablePlugins[+|-]",
+               Strings.HelpText_DisplayHelp_EnablePlugins,
+               HelpLevel.Verbose);
+
+            hw.WriteOption("/pluginPaths:<path>",
+               Strings.HelpText_DisplayHelp_PluginPaths,
+               HelpLevel.Verbose);
 
             #endregion
 

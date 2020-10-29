@@ -55,12 +55,17 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest.Hashing
 
             if (algorithmType == typeof(DedupChunkHashAlgorithm))
             {
-                return DedupChunkHashInfo.Instance;
+                return DedupSingleChunkHashInfo.Instance;
             }
 
-            if (algorithmType == typeof(DedupNodeHashAlgorithm))
+            if (algorithmType == typeof(DedupNodeOrChunkHashAlgorithm))
             {
-                return DedupNodeHashInfo.Instance;
+                return DedupNode64KHashInfo.Instance;
+            }
+
+            if (algorithmType == typeof(Dedup1024KHashAlgorithm))
+            {
+                return Dedup1024KHashInfo.Instance;
             }
 
             throw new ArgumentException(algorithmType.FullName + " is not a built-in hash type.");

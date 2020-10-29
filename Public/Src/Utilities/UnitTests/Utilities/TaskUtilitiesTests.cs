@@ -17,6 +17,112 @@ namespace Test.BuildXL.Utilities
     public sealed class TaskUtilitiesTests
     {
         [Fact]
+        public async Task WhenAllWithCancellationShouldNotCauseUnobservedTaskExceptions()
+        {
+            // This test checks that if the task awaited as part of WhenAllWithCancellationAsync call
+            // fails, it should not cause any unobserved task errors.
+            await Task.Yield();
+            await UnobservedTaskExceptionHelper.RunAsync(
+                async () =>
+                {
+                    using var cts = new CancellationTokenSource();
+                    
+                    cts.CancelAfter(10);
+
+                    // The task will after a small delay
+                    var failure = Task.Run(async () =>
+                                           {
+                                               await Task.Delay(500);
+                                               throw new Exception("1");
+                                           });
+
+                    try
+                    {
+                        await TaskUtilities.WhenAllWithCancellationAsync(new[] { failure }, cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+
+                    }
+
+                    await Task.Delay(1000);
+                });
+        }
+        
+        [Fact]
+        public async Task WhenAllWithCancellationPropagatesSingleExceptionCorrectly()
+        {
+            var task = Task.Run(() => throw new ApplicationException());
+
+            try
+            {
+                await TaskUtilities.WhenAllWithCancellationAsync(new[] { task }, CancellationToken.None);
+                Assert.True(false, "The method should fail");
+            }
+            catch (ApplicationException) { }
+        }
+
+        [Fact]
+        public async Task WhenAllWithCancellationPropagatesSingleExceptionFromMultipleExceptions()
+        {
+            var task1 = Task.Run(() => throw new ApplicationException("1"));
+            var task2 = Task.Run(() => throw new ApplicationException("2"));
+
+            try
+            {
+                await TaskUtilities.WhenAllWithCancellationAsync(new[] {task1, task2}, CancellationToken.None);
+                Assert.True(false, "The method should fail");
+            }
+            catch (ApplicationException) { }
+        }
+        
+        [Fact]
+        public async Task WhenAllWithCancellationPropagatesCancellationCorrectly()
+        {
+            var tcs = new CancellationTokenSource(TimeSpan.FromMilliseconds(10));
+
+            var task = Task.Run(async () => await Task.Delay(TimeSpan.FromHours(1)));
+
+            try
+            {
+                await TaskUtilities.WhenAllWithCancellationAsync(new[] {task}, tcs.Token);
+                Assert.True(false, "The method should fail");
+            }
+            catch (OperationCanceledException) { }
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(true)]
+        public async Task SafeWhenAllPropagatesBothExceptions(bool wrapSingleException)
+        {
+            var task1 = Task.Run(() => throw new ApplicationException("1"));
+            var task2 = Task.Run(() => throw new ApplicationException("2"));
+
+            try
+            {
+                await TaskUtilities.SafeWhenAll(new[] {task1, task2}, wrapSingleException);
+                Assert.True(false, "The method should fail");
+            }
+            catch (AggregateException e)
+            {
+                XAssert.AreEqual(2, e.InnerExceptions.Count);
+                XAssert.IsNotNull(e.InnerExceptions.SingleOrDefault(e => e.Message == "1"));
+                XAssert.IsNotNull(e.InnerExceptions.SingleOrDefault(e => e.Message == "2"));
+            }
+        }
+
+        [Fact]
+        public async Task SafeWhenAllPropagatesSingleExceptionIfWrapSingleExceptionIsFalse()
+        {
+            var task1 = Task.Run(() => throw new ApplicationException("1"));
+
+            var task2 = Task.CompletedTask;
+            await XAssert.ThrowsAnyAsync<AggregateException>(async() => await TaskUtilities.SafeWhenAll(new[] { task1, task2 }, wrapSingleException: true));
+            await XAssert.ThrowsAnyAsync<ApplicationException>(async () => await TaskUtilities.SafeWhenAll(new[] { task1, task2 }, wrapSingleException: false));
+        }
+
+        [Fact]
         public async Task WithTimeoutWorksProperlyWhenCancellationTokenIsTriggered()
         {
             bool cancellationRequested = false;

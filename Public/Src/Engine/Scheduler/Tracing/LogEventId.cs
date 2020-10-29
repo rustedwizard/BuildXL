@@ -98,6 +98,7 @@ namespace BuildXL.Scheduler.Tracing
         PipStandardIOFailed = 316,
 
         PipRetryDueToExitedWithAzureWatsonExitCode = 317,
+        IOPipExecutionStepTakeLong = 318,
 
         // Shared: CacheMissAnalysisBatchResults = 325,
         DisallowedFileAccessInTopOnlySourceSealedDirectory = 378,
@@ -127,7 +128,7 @@ namespace BuildXL.Scheduler.Tracing
         StorageCacheGetContentWarning = 737,
         FailedToMaterializeFileWarning = 738,
         MaterializeFilePipProducerNotFound = 739,
-
+        FailedToMaterializeFileNotUpToDateOutputWarning = 749,
 
         PipDetailedStats = 1510,
         IncrementalBuildSavingsSummary = 1512,
@@ -144,6 +145,7 @@ namespace BuildXL.Scheduler.Tracing
         FailPipOutputWithNoAccessed = 2602,
         PipWillBeRetriedDueToExitCode = 2604,
         DetailedPipMaterializeDependenciesFromCacheFailure = 2610,
+        DisabledDetoursRetry = 2611,
 
         FileArtifactContentMismatch = 2700,
         PipOutputNotMaterialized = 2701,
@@ -179,6 +181,7 @@ namespace BuildXL.Scheduler.Tracing
         TwoPhaseCacheEntryPublished = 2730,
         ConvertToRunnableFromCacheFailed = 2731,
         TwoPhasePublishingCacheEntryFailedError = 2732,
+        PipMaterializeDependenciesFromCacheTimeoutFailure = 2740,
 
         LogMismatchedDetoursErrorCount = 2922,
         PipExitedWithAzureWatsonExitCode = 2924,
@@ -210,7 +213,7 @@ namespace BuildXL.Scheduler.Tracing
         PipInputVerificationUntrackedInput = 3613,
         StorageRemoveAbsentFileOutputWarning = 3614,
         StorageCacheCleanDirectoryOutputError = 3615,
-        StorageJunctionInOutputDirectoryWarning = 3616,
+        StorageReparsePointInOutputDirectoryWarning = 3616,
 
         PipInputVerificationMismatchRecovery = 3617,
         PipInputVerificationMismatchRecoveryExpectedExistence = 3618,
@@ -320,6 +323,8 @@ namespace BuildXL.Scheduler.Tracing
         AbsentPathProbeInsideUndeclaredOpaqueDirectory = 5043,
 
         AllowedSameContentDoubleWrite = 5044,
+        AllowedRewriteOnUndeclaredFile = 5055,
+        DisallowedRewriteOnUndeclaredFile = 5056,
 
         InitiateWorkerRelease = 5045,
         WorkerReleasedEarly = 5046,
@@ -403,6 +408,8 @@ namespace BuildXL.Scheduler.Tracing
         ErrorApiServerMaterializeFileFailed = 12106,
         ApiServerReceivedMessage = 12107,
         ApiServerReceivedWarningMessage = 12108,
+        ApiServerStoreBuildManifestHashToCacheFailed = 12109,
+        ErrorApiServerGetBuildManifestHashFromCacheFailed = 12110,
 
         // Copy file cont'd.
         // Elsewhere = 12201,
@@ -467,8 +474,15 @@ namespace BuildXL.Scheduler.Tracing
         EmptyWorkingSet = 14511,
         ResumeProcess = 14512,
         HandlePipStepOnWorkerFailed = 14513,
+
+        // Retry Pips on Same/Different Workers
         ExcessivePipRetriesDueToRetryableFailures = 14514,
         PipRetryDueToRetryableFailures = 14515,
+        PipProcessRetriedOnSameWorker = 14516,
+        PipProcessRetriedOnDifferentWorker = 14517,
+        FileContentManagerTryMaterializeFileAsyncFileArtifactAvailableLater = 14518,
+        ModuleWorkerMapping = 14519,
+        AddedNewWorkerToModuleAffinity = 14520,
 
         // was DependencyViolationGenericWithRelatedPip_AsError = 25000,
         // was DependencyViolationGeneric_AsError = 25001,

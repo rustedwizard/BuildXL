@@ -10,12 +10,13 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Management;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using BuildXL.Interop;
 using BuildXL.Utilities.Instrumentation.Common;
+using BuildXL.Utilities.Tasks;
 using Microsoft.Win32.SafeHandles;
 using static BuildXL.Interop.Dispatch;
 using static BuildXL.Interop.Unix.Memory;
@@ -86,17 +87,23 @@ namespace BuildXL.Utilities
             public int AvailableDiskSpace;
         }
 
+        // Used for calculating the BuildXL CPU time
+        private readonly Func<(ulong? KernelTime, ulong? UserTime, ulong? NumProcesses)> m_queryJobObject;
+        private DateTime m_jobObjectLastCollectedAt = DateTime.MinValue;
+        private ulong m_jobObjectTotalTimeLastValue;
+
         /// <summary>
         /// Creates a new PerformanceCollector with the specified collection frequency.
         /// </summary>
         [SuppressMessage("Microsoft.Reliability", "CA2000:DisposeObjectsBeforeLosingScope",
             Justification = "Handle is owned by PerformanceCollector and is disposed on its disposal")]
-        public PerformanceCollector(TimeSpan collectionFrequency, bool collectBytesHeld = false, TestHooks testHooks = null)
+        public PerformanceCollector(TimeSpan collectionFrequency, bool collectBytesHeld = false, Action<Exception> errorHandler = null, TestHooks testHooks = null, Func<(ulong?, ulong?, ulong?)> queryJobObject = null)
         {
             m_collectionFrequency = collectionFrequency;
             m_processorCount = Environment.ProcessorCount;
             m_collectHeldBytesFromGC = collectBytesHeld;
             m_testHooks = testHooks;
+            m_queryJobObject = queryJobObject;
 
             // Figure out which drives we want to get counters for
             List<(DriveInfo, SafeFileHandle, DISK_PERFORMANCE)> drives = new List<(DriveInfo, SafeFileHandle, DISK_PERFORMANCE)>();
@@ -132,31 +139,35 @@ namespace BuildXL.Utilities
                 // Initialize network telemetry objects
                 InitializeNetworkMonitor();
 
-                InitializeWMI();
+                InitializeWMIAsync().Forget(errorHandler);
             }
 
             // Perform all initialization before starting the timer
             m_collectionTimer = new Timer(Collect, null, 0, 0);
         }
 
-        private ManagementScope m_scope;
-        private ManagementObjectSearcher m_querySearcher;
+        private volatile ManagementScope m_wmiScope;
+        private ManagementObjectSearcher m_modifiedPageSizeWMIQuery, m_cpuWMIQuery;
+        private ManagementOperationObserver m_modifiedPageSizeWMIWatcher, m_cpuWMIWatcher;
+        private double? m_modifiedPagelistBytes = null;
+        private double? m_machineCpuWMI = null;
 
-        private void InitializeWMI()
+        private async Task InitializeWMIAsync()
         {
-            try
-            {
-                m_scope = new ManagementScope(String.Format("\\\\{0}\\root\\CIMV2", "."), null);
-                m_scope.Connect();
+            await Task.Yield();
 
-                ObjectQuery query = new ObjectQuery("SELECT AvailableBytes, ModifiedPageListBytes, FreeAndZeroPageListBytes, StandbyCacheCoreBytes, StandbyCacheNormalPriorityBytes, StandbyCacheReserveBytes FROM Win32_PerfFormattedData_PerfOS_Memory");
-                m_querySearcher = new ManagementObjectSearcher(m_scope, query);
-            }
-#pragma warning disable ERP022
-            catch (Exception)
-            {
-            }
-#pragma warning restore ERP022 // Unobserved exception in generic exception handler
+            m_wmiScope = new ManagementScope(string.Format("\\\\{0}\\root\\CIMV2", "."), null);
+            m_wmiScope.Connect();
+
+            ObjectQuery memoryQuery = new ObjectQuery("SELECT ModifiedPageListBytes FROM Win32_PerfFormattedData_PerfOS_Memory");
+            m_modifiedPageSizeWMIQuery = new ManagementObjectSearcher(m_wmiScope, memoryQuery);
+            m_modifiedPageSizeWMIWatcher = new ManagementOperationObserver();
+            m_modifiedPageSizeWMIWatcher.ObjectReady += new ObjectReadyEventHandler(UpdateModifiedPageSize);
+
+            ObjectQuery cpuQuery = new ObjectQuery("SELECT * FROM Win32_PerfFormattedData_PerfOS_Processor WHERE Name=\"_Total\"");
+            m_cpuWMIQuery = new ManagementObjectSearcher(m_wmiScope, cpuQuery);
+            m_cpuWMIWatcher = new ManagementOperationObserver();
+            m_cpuWMIWatcher.ObjectReady += new ObjectReadyEventHandler(UpdateWMICpu);
         }
 
         /// <summary>
@@ -199,16 +210,18 @@ namespace BuildXL.Utilities
                 double? machineTotalPhysicalBytes = null;
                 double? commitUsedBytes = null;
                 double? commitLimitBytes = null;
-
-                double? modifiedPagelistBytes = null;
-                double? freePagelistBytes = null;
-                double? standbyPagelistBytes = null;
+                double? jobObjectCpu = null;
+                double? jobObjectProcesses = null;
 
                 DiskStats[] diskStats = null;
 
                 if (!OperatingSystemHelper.IsUnixOS)
                 {
                     machineCpu = GetMachineCpu();
+
+                    var buildXlJobObjectInfo = m_queryJobObject?.Invoke();
+                    jobObjectProcesses = buildXlJobObjectInfo?.NumProcesses;
+                    jobObjectCpu = GetJobObjectCpu(buildXlJobObjectInfo?.UserTime, buildXlJobObjectInfo?.KernelTime);
 
                     MEMORYSTATUSEX memoryStatusEx = new MEMORYSTATUSEX();
                     if (GlobalMemoryStatusEx(memoryStatusEx))
@@ -226,7 +239,8 @@ namespace BuildXL.Utilities
 
                     diskStats = GetDiskCountersWindows();
 
-                    TryGetRAMDetails(ref modifiedPagelistBytes, ref freePagelistBytes, ref standbyPagelistBytes);
+                    TryGetModifiedPagelistSizeAsync();
+                    TryGetWMICpuAsync();
                 }
                 else
                 {
@@ -277,9 +291,10 @@ namespace BuildXL.Utilities
                             machineKbitsPerSecReceived: machineKbitsPerSecReceived,
                             diskStats: diskStats,
                             gcHeldBytes: processHeldBytes,
-                            modifiedPagelistBytes: modifiedPagelistBytes,
-                            freePagelistBytes: freePagelistBytes,
-                            standbyPagelistBytes: standbyPagelistBytes);
+                            modifiedPagelistBytes: m_modifiedPagelistBytes,
+                            machineCpuWMI: m_machineCpuWMI,
+                            jobObjectCpu: jobObjectCpu,
+                            jobObjectProcesses: jobObjectProcesses);
                     }
                 }
 
@@ -288,28 +303,62 @@ namespace BuildXL.Utilities
             }
         }
 
-        private void TryGetRAMDetails(ref double? modifiedPagelistBytes, ref double? freePagelistBytes, ref double? standbyPagelistBytes)
+        private void TryGetModifiedPagelistSizeAsync()
         {
             try
             {
-                if (m_querySearcher != null)
+                if (m_wmiScope?.IsConnected == true)
                 {
-                    foreach (ManagementObject WmiObject in m_querySearcher.Get())
-                    {
-                        modifiedPagelistBytes = (UInt64)WmiObject["ModifiedPageListBytes"];
-                        freePagelistBytes = (UInt64)WmiObject["FreeAndZeroPageListBytes"];
-
-                        standbyPagelistBytes = (UInt64)WmiObject["StandbyCacheCoreBytes"];
-                        standbyPagelistBytes += (UInt64)WmiObject["StandbyCacheNormalPriorityBytes"];
-                        standbyPagelistBytes += (UInt64)WmiObject["StandbyCacheReserveBytes"];
-                    }
+                    m_modifiedPageSizeWMIQuery.Get(m_modifiedPageSizeWMIWatcher);
                 }
             }
-#pragma warning disable ERP022 // TODO: This should really handle specific errors
+#pragma warning disable ERP022 // It is OK for WMI to fail sometimes
             catch (Exception)
             {
             }
-#pragma warning restore ERP022 // Unobserved exception in generic exception handler
+#pragma warning restore ERP022
+        }
+
+        private void UpdateModifiedPageSize(object sender, ObjectReadyEventArgs obj)
+        {
+            try
+            {
+                m_modifiedPagelistBytes = (UInt64)obj.NewObject["ModifiedPageListBytes"];
+            }
+#pragma warning disable ERP022 // It is OK for WMI to fail sometimes
+            catch (Exception)
+            {
+            }
+#pragma warning restore ERP022
+        }
+
+        private void TryGetWMICpuAsync()
+        {
+            try
+            {
+                if (m_wmiScope?.IsConnected == true)
+                {
+                    m_cpuWMIQuery.Get(m_cpuWMIWatcher);
+                }
+            }
+#pragma warning disable ERP022 // It is OK for WMI to fail sometimes
+            catch (Exception)
+            {
+            }
+#pragma warning restore ERP022
+        }
+
+        private void UpdateWMICpu(object sender, ObjectReadyEventArgs obj)
+        {
+            try
+            {
+                m_machineCpuWMI = 100 - Convert.ToUInt32(obj.NewObject["PercentIdleTime"]);
+            }
+#pragma warning disable ERP022 // It is OK for WMI to fail sometimes
+            catch (Exception)
+            {
+            }
+#pragma warning restore ERP022
         }
 
         private static double BytesToKbits(long bytes)
@@ -388,6 +437,11 @@ namespace BuildXL.Utilities
                 {
                     item.safeFileHandle?.Dispose();
                 }
+            }
+
+            if (!OperatingSystemHelper.IsUnixOS)
+            {
+                m_modifiedPageSizeWMIQuery?.Dispose();
             }
         }
 
@@ -499,6 +553,40 @@ namespace BuildXL.Utilities
             }
         }
 
+        private double? GetJobObjectCpu(ulong? userTime, ulong? kernelTime)
+        {
+            if (userTime == null || kernelTime == null)
+            {
+                return null;
+            }
+
+            var totalTime = kernelTime.Value + userTime.Value;
+            DateTime currentCollectedAt = DateTime.UtcNow;
+
+            if (m_jobObjectLastCollectedAt == DateTime.MinValue)
+            {
+                m_jobObjectLastCollectedAt = currentCollectedAt;
+                m_jobObjectTotalTimeLastValue = totalTime;
+                return null;
+            }
+
+            double? jobObjectCpu = null;
+
+            long availProcessorTime = ((currentCollectedAt.ToFileTime() - m_jobObjectLastCollectedAt.ToFileTime()) * (long)m_processorCount);
+            if (availProcessorTime > 0)
+            {
+                if (totalTime > m_jobObjectTotalTimeLastValue)
+                {
+                    jobObjectCpu = (100.0 * (totalTime - m_jobObjectTotalTimeLastValue)) / availProcessorTime;
+                }
+
+                m_jobObjectLastCollectedAt = DateTime.UtcNow;
+                m_jobObjectTotalTimeLastValue = totalTime;
+            }
+
+            return jobObjectCpu;
+        }
+
         private double? GetMachineCpu()
         {
             double? machineCpu = null;
@@ -523,17 +611,19 @@ namespace BuildXL.Utilities
                     long availProcessorTime = ((machineTimeCurrentCollectedAt.ToFileTime() - m_machineTimeLastCollectedAt.ToFileTime()) * m_processorCount);
                     if (availProcessorTime > 0)
                     {
-                        machineCpu = (100.0 * (machineTimeCurrentValue - m_machineTimeLastVale)) / availProcessorTime;
+                        if (machineTimeCurrentValue > m_machineTimeLastVale)
+                        {
+                            machineCpu = (100.0 * (machineTimeCurrentValue - m_machineTimeLastVale)) / availProcessorTime;
+                            // Windows will create a new Processor Group for every 64 logical processors. Technically we should
+                            // call GetSystemTimes() multiple times, targeting each processor group for correct data. Instead,
+                            // this code assumes each processor group is eavenly loaded and just uses the number of predicted
+                            // groups as a factor to scale the system times observed on the default processor group for this thread.
+                            // https://msdn.microsoft.com/en-us/library/windows/desktop/dd405503(v=vs.85).aspx
+                            machineCpu = machineCpu * Math.Ceiling((double)m_processorCount / 64);
 
-                        // Windows will create a new Processor Group for every 64 logical processors. Technically we should
-                        // call GetSystemTimes() multiple times, targeting each processor group for correct data. Instead,
-                        // this code assumes each processor group is eavenly loaded and just uses the number of predicted
-                        // groups as a factor to scale the system times observed on the default processor group for this thread.
-                        // https://msdn.microsoft.com/en-us/library/windows/desktop/dd405503(v=vs.85).aspx
-                        machineCpu = machineCpu * Math.Ceiling((double)m_processorCount / 64);
-
-                        // Sometimes the calculated value pops up above 100.
-                        machineCpu = Math.Min(100, machineCpu.Value);
+                            // Sometimes the calculated value pops up above 100.
+                            machineCpu = Math.Min(100, machineCpu.Value);
+                        }
 
                         m_machineTimeLastCollectedAt = machineTimeCurrentCollectedAt;
                         m_machineTimeLastVale = machineTimeCurrentValue;
@@ -582,9 +672,24 @@ namespace BuildXL.Utilities
         public struct MachinePerfInfo
         {
             /// <summary>
+            /// CPU usage percentage of BuildXL job object
+            /// </summary>
+            public long JobObjectCpu;
+
+            /// <summary>
+            /// Number of processes in BuildXL job object
+            /// </summary>
+            public int JobObjectProcesses;
+
+            /// <summary>
             /// CPU usage percentage
             /// </summary>
             public int CpuUsagePercentage;
+
+            /// <summary>
+            /// CPU usage percentage
+            /// </summary>
+            public int CpuWMIUsagePercentage;
 
             /// <summary>
             /// Disk usage percentages for each disk
@@ -675,17 +780,11 @@ namespace BuildXL.Utilities
             internal int? ModifiedPagelistMb;
 
             /// <summary>
-            /// Free pagelist that is a part of available RAM
+            /// Modified pagelist / TotalRAM
             /// </summary>
-            internal int? FreePagelistMb;
-
-            /// <summary>
-            /// Standby pagelist that is a part of used RAM
-            /// </summary>
-            /// <remarks>
-            /// Pages in the standby pagelist are clean and they can be reused for the same process or used as free pages for other processes.
-            /// </remarks>
-            internal int? StandbyPagelistMb;
+            internal int? ModifiedPagelistPercentage => TotalRamMb > 0 ?
+                (int)(100 * ((double)(ModifiedPagelistMb ?? 0) / TotalRamMb)):
+                0;
 
             /// <summary>
             /// Effective Available RAM = Modified pagelist + Available RAM
@@ -737,6 +836,11 @@ namespace BuildXL.Utilities
             public readonly Aggregation MachineCpu;
 
             /// <summary>
+            /// The percent of CPU time used by the machine (reported by WMI)
+            /// </summary>
+            public readonly Aggregation MachineCpuWMI;
+
+            /// <summary>
             /// The available megabytes of physical memory available on the machine
             /// </summary>
             public readonly Aggregation MachineAvailablePhysicalMB;
@@ -781,10 +885,10 @@ namespace BuildXL.Utilities
             public readonly Aggregation ModifiedPagelistMB;
 
             /// <nodoc />
-            public readonly Aggregation FreePagelistMB;
+            public readonly Aggregation JobObjectCpu;
 
             /// <nodoc />
-            public readonly Aggregation StandbyPagelistMB;
+            public readonly Aggregation JobObjectProcesses;
 
             /// <summary>
             /// Stats about disk usage. This is guarenteed to be in the same order as <see cref="GetDrives"/>
@@ -854,6 +958,7 @@ namespace BuildXL.Utilities
                 ProcessThreadCount = new Aggregation();
                 ProcessHeldMB = new Aggregation();
                 MachineCpu = new Aggregation();
+                MachineCpuWMI = new Aggregation();
                 MachineAvailablePhysicalMB = new Aggregation();
                 MachineTotalPhysicalMB = new Aggregation();
                 CommitLimitMB = new Aggregation();
@@ -863,8 +968,8 @@ namespace BuildXL.Utilities
                 MachineKbitsPerSecSent = new Aggregation();
                 MachineKbitsPerSecReceived = new Aggregation();
                 ModifiedPagelistMB = new Aggregation();
-                StandbyPagelistMB = new Aggregation();
-                FreePagelistMB = new Aggregation();
+                JobObjectCpu = new Aggregation();
+                JobObjectProcesses = new Aggregation();
 
                 List<Tuple<string, Aggregation>> aggs = new List<Tuple<string, Aggregation>>();
                 List<DiskStatistics> diskStats = new List<DiskStatistics>();
@@ -891,134 +996,139 @@ namespace BuildXL.Utilities
                 }
 
                 MachinePerfInfo perfInfo = default(MachinePerfInfo);
-
-                using (var sbPool = Pools.GetStringBuilder())
-                using (var sbPool2 = Pools.GetStringBuilder())
+                unchecked
                 {
-                    StringBuilder consoleSummary = sbPool.Instance;
-                    StringBuilder logFileSummary = sbPool2.Instance;
 
-                    perfInfo.CpuUsagePercentage = SafeConvert.ToInt32(MachineCpu.Latest);
-                    consoleSummary.AppendFormat("CPU:{0}%", perfInfo.CpuUsagePercentage);
-                    logFileSummary.AppendFormat("CPU:{0}%", perfInfo.CpuUsagePercentage);
-                    if (MachineTotalPhysicalMB.Latest > 0)
+                    using (var sbPool = Pools.GetStringBuilder())
+                    using (var sbPool2 = Pools.GetStringBuilder())
                     {
-                        var availableRam = SafeConvert.ToInt32(MachineAvailablePhysicalMB.Latest);
-                        var totalRam = SafeConvert.ToInt32(MachineTotalPhysicalMB.Latest);
+                        StringBuilder consoleSummary = sbPool.Instance;
+                        StringBuilder logFileSummary = sbPool2.Instance;
 
-                        var ramUsagePercentage = SafeConvert.ToInt32(((100.0 * (totalRam - availableRam)) / totalRam));
-                        Contract.Assert(ramUsagePercentage >= 0 && ramUsagePercentage <= 100);
+                        perfInfo.CpuUsagePercentage = SafeConvert.ToInt32(MachineCpu.Latest);
+                        perfInfo.CpuWMIUsagePercentage = SafeConvert.ToInt32(MachineCpuWMI.Latest);
 
-                        perfInfo.RamUsagePercentage = ramUsagePercentage;
-                        perfInfo.TotalRamMb = totalRam;
-                        perfInfo.AvailableRamMb = availableRam;
-                        consoleSummary.AppendFormat(" RAM:{0}%", ramUsagePercentage);
-                        logFileSummary.AppendFormat(" RAM:{0}%", ramUsagePercentage);
-                    }
+                        consoleSummary.AppendFormat("CPU:{0}%", perfInfo.CpuUsagePercentage);
+                        logFileSummary.AppendFormat("CPU:{0}%", perfInfo.CpuUsagePercentage);
+                        if (MachineTotalPhysicalMB.Latest > 0)
+                        {
+                            var availableRam = SafeConvert.ToInt32(MachineAvailablePhysicalMB.Latest);
+                            var totalRam = SafeConvert.ToInt32(MachineTotalPhysicalMB.Latest);
 
-                    if (ModifiedPagelistMB.Latest > 0)
-                    {
-                        perfInfo.ModifiedPagelistMb = SafeConvert.ToInt32(ModifiedPagelistMB.Latest);
-                    }
+                            var ramUsagePercentage = SafeConvert.ToInt32(((100.0 * (totalRam - availableRam)) / totalRam));
+                            Contract.Assert(ramUsagePercentage >= 0 && ramUsagePercentage <= 100);
 
-                    if (FreePagelistMB.Latest > 0)
-                    {
-                        perfInfo.FreePagelistMb = SafeConvert.ToInt32(FreePagelistMB.Latest);
-                    }
+                            perfInfo.RamUsagePercentage = ramUsagePercentage;
+                            perfInfo.TotalRamMb = totalRam;
+                            perfInfo.AvailableRamMb = availableRam;
+                            consoleSummary.AppendFormat(" RAM:{0}%", ramUsagePercentage);
+                            logFileSummary.AppendFormat(" RAM:{0}%", ramUsagePercentage);
+                        }
 
-                    if (StandbyPagelistMB.Latest > 0)
-                    {
-                        perfInfo.StandbyPagelistMb = SafeConvert.ToInt32(StandbyPagelistMB.Latest);
-                    }
+                        if (ModifiedPagelistMB.Latest > 0)
+                        {
+                            perfInfo.ModifiedPagelistMb = SafeConvert.ToInt32(ModifiedPagelistMB.Latest);
+                        }
 
-                    if (perfInfo.TotalRamMb.HasValue)
-                    {
-                        perfInfo.EffectiveAvailableRamMb = perfInfo.AvailableRamMb.Value + (perfInfo.ModifiedPagelistMb ?? 0);
-                        perfInfo.EffectiveRamUsagePercentage = SafeConvert.ToInt32(100.0 * (perfInfo.TotalRamMb.Value - perfInfo.EffectiveAvailableRamMb.Value) / perfInfo.TotalRamMb.Value);
-                    }
+                        if (JobObjectCpu.Latest > 0)
+                        {
+                            perfInfo.JobObjectCpu = SafeConvert.ToInt32(JobObjectCpu.Latest);
+                        }
 
-                    if (CommitLimitMB.Latest > 0)
-                    {
-                        var commitUsed = SafeConvert.ToInt32(CommitUsedMB.Latest);
-                        var commitLimit = SafeConvert.ToInt32(CommitLimitMB.Latest);
-                        var commitUsagePercentage = SafeConvert.ToInt32(((100.0 * commitUsed) / commitLimit));
+                        if (JobObjectProcesses.Latest > 0)
+                        {
+                            perfInfo.JobObjectProcesses = SafeConvert.ToInt32(JobObjectProcesses.Latest);
+                        }
 
-                        perfInfo.CommitUsagePercentage = commitUsagePercentage;
-                        perfInfo.CommitUsedMb = commitUsed;
-                        perfInfo.CommitLimitMb = commitLimit;
-                    }
+                        if (perfInfo.TotalRamMb.HasValue)
+                        {
+                            perfInfo.EffectiveAvailableRamMb = SafeConvert.ToInt32(perfInfo.AvailableRamMb.Value + (perfInfo.ModifiedPagelistMb ?? 0));
+                            perfInfo.EffectiveRamUsagePercentage = SafeConvert.ToInt32(100.0 * (perfInfo.TotalRamMb.Value - perfInfo.EffectiveAvailableRamMb.Value) / perfInfo.TotalRamMb.Value);
+                        }
 
-                    if (MachineBandwidth.Latest > 0)
-                    {
-                        perfInfo.MachineBandwidth = (long)MachineBandwidth.Latest;
-                        perfInfo.MachineKbitsPerSecSent = MachineKbitsPerSecSent.Latest;
-                        perfInfo.MachineKbitsPerSecReceived = MachineKbitsPerSecReceived.Latest;
-                    }
+                        if (CommitLimitMB.Latest > 0)
+                        {
+                            var commitUsed = SafeConvert.ToInt32(CommitUsedMB.Latest);
+                            var commitLimit = SafeConvert.ToInt32(CommitLimitMB.Latest);
+                            var commitUsagePercentage = SafeConvert.ToInt32(((100.0 * commitUsed) / commitLimit));
 
-                    int diskIndex = 0;
-                    perfInfo.DiskAvailableSpaceGb = new int[DiskStats.Count];
-                    foreach (var disk in DiskStats)
-                    {
-                        var availableSpaceGb = SafeConvert.ToInt32(disk.AvailableSpaceGb.Latest);
-                        perfInfo.DiskAvailableSpaceGb[diskIndex] = availableSpaceGb;
-                        diskIndex++;
-                    }
+                            perfInfo.CommitUsagePercentage = commitUsagePercentage;
+                            perfInfo.CommitUsedMb = commitUsed;
+                            perfInfo.CommitLimitMb = commitLimit;
+                        }
 
-                    if (!OperatingSystemHelper.IsUnixOS)
-                    {
-                        perfInfo.DiskUsagePercentages = new int[DiskStats.Count];
-                        perfInfo.DiskQueueDepths = new int[DiskStats.Count];
+                        if (MachineBandwidth.Latest > 0)
+                        {
+                            perfInfo.MachineBandwidth = SafeConvert.ToLong(MachineBandwidth.Latest);
+                            perfInfo.MachineKbitsPerSecSent = MachineKbitsPerSecSent.Latest;
+                            perfInfo.MachineKbitsPerSecReceived = MachineKbitsPerSecReceived.Latest;
+                        }
 
-                        string worstDrive = "N/A";
-                        int highestActiveTime = -1;
-                        int highestQueueDepth = 0;
-
-                        // Loop through and find the worst looking disk
-                        diskIndex = 0;
+                        int diskIndex = 0;
+                        perfInfo.DiskAvailableSpaceGb = new int[DiskStats.Count];
                         foreach (var disk in DiskStats)
                         {
-                            if (disk.ReadTime.Maximum == 0)
-                            {
-                                perfInfo.DiskUsagePercentages[diskIndex] = 0;
-                                perfInfo.DiskQueueDepths[diskIndex] = 0;
-                                diskIndex++;
-                                // Don't consider samples unless some activity has been registered
-                                continue;
-                            }
-
-                            var activeTime = disk.CalculateActiveTime(lastOnly: true);
-                            var queueDepth = SafeConvert.ToInt32(disk.QueueDepth.Latest);
-                            perfInfo.DiskUsagePercentages[diskIndex] = activeTime;
-                            perfInfo.DiskQueueDepths[diskIndex] = queueDepth;
+                            var availableSpaceGb = SafeConvert.ToInt32(disk.AvailableSpaceGb.Latest);
+                            perfInfo.DiskAvailableSpaceGb[diskIndex] = availableSpaceGb;
                             diskIndex++;
+                        }
 
-                            logFileSummary.Append(FormatDiskUtilization(disk.Drive, activeTime));
+                        if (!OperatingSystemHelper.IsUnixOS)
+                        {
+                            perfInfo.DiskUsagePercentages = new int[DiskStats.Count];
+                            perfInfo.DiskQueueDepths = new int[DiskStats.Count];
 
-                            if (activeTime > highestActiveTime)
+                            string worstDrive = "N/A";
+                            int highestActiveTime = -1;
+                            int highestQueueDepth = 0;
+
+                            // Loop through and find the worst looking disk
+                            diskIndex = 0;
+                            foreach (var disk in DiskStats)
                             {
-                                worstDrive = disk.Drive;
-                                highestActiveTime = activeTime;
-                                highestQueueDepth = queueDepth;
+                                if (disk.ReadTime.Maximum == 0)
+                                {
+                                    perfInfo.DiskUsagePercentages[diskIndex] = 0;
+                                    perfInfo.DiskQueueDepths[diskIndex] = 0;
+                                    diskIndex++;
+                                    // Don't consider samples unless some activity has been registered
+                                    continue;
+                                }
+
+                                var activeTime = disk.CalculateActiveTime(lastOnly: true);
+                                var queueDepth = SafeConvert.ToInt32(disk.QueueDepth.Latest);
+                                perfInfo.DiskUsagePercentages[diskIndex] = activeTime;
+                                perfInfo.DiskQueueDepths[diskIndex] = queueDepth;
+                                diskIndex++;
+
+                                logFileSummary.Append(FormatDiskUtilization(disk.Drive, activeTime));
+
+                                if (activeTime > highestActiveTime)
+                                {
+                                    worstDrive = disk.Drive;
+                                    highestActiveTime = activeTime;
+                                    highestQueueDepth = queueDepth;
+                                }
+                            }
+
+                            if (highestActiveTime != -1)
+                            {
+                                consoleSummary.Append(FormatDiskUtilization(worstDrive, highestActiveTime));
                             }
                         }
 
-                        if (highestActiveTime != -1)
-                        {
-                            consoleSummary.Append(FormatDiskUtilization(worstDrive, highestActiveTime));
-                        }
+                        perfInfo.ProcessCpuPercentage = SafeConvert.ToInt32(ProcessCpu.Latest);
+                        logFileSummary.AppendFormat(" DominoCPU:{0}%", perfInfo.ProcessCpuPercentage);
+
+                        perfInfo.ProcessWorkingSetMB = SafeConvert.ToInt32(ProcessWorkingSetMB.Latest);
+                        logFileSummary.AppendFormat(" DominoRAM:{0}MB", perfInfo.ProcessWorkingSetMB);
+
+                        perfInfo.ConsoleResourceSummary = consoleSummary.ToString();
+                        perfInfo.LogResourceSummary = logFileSummary.ToString();
                     }
 
-                    perfInfo.ProcessCpuPercentage = SafeConvert.ToInt32(ProcessCpu.Latest);
-                    logFileSummary.AppendFormat(" DominoCPU:{0}%", perfInfo.ProcessCpuPercentage);
-
-                    perfInfo.ProcessWorkingSetMB = SafeConvert.ToInt32(ProcessWorkingSetMB.Latest);
-                    logFileSummary.AppendFormat(" DominoRAM:{0}MB", perfInfo.ProcessWorkingSetMB);
-
-                    perfInfo.ConsoleResourceSummary = consoleSummary.ToString();
-                    perfInfo.LogResourceSummary = logFileSummary.ToString();
+                    return perfInfo;
                 }
-
-                return perfInfo;
             }
 
             private static string FormatDiskUtilization(string drive, int activeTime)
@@ -1045,8 +1155,9 @@ namespace BuildXL.Utilities
                 DiskStats[] diskStats,
                 double? gcHeldBytes,
                 double? modifiedPagelistBytes,
-                double? freePagelistBytes,
-                double? standbyPagelistBytes)
+                double? machineCpuWMI,
+                double? jobObjectCpu,
+                double? jobObjectProcesses)
             {
                 Interlocked.Increment(ref m_sampleCount);
 
@@ -1055,6 +1166,7 @@ namespace BuildXL.Utilities
                 ProcessWorkingSetMB.RegisterSample(BytesToMB(processWorkingSetBytes));
                 ProcessThreadCount.RegisterSample(threads);
                 MachineCpu.RegisterSample(machineCpu);
+                MachineCpuWMI.RegisterSample(machineCpuWMI);
                 MachineAvailablePhysicalMB.RegisterSample(BytesToMB(machineAvailablePhysicalBytes));
                 MachineTotalPhysicalMB.RegisterSample(BytesToMB(machineTotalPhysicalBytes));
                 CommitUsedMB.RegisterSample(BytesToMB(commitUsedBytes));
@@ -1064,8 +1176,8 @@ namespace BuildXL.Utilities
                 MachineKbitsPerSecSent.RegisterSample(machineKbitsPerSecSent);
                 MachineKbitsPerSecReceived.RegisterSample(machineKbitsPerSecReceived);
                 ModifiedPagelistMB.RegisterSample(BytesToMB(modifiedPagelistBytes));
-                FreePagelistMB.RegisterSample(BytesToMB(freePagelistBytes));
-                StandbyPagelistMB.RegisterSample(BytesToMB(standbyPagelistBytes));
+                JobObjectCpu.RegisterSample(jobObjectCpu);
+                JobObjectProcesses.RegisterSample(jobObjectProcesses);
 
                 Contract.Assert(m_diskStats.Length == diskStats.Length);
                 for (int i = 0; i < diskStats.Length; i++)

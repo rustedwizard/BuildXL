@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Diagnostics.ContractsLight;
 
 namespace BuildXL.Cache.ContentStore.InterfacesTest.Time
 {
@@ -29,11 +30,31 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest.Time
             }
         }
 
-        public void Increment()
+        public DateTime Increment()
         {
             lock (_lock)
             {
                 _utcNow += TimeSpan.FromSeconds(1);
+                return _utcNow;
+            }
+        }
+
+        public DateTime AddSeconds(int seconds)
+        {
+            lock (_lock)
+            {
+                _utcNow += TimeSpan.FromSeconds(seconds);
+                return _utcNow;
+            }
+        }
+        
+        public DateTime Increment(TimeSpan timeSpan)
+        {
+            Contract.Requires(timeSpan > TimeSpan.Zero);
+            lock (_lock)
+            {
+                _utcNow += timeSpan;
+                return _utcNow;
             }
         }
     }

@@ -400,6 +400,23 @@ namespace IntegrationTest.BuildXL.Scheduler
         }
 
         [Fact]
+        public void StandardErrorWithZeroLengthDoesNotFailExecution()
+        {
+            // Schedule a pip that does not write to stderr
+            var pipBuilder = CreatePipBuilder(new Operation[]
+            {
+                Operation.WriteFile(CreateOutputFileArtifact()),
+            });
+
+            pipBuilder.Options |= Process.Options.WritingToStandardErrorFailsExecution;
+
+            Process pip = SchedulePipBuilder(pipBuilder).Process;
+
+            // Should succeed since stderr was not written
+            RunScheduler().AssertSuccess();
+        }
+
+        [Fact]
         public void ValidateCachingCommandLineChange()
         {
             // Graph construction
@@ -677,6 +694,66 @@ namespace IntegrationTest.BuildXL.Scheduler
             RunScheduler().AssertCacheHit(pip.PipId);
         }
 
+        [Feature(Features.DirectoryProbe)]
+        [TheoryIfSupported(requiresWindowsBasedOperatingSystem: true)] // we currently cannot simulate directory probes for macOS.
+        [InlineData(true)]
+        [InlineData(false)]
+        public void ValidateTreatAbsentDirectoryAsExistentUnderOpaque(bool disableTreatAbsentDirectoryAsExistentUnderOpaque)
+        {
+            if (disableTreatAbsentDirectoryAsExistentUnderOpaque)
+            {
+                // Only set it in case of disableTreatAbsentDirectoryAsExistentUnderOpaque, 
+                // so that we can also test the default behavior.
+                Configuration.Schedule.TreatAbsentDirectoryAsExistentUnderOpaque = false;
+            }
+
+            // Pip1 probes a directory: "opaque/childDir".
+            // Pip2 produces a file under a regular or shared opaque directory probe: "opaque/childDir/output".
+            // If Pip1 executes before Pip2, then Pip1 has an AbsentPathProbe for probing "opaque/childDir. 
+            // In the next run, if Pip2 executes before Pip1, Pip1 has an ExistingDirectoryProbe for "opaque/childDir", 
+            // so it will get a miss because the parent directories of outputs are added to Output / Graph file system after Pip2 is executed.
+
+            // Incremental scheduling does not seem compatible with constraintExecutionOrder feature
+            Configuration.Schedule.IncrementalScheduling = false;
+
+            string opaqueDir = Path.Combine(ObjectRoot, "opaqueDir");
+            var dirUnderOpaque = CreateOutputDirectoryArtifact(opaqueDir);
+
+            Process pip1 = CreateAndSchedulePipBuilder(new Operation[]
+            {
+                Operation.DirProbe(dirUnderOpaque),
+                Operation.WriteFile(CreateOutputFileArtifact())
+            }).Process;
+
+            var builder = CreatePipBuilder(new Operation[]
+            {
+                Operation.WriteFile(CreateOutputFileArtifact(dirUnderOpaque), doNotInfer: true)
+            });
+
+            builder.AddOutputDirectory(AbsolutePath.Create(Context.PathTable, opaqueDir), kind: SealDirectoryKind.Opaque);
+            var pip2 = SchedulePipBuilder(builder).Process;
+
+            RunScheduler(constraintExecutionOrder: new List<(Pip, Pip)>() { (pip1, pip2) }).AssertCacheMiss(pip1.PipId, pip2.PipId);
+
+            var secondRunResult = RunScheduler(constraintExecutionOrder: new List<(Pip, Pip)>() { (pip2, pip1) });
+            if (Configuration.Schedule.TreatAbsentDirectoryAsExistentUnderOpaque)
+            {
+                secondRunResult.AssertCacheHit(pip1.PipId, pip2.PipId);
+            }
+            else
+            {
+                // If pip2 executes before pip1, then dirUnderOpaque probe would be ExistingDirectoryProbe
+                // instead of AbsentPathProbe. It would result in a cache miss.
+                secondRunResult.AssertCacheMiss(pip1.PipId);
+            }
+
+            // This can be a miss if we do not preserve flags for ExistingDirectory probes.
+            RunScheduler(constraintExecutionOrder: new List<(Pip, Pip)>() { (pip1, pip2) }).AssertCacheHit(pip1.PipId, pip2.PipId);
+
+            // This is always a hit.
+            RunScheduler(constraintExecutionOrder: new List<(Pip, Pip)>() { (pip2, pip1) }).AssertCacheHit(pip1.PipId, pip2.PipId);
+        }
+
         [Feature(Features.DirectoryEnumeration)]
         [Feature(Features.Mount)]
         [Theory]
@@ -807,8 +884,17 @@ namespace IntegrationTest.BuildXL.Scheduler
             File.Delete(ArtifactToString(filecpp));
             FileArtifact filecppUpperCase = CreateFileArtifactWithName("FILE.CPP", ReadonlyRoot);
             WriteSourceFile(filecppUpperCase);
-            // Case does not matter
-            RunScheduler().AssertCacheHit(pip.PipId);
+            
+            var result = RunScheduler();
+
+            if (OperatingSystemHelper.IsPathComparisonCaseSensitive)
+            {
+                result.AssertCacheMiss(pip.PipId);
+            }
+            else
+            {
+                result.AssertCacheHit(pip.PipId);
+            }
 
             // Modify /readonly/a.txt
             File.WriteAllText(ArtifactToString(aTxtFile), "aTxtFile");
@@ -1301,12 +1387,13 @@ namespace IntegrationTest.BuildXL.Scheduler
         [InlineData(false)]
         public void RetryExitCodes(bool succeedOnRetry)
         {
+            Configuration.Schedule.ProcessRetries = 1;
             FileArtifact stateFile = FileArtifact.CreateOutputFile(ObjectRootPath.Combine(Context.PathTable, "stateFile.txt"));
             var ops = new Operation[]
             {
                 Operation.WriteFile(FileArtifact.CreateOutputFile(ObjectRootPath.Combine(Context.PathTable, "out.txt")), content: "Hello"),
                 succeedOnRetry ?
-                    Operation.SucceedOnRetry(untrackedStateFilePath: stateFile, firstFailExitCode: 42) :
+                    Operation.SucceedOnRetry(untrackedStateFilePath: stateFile, failExitCode: 42) :
                     Operation.Fail(-2),
             };
 
@@ -1314,8 +1401,6 @@ namespace IntegrationTest.BuildXL.Scheduler
             builder.RetryExitCodes = global::BuildXL.Utilities.Collections.ReadOnlyArray<int>.From(new int[] { 42 });
             builder.AddUntrackedFile(stateFile.Path);
             SchedulePipBuilder(builder);
-
-            Configuration.Schedule.ProcessRetries = 1;
 
             var result = RunScheduler();
             if (succeedOnRetry)
@@ -1327,6 +1412,67 @@ namespace IntegrationTest.BuildXL.Scheduler
                 result.AssertFailure();
                 SetExpectedFailures(1, 0);
             }
+        }
+
+        [Fact]
+        public void PipProcessRetriesOverridesGlobalConfiguration()
+        {
+            // Schedule a pip that only succeeds on retry
+            FileArtifact stateFile = FileArtifact.CreateOutputFile(ObjectRootPath.Combine(Context.PathTable, "stateFile.txt"));
+            var ops = new Operation[]
+            {
+                Operation.WriteFile(FileArtifact.CreateOutputFile(ObjectRootPath.Combine(Context.PathTable, "out.txt")), content: "Hello"),
+                Operation.SucceedOnRetry(untrackedStateFilePath: stateFile, failExitCode: 42)
+            };
+
+            var builder = CreatePipBuilder(ops);
+            builder.RetryExitCodes = global::BuildXL.Utilities.Collections.ReadOnlyArray<int>.From(new int[] { 42 });
+            builder.AddUntrackedFile(stateFile.Path);
+
+            // The global configuration is set so no retries happen
+            Configuration.Schedule.ProcessRetries = 0;
+            // However, this specific pip is set to have retry number = 1
+            builder.SetProcessRetries(1);
+
+            SchedulePipBuilder(builder);
+
+            // The pip should be retried, and therefore it should be successful
+            RunScheduler().AssertSuccess();
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(1)]
+        [InlineData(2)]
+        public void RetryAttemptEnvironmentVariableIsHonored(int processRetry)
+        {
+            // Schedule a pip that only succeeds after processRetry times and sends to stdout the retry attempt number
+            FileArtifact stateFile = FileArtifact.CreateOutputFile(ObjectRootPath.Combine(Context.PathTable, "stateFile.txt"));
+            var ops = new Operation[]
+            {
+                // Reads RETRY_NUMBER and echoes it to stdout
+                Operation.ReadEnvVar("RETRY_NUMBER"),
+                Operation.WriteFile(CreateOutputFileArtifact()),
+                Operation.SucceedOnRetry(untrackedStateFilePath: stateFile, failExitCode: 42, numberOfRetriesToSucceed: processRetry)
+            };
+
+            FileArtifact standardOutput = CreateOutputFileArtifact();
+            var builder = CreatePipBuilder(ops);
+            builder.RetryExitCodes = global::BuildXL.Utilities.Collections.ReadOnlyArray<int>.From(new int[] { 42 });
+            builder.AddUntrackedFile(stateFile.Path);
+
+            builder.SetRetryAttemptEnvironmentVariable(StringId.Create(Context.StringTable, "RETRY_NUMBER"));
+            builder.SetProcessRetries(processRetry);
+            builder.SetStandardOutputFile(standardOutput);
+
+            SchedulePipBuilder(builder);
+
+            // The pip should be retried, and therefore it should be successful
+            RunScheduler().AssertSuccess();
+
+            // Let's validate the env var value matches the retry number
+            var output = File.ReadAllText(standardOutput.Path.ToString(Context.PathTable));
+            XAssert.AreEqual(processRetry, int.Parse(output));
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]

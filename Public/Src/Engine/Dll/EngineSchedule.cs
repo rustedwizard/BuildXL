@@ -117,7 +117,10 @@ namespace BuildXL.Engine
 
         private CancellableTimedAction m_updateStatusAction;
 
-        private const int UpdateStatusIntervalMs = 2000;
+        /// <summary>
+        /// Update status interval
+        /// </summary>
+        public const int UpdateStatusIntervalMs = 2000;
 
         private EngineSchedule(
             EngineContext context,
@@ -196,7 +199,7 @@ namespace BuildXL.Engine
             Contract.Requires(cacheInitializer != null);
             Contract.Requires(pipGraph != null);
 
-            var pipQueue = new PipQueue(loggingContext, configuration.Schedule);
+            var pipQueue = new PipQueue(loggingContext, configuration);
 
             if (configuration.Schedule.IncrementalScheduling &&
                 (configuration.Distribution.BuildRole != DistributedBuildRoles.None ||
@@ -1646,7 +1649,7 @@ namespace BuildXL.Engine
                 await pipExecutionContextTask != null &&
                 await pipGraphTask != null)
             {
-                var pipQueue = new PipQueue(loggingContext, newConfiguration.Schedule);
+                var pipQueue = new PipQueue(loggingContext, newConfiguration);
 
                 var pathTable = await pathTableTask;
 
@@ -2043,7 +2046,7 @@ namespace BuildXL.Engine
                     // The PreviousInputs file gets moved from an intermediate to a final location to specify whether
                     // the graph files are valid to be consumed. So the check to see whether it is up to date needs to
                     // happen on its finalized location, not the intermediate.
-                    if (finalPath.Equals(serializer.PreviousInputsFinalized, StringComparison.OrdinalIgnoreCase))
+                    if (finalPath.Equals(serializer.PreviousInputsFinalized, OperatingSystemHelper.PathComparison))
                     {
                         placementPath = serializer.PreviousInputsIntermediate;
                     }

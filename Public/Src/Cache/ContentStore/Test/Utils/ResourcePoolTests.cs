@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
@@ -35,8 +34,12 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
             var context = new Context(TestGlobal.Logger);
 
             for (var i = 0; i < 10_000; i++)
-            { 
-                var pool = new ResourcePool<Key, Resource>(context, maxResourceCount: capacity, maxAgeMinutes: 1, resourceFactory: _ => new Resource());
+            {
+                var pool = new ResourcePool<Key, Resource>(context, new ResourcePoolConfiguration()
+                {
+                    MaximumResourceCount = capacity,
+                    MaximumAge = TimeSpan.FromMinutes(1),
+                }, resourceFactory: _ => new Resource());
 
                 for (var j = 0; j < capacity; j++)
                 {
@@ -58,7 +61,11 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
         {
             var capacity = 2;
             var context = new Context(TestGlobal.Logger);
-            var pool = new ResourcePool<Key, Resource>(context, maxResourceCount: capacity, maxAgeMinutes: 1, resourceFactory: _ => new Resource());
+            var pool = new ResourcePool<Key, Resource>(context, new ResourcePoolConfiguration()
+            {
+                MaximumResourceCount = capacity,
+                MaximumAge = TimeSpan.FromMinutes(1),
+            }, resourceFactory: _ => new Resource());
 
             using var obj0 = await pool.CreateAsync(new Key(0));
             using var obj1 = await pool.CreateAsync(new Key(0));
@@ -71,15 +78,20 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
             var resourceCount = 10;
             var clock = new MemoryClock();
             var maxAgeMinutes = 1;
-            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), resourceCount, maxAgeMinutes, resourceFactory: _ => new Resource(), clock);
+            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), new ResourcePoolConfiguration()
+            {
+                MaximumResourceCount = resourceCount,
+                MaximumAge = TimeSpan.FromMinutes(maxAgeMinutes),
+            }, resourceFactory: _ => new Resource(), clock);
 
             var wrappers = new List<ResourceWrapper<Resource>>();
             for (var i = 0; i < resourceCount; i++)
             {
                 using var wrapper = await pool.CreateAsync(new Key(i));
+                Assert.True(wrapper.Value.StartupStarted);
                 wrappers.Add(wrapper);
             }
-            
+
             // Expire the resources
             clock.UtcNow += TimeSpan.FromMinutes(maxAgeMinutes);
 
@@ -106,7 +118,11 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
             var maxCapacity = 10;
             var clock = new MemoryClock();
             var maxAgeMinutes = maxCapacity + 10; // No resources should expire.
-            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), maxResourceCount: maxCapacity, maxAgeMinutes, resourceFactory: _ => new Resource(), clock);
+            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), new ResourcePoolConfiguration()
+            {
+                MaximumResourceCount = maxCapacity,
+                MaximumAge = TimeSpan.FromMinutes(maxAgeMinutes),
+            }, resourceFactory: _ => new Resource(), clock);
 
             var resources = new List<Resource>();
             foreach (var num in Enumerable.Range(1, maxCapacity))
@@ -125,6 +141,11 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
                 resources.Add((wrapper.Value));
             }
 
+            // We actually do the cleanup during the next operation
+            using (var wrapper = await pool.CreateAsync(new Key(maxCapacity)))
+            {
+            }
+
             Assert.Equal(1, pool.Counter[ResourcePoolCounters.Cleaned].Value);
             Assert.Equal(maxCapacity + 1, pool.Counter[ResourcePoolCounters.Created].Value);
 
@@ -137,10 +158,41 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
         }
 
         [Fact]
+        public async Task ValidateInvalidation()
+        {
+            var maxCapacity = 10;
+            var clock = new MemoryClock();
+            var maxAgeMinutes = maxCapacity + 10; // No resources should expire.
+            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), new ResourcePoolConfiguration()
+            {
+                MaximumAge = TimeSpan.FromMinutes(maxAgeMinutes),
+                MaximumResourceCount = maxCapacity,
+                EnableInstanceInvalidation = true,
+            }, resourceFactory: _ => new Resource(), clock);
+
+            using (var wrapper = await pool.CreateAsync(new Key(1)))
+            {
+                wrapper.Invalidate();
+            }
+
+            // We actually do the cleanup during the next operation
+            using (var wrapper = await pool.CreateAsync(new Key(2)))
+            {
+            }
+
+            Assert.Equal(1, pool.Counter[ResourcePoolCounters.Cleaned].Value);
+            Assert.Equal(2, pool.Counter[ResourcePoolCounters.Created].Value);
+        }
+
+        [Fact]
         public async Task IssueSameClientManyTimes()
         {
             var clock = new MemoryClock();
-            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), maxResourceCount: 1, maxAgeMinutes: 1, resourceFactory: _ => new Resource(), clock);
+            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), new ResourcePoolConfiguration()
+            {
+                MaximumResourceCount = 1,
+                MaximumAge = TimeSpan.FromMinutes(1),
+            }, resourceFactory: _ => new Resource(), clock);
             var key = new Key(1);
 
             using var originalWrapper = await pool.CreateAsync(key);
@@ -158,7 +210,11 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
         {
             var maxCapacity = 10;
             var clock = new MemoryClock();
-            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), maxResourceCount: maxCapacity, maxAgeMinutes: 1, resourceFactory: _ => new Resource(), clock);
+            var pool = new ResourcePool<Key, Resource>(new Context(TestGlobal.Logger), new ResourcePoolConfiguration()
+            {
+                MaximumResourceCount = maxCapacity,
+                MaximumAge = TimeSpan.FromMinutes(1),
+            }, resourceFactory: _ => new Resource(), clock);
 
             for (var i = 0; i < maxCapacity; i++)
             {
@@ -180,7 +236,11 @@ namespace BuildXL.Cache.ContentStore.Test.Utils
         {
             var capacity = 2;
             var context = new Context(TestGlobal.Logger);
-            var pool = new ResourcePool<Key, Resource>(context, maxResourceCount: capacity, maxAgeMinutes: 1, resourceFactory: _ => new Resource());
+            var pool = new ResourcePool<Key, Resource>(context, new ResourcePoolConfiguration()
+            {
+                MaximumResourceCount = capacity,
+                MaximumAge = TimeSpan.FromMinutes(1),
+            }, resourceFactory: _ => new Resource());
 
             pool.Dispose();
 

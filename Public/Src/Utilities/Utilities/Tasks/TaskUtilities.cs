@@ -7,6 +7,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Utilities.Collections;
@@ -40,19 +41,75 @@ namespace BuildXL.Utilities.Tasks
         /// (as used by 'await') only takes the *first* exception inside of a task's aggregate exception.
         /// All BuildXL code should use this method instead of the standard WhenAll.
         /// </summary>
-        public static async Task SafeWhenAll(IEnumerable<Task> tasks)
+        public static async Task SafeWhenAll(IEnumerable<Task> tasks, bool wrapSingleException = true)
         {
-            Contract.RequiresNotNull(tasks);
+            Contract.Requires(tasks != null);
 
             var whenAllTask = Task.WhenAll(tasks);
+            
+            // 'WhenAll' is not very 'async/await' friendly, but in some cases the original behavior is good:
+            // If there is only one error it doesn't make any sense to wrap it in two AggregateExceptions.
+            // So we can just 're-throw' an original exception without any changes.
+            // But if more than one task failed, than we can wrap the error into a separate AggregateException.
             try
             {
                 await whenAllTask;
             }
             catch
             {
-                Contract.AssertNotNull(whenAllTask.Exception);
-                throw whenAllTask.Exception;
+                var exception = whenAllTask.Exception;
+                if (exception!.InnerExceptions.Count == 1 && !wrapSingleException)
+                {
+                    // Just propagate a single error but only when a flag to wrap a single exception is not set.
+                    throw;
+                }
+
+                // More than one error occurred, re-throw 'AggregateException' and wrap it into another AggregateException instance.
+                ExceptionDispatchInfo.Capture(exception).Throw();
+                throw; // This line is unreachable.
+            }
+        }
+
+        /// <summary>
+        /// Creates a task that will complete when all of the <see cref="T:System.Threading.Tasks.Task" /> objects in an enumerable collection have completed or when the <paramref name="token"/> is triggered.
+        /// </summary>
+        /// <exception cref="OperationCanceledException">The exception is thrown if the <paramref name="token"/> is canceled before the completion of <paramref name="tasks"/></exception>
+        public static async Task WhenAllWithCancellationAsync(IEnumerable<Task> tasks, CancellationToken token)
+        {
+            // If one of the tasks passed here fails, we want to make sure that the task created by 'Task.WhenAll(tasks)' is observed
+            // in order to avoid unobserved task errors.
+            
+            var whenAllTask = Task.WhenAll(tasks);
+            
+            var completedTask = await Task.WhenAny(
+                Task.Delay(Timeout.InfiniteTimeSpan, token),
+                whenAllTask);
+
+            // We have one of two cases here: either all the tasks are done or the cancellation was requested.
+
+            // If the cancellation is requested we need to make sure we observe the result of the when all task created earlier.
+            whenAllTask.Forget();
+
+            // Now, we can trigger 'OperationCancelledException' if the token is canceled.
+            // (Yes, its possible that all the tasks are done already, but this is a natural race condition for this pattern).
+            token.ThrowIfCancellationRequested();
+
+            // The cancellation was not requested, but one of the tasks may fail.
+            // Re-throwing the error in this case by awaiting already completed task.
+            await completedTask;
+        }
+
+        /// <summary>
+        /// Waits for cancellation to be triggered.
+        /// </summary>
+        public static async Task WaitForCancellationAsync(this CancellationToken token)
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+            catch (TaskCanceledException)
+            {
             }
         }
 
@@ -232,6 +289,7 @@ namespace BuildXL.Utilities.Tasks
             {
                 if (t.IsFaulted)
                 {
+                    Analysis.IgnoreArgument(t.Exception);
                     var e = (t.Exception as AggregateException)?.InnerException ?? t.Exception;
                     unobservedExceptionHandler?.Invoke(e);
                 }
@@ -287,9 +345,9 @@ namespace BuildXL.Utilities.Tasks
         /// <summary>
         /// Waits for the given task to complete within the given timeout, throwing a <see cref="TimeoutException"/> if the timeout expires before the task completes
         /// </summary>
-        public static async Task<T> WithTimeoutAsync<T>(this Task<T> task, TimeSpan timeout)
+        public static async Task<T> WithTimeoutAsync<T>(this Task<T> task, TimeSpan timeout, CancellationToken token = default)
         {
-            await WithTimeoutAsync(ct => task, timeout);
+            await WithTimeoutAsync(ct => task, timeout, token);
             return await task;
         }
 

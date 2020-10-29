@@ -3,8 +3,8 @@
 
 const isMicrosoftInternal = Environment.getFlag("[Sdk.BuildXL]microsoftInternal");
 
-const artifactNugetVersion = "18.171.30210-buildid12336404";
-const azureDevopsNugetVersion = "16.171.0-internal202006103";
+const artifactNugetVersion = "18.174.30406-buildid12785353"; 
+const azureDevopsNugetVersion = "16.174.0-internal202008065";
 
 // These packages are Microsoft internal packages.
 // These consist of internally repackaged products that we can't push to a public feed and have to rely on users installing locally.
@@ -18,7 +18,7 @@ export const pkgs = isMicrosoftInternal ? [
     { id: "Aria.Cpp.SDK.osx-x64", version: "8.5.6" },
     { id: "Aria.Cpp.SDK.win-x64", version: "8.5.6", osSkip: [ "macOS", "unix" ] },
 
-    { id: "CB.QTest", version: "20.7.17.160336", osSkip: [ "macOS", "unix" ] },
+    { id: "CB.QTest", version: "20.10.9.160907", osSkip: [ "macOS", "unix" ] },
 
     { id: "BuildXL.Tracing.AriaTenantToken", version: "1.0.0" },
 
@@ -51,7 +51,6 @@ export const pkgs = isMicrosoftInternal ? [
     { id: "GvfsTestHelpersForBuildXL", version: "0.1.0"},
 
     // Internal pacakged version to avoid downloading from the web but the trusted stable internal feed:
-    { id: "NodeJs", version: "13.3.0-noTest" },
     { id: "PowerShell.Core", version: "6.1.0", osSkip: [ "macOS", "unix" ] },
 
     // Officially mantained CB package that contains Yarn. Used for Yarn tests.
@@ -72,7 +71,6 @@ export const resolver = {
         f`Private/InternalSdk/CB.QTest/module.config.dsc`,
         ...addIf(isMicrosoftInternal,
             f`Private/InternalSdk/PowerShell.Core/module.config.dsc`,
-            f`Private/InternalSdk/NodeJs/module.config.dsc`,
             f`Private/InternalSdk/Windows.Sdk/module.config.dsc`
         ),
 

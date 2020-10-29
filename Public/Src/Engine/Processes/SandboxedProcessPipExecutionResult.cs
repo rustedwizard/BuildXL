@@ -90,13 +90,15 @@ namespace BuildXL.Processes
                 maxDetoursHeapSize: maxDetoursHeapSize,
                 containerConfiguration: ContainerConfiguration.DisabledIsolation,
                 pipProperties: pipProperties,
-                timedOut: false);
+                timedOut: false,
+                createdDirectories: null);
         }
 
         internal static SandboxedProcessPipExecutionResult FailureButRetryAble(
             SandboxedProcessPipExecutionStatus status,
             RetryInfo retryInfo,
-            long maxDetoursHeapSize = 0)
+            long maxDetoursHeapSize = 0,
+            ProcessTimes primaryProcessTimes = null)
         {
             return new SandboxedProcessPipExecutionResult(
                 status,
@@ -106,7 +108,7 @@ namespace BuildXL.Processes
                 encodedStandardOutput: null,
                 numberOfWarnings: 0,
                 unexpectedFileAccesses: null,
-                primaryProcessTimes: null,
+                primaryProcessTimes: primaryProcessTimes,
                 jobAccountingInformation: null,
                 exitCode: 0,
                 sandboxPrepMs: 0,
@@ -118,7 +120,8 @@ namespace BuildXL.Processes
                 containerConfiguration: ContainerConfiguration.DisabledIsolation,
                 pipProperties: null,
                 timedOut: false,
-                retryInfo: retryInfo);
+                retryInfo: retryInfo,
+                createdDirectories: null);
         }
 
         internal static SandboxedProcessPipExecutionResult DetouringFailure(SandboxedProcessPipExecutionResult result)
@@ -142,7 +145,8 @@ namespace BuildXL.Processes
                 maxDetoursHeapSize: result.MaxDetoursHeapSizeInBytes,
                 containerConfiguration: result.ContainerConfiguration,
                 pipProperties: result.PipProperties,
-                timedOut: result.TimedOut);
+                timedOut: result.TimedOut,
+                createdDirectories: result.CreatedDirectories);
         }
 
         internal static SandboxedProcessPipExecutionResult RetryProcessDueToUserSpecifiedExitCode(
@@ -180,7 +184,8 @@ namespace BuildXL.Processes
                 containerConfiguration: containerConfiguration,
                 pipProperties: pipProperties,
                 timedOut: false,
-                retryInfo: RetryInfo.RetryOnSameWorker(RetryReason.UserSpecifiedExitCode));
+                retryInfo: RetryInfo.GetDefault(RetryReason.UserSpecifiedExitCode),
+                createdDirectories: null);
         }
 
         internal static SandboxedProcessPipExecutionResult RetryProcessDueToAzureWatsonExitCode(
@@ -215,7 +220,8 @@ namespace BuildXL.Processes
                 containerConfiguration: containerConfiguration,
                 pipProperties: pipProperties,
                 timedOut: false,
-                retryInfo: RetryInfo.RetryOnSameWorker(RetryReason.AzureWatsonExitCode));
+                retryInfo: RetryInfo.GetDefault(RetryReason.AzureWatsonExitCode),
+                createdDirectories: null);
         }
 
         internal static SandboxedProcessPipExecutionResult MismatchedMessageCountFailure(SandboxedProcessPipExecutionResult result)
@@ -239,7 +245,8 @@ namespace BuildXL.Processes
                    result.ContainerConfiguration,
                    result.PipProperties,
                    result.TimedOut,
-                   retryInfo: RetryInfo.RetryOnSameWorker(RetryReason.MismatchedMessageCount));
+                   result.CreatedDirectories,
+                   retryInfo: RetryInfo.GetDefault(RetryReason.MismatchedMessageCount));
 
         /// <summary>
         /// Indicates if the pip succeeded.
@@ -333,6 +340,16 @@ namespace BuildXL.Processes
         public RetryInfo RetryInfo { get; set; }
 
         /// <summary>
+        /// Collection of directories that were succesfully created during pip execution. 
+        /// </summary>
+        /// <remarks>
+        /// Observe there is no guarantee those directories still exist. However, there was a point during the execution of the associated pip when these directories 
+        /// were not there, the running pip created them and the creation was successful. 
+        /// Only populated if allowed undeclared reads is on, since these are used for computing directory fingerprint enumeration when undeclared files are allowed.
+        /// </remarks>
+        public IReadOnlySet<AbsolutePath> CreatedDirectories { get; }
+
+        /// <summary>
         /// How long the process has been suspended
         /// </summary>
         public long SuspendedDurationMs { get; set; }
@@ -363,6 +380,7 @@ namespace BuildXL.Processes
             ContainerConfiguration containerConfiguration,
             Dictionary<string, int> pipProperties,
             bool timedOut,
+            IReadOnlySet<AbsolutePath> createdDirectories,
             RetryInfo retryInfo = null)
         {
             Contract.Requires(!ProcessCompletedExecution(status) || observedFileAccesses.IsValid);
@@ -400,6 +418,7 @@ namespace BuildXL.Processes
             PipProperties = pipProperties;
             TimedOut = timedOut;
             RetryInfo = retryInfo;
+            CreatedDirectories = createdDirectories ?? CollectionUtilities.EmptySet<AbsolutePath>();
         }
 
         /// <summary>

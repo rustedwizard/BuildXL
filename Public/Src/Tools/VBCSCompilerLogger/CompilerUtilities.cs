@@ -70,7 +70,7 @@ namespace VBCSCompilerLogger
                 default:
                     throw new InvalidOperationException($"Unexpected language '{language}'");
             }
-
+            
             return result;
         }
 

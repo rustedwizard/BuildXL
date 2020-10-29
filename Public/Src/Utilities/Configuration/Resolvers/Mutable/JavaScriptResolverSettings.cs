@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Collections.Generic;
+using BuildXL.Utilities.Configuration.Resolvers;
 
 namespace BuildXL.Utilities.Configuration.Mutable
 {
@@ -28,6 +29,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             UntrackedDirectoryScopes = resolverSettings.UntrackedDirectoryScopes;
             UntrackedFiles = resolverSettings.UntrackedFiles;
             UntrackedDirectories = resolverSettings.UntrackedDirectories;
+            UntrackedGlobalDirectoryScopes = resolverSettings.UntrackedGlobalDirectoryScopes;
             Environment = resolverSettings.Environment;
             KeepProjectGraphFile = resolverSettings.KeepProjectGraphFile;
             NodeExeLocation = resolverSettings.NodeExeLocation;
@@ -45,16 +47,16 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public string ModuleName { get; set; }
 
         /// <inheritdoc/>
-        public IReadOnlyList<DirectoryArtifact> UntrackedDirectoryScopes { get; set; }
+        public IReadOnlyList<DiscriminatingUnion<DirectoryArtifact, RelativePath>> UntrackedDirectoryScopes { get; set; }
 
         /// <inheritdoc/>
         public IReadOnlyList<FileArtifact> UntrackedFiles { get; set; }
 
         /// <inheritdoc/>
-        public IReadOnlyList<DirectoryArtifact> UntrackedDirectories { get; set; }
+        public IReadOnlyList<DiscriminatingUnion<DirectoryArtifact, RelativePath>> UntrackedDirectories { get; set; }
 
         /// <inheritdoc/>
-        public IReadOnlyDictionary<string, DiscriminatingUnion<string, UnitValue>> Environment { get; set; }
+        public IReadOnlyDictionary<string, EnvironmentData> Environment { get; set; }
 
         /// <inheritdoc/>
         public bool? KeepProjectGraphFile { get; set; }
@@ -76,5 +78,11 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc/>
         public bool? WritingToStandardErrorFailsExecution { get; set;  }
+
+        /// <inheritdoc/>
+        public bool? BlockWritesUnderNodeModules { get; set; }
+
+        /// <inheritdoc />
+        public IReadOnlyList<RelativePath> UntrackedGlobalDirectoryScopes { get; set; }
     }
 }

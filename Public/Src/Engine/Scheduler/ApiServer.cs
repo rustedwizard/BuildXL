@@ -2,18 +2,27 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Hashing;
+using BuildXL.Engine.Cache;
+using BuildXL.Engine.Cache.Fingerprints;
 using BuildXL.Ipc.Common;
+using BuildXL.Ipc.ExternalApi;
 using BuildXL.Ipc.ExternalApi.Commands;
 using BuildXL.Ipc.Interfaces;
 using BuildXL.Scheduler.Artifacts;
+using BuildXL.Storage;
 using BuildXL.Storage.Fingerprints;
 using BuildXL.Tracing;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tasks;
 
@@ -25,15 +34,22 @@ namespace BuildXL.Scheduler
     public sealed class ApiServer : IIpcOperationExecutor, IDisposable
     {
         private readonly FileContentManager m_fileContentManager;
+        private readonly EngineCache m_engineCache;
         private readonly IServer m_server;
         private readonly PipExecutionContext m_context;
+        private readonly Tracing.IExecutionLogTarget m_executionLog;
+        private readonly Tracing.BuildManifestGenerator m_buildManifestGenerator;
 
         private long m_numMaterializeFile;
+        private long m_numRegisterBuildManifestHash;
+        private long m_numGenerateBuildManifestFile;
         private long m_numReportStatistics;
         private long m_numGetSealedDirectoryContent;
         private long m_numLogMessage;
 
         private LoggingContext m_loggingContext;
+
+        private readonly ConcurrentDictionary<ContentHash, ContentHash> m_inMemoryBuildManifestStore;
 
         /// <nodoc />
         public ApiServer(
@@ -41,16 +57,25 @@ namespace BuildXL.Scheduler
             string ipcMonikerId,
             FileContentManager fileContentManager,
             PipExecutionContext context,
-            IServerConfig config)
+            IServerConfig config,
+            EngineCache engineCache,
+            Tracing.IExecutionLogTarget executionLog,
+            Tracing.BuildManifestGenerator buildManifestGenerator)
         {
             Contract.Requires(ipcMonikerId != null);
             Contract.Requires(fileContentManager != null);
             Contract.Requires(context != null);
             Contract.Requires(config != null);
+            Contract.Requires(engineCache != null);
+            Contract.Requires(executionLog != null);
 
             m_fileContentManager = fileContentManager;
             m_server = ipcProvider.GetServer(ipcProvider.LoadAndRenderMoniker(ipcMonikerId), config);
             m_context = context;
+            m_engineCache = engineCache;
+            m_executionLog = executionLog;
+            m_buildManifestGenerator = buildManifestGenerator;
+            m_inMemoryBuildManifestStore = new ConcurrentDictionary<ContentHash, ContentHash>();
         }
 
         /// <summary>
@@ -62,6 +87,100 @@ namespace BuildXL.Scheduler
 
             m_loggingContext = loggingContext;
             m_server.Start(this);
+        }
+
+        private static (WeakContentFingerprint wf, StrongContentFingerprint sf) GetBuildManifestHashKey(ContentHash hash)
+        {
+            var hashBytes = hash.ToByteArray();
+            Array.Resize(ref hashBytes, FingerprintUtilities.FingerprintLength);
+            var wf = new WeakContentFingerprint(FingerprintUtilities.CreateFrom(hashBytes));
+            var sf = new StrongContentFingerprint(wf.Hash);
+            return (wf, sf);
+        }
+
+        private async Task StoreBuildManifestHashAsync(ContentHash hash, ContentHash manifestHash)
+        {
+            (var wf, var sf) = GetBuildManifestHashKey(hash);
+
+            var result = await m_engineCache.TwoPhaseFingerprintStore.TryPublishCacheEntryAsync(wf, hash, sf, new CacheEntry(manifestHash, "", ArrayView<ContentHash>.Empty));
+
+            if (!result.Succeeded)
+            {
+                Tracing.Logger.Log.ApiServerStoreBuildManifestHashToCacheFailed(m_loggingContext, hash.Serialize(), manifestHash.Serialize(), result.ToString()); 
+            }
+        }
+
+        private async Task<ContentHash?> TryGetBuildManifestHashAsync(ContentHash hash)
+        {
+            (var wf, var sf) = GetBuildManifestHashKey(hash);
+
+            var result = await m_engineCache.TwoPhaseFingerprintStore.TryGetCacheEntryAsync(wf, hash, sf);
+
+            if (result.Succeeded)
+            {
+                return result.Result?.MetadataHash;
+            }
+
+            Tracing.Logger.Log.ErrorApiServerGetBuildManifestHashFromCacheFailed(m_loggingContext, hash.Serialize(), result.Failure.DescribeIncludingInnerFailures());
+            return null;
+        }
+
+        private async Task<ContentHash?> TryGetBuildManifestHashFromLocalFileAsync(string fullFilePath)
+        {
+            if (File.Exists(fullFilePath))
+            {
+                try
+                {
+                    var hash = await ContentHashingUtilities.HashFileForBuildManifestAsync(fullFilePath);
+                    Tracing.Logger.Log.ApiServerForwardedIpcServerMessage(m_loggingContext, "Verbose", $"Local file found at path '{fullFilePath}'. BuildManifestHash: '{hash.Serialize()}'");
+                    return hash;
+                }
+                catch (BuildXLException ex)
+                {
+                    Tracing.Logger.Log.ApiServerForwardedIpcServerMessage(m_loggingContext, "Verbose", $"Local file found at path '{fullFilePath}' but threw exception while computing BuildManifest Hash: {ex.Message}");
+                    return null;
+                }
+            }
+
+            Tracing.Logger.Log.ApiServerForwardedIpcServerMessage(m_loggingContext, "Verbose", $"Local file not found at path '{fullFilePath}' while computing BuildManifest Hash. Trying other methods to obtain hash.");
+            return null;
+        }
+
+        /// <summary>
+        /// Compute the SHA-256 hash for file stored in Cache. Required for Build Manifets generation.
+        /// </summary>
+        /// <remarks>
+        /// Returns null when unable to find content in cache.
+        /// </remarks>
+        private async Task<Possible<ContentHash>> ComputeBuildManifestHashFromCacheAsync(RegisterFileForBuildManifestCommand cmd)
+        {
+            // Ensure file is materialized locally
+            MaterializeFileCommand materializeCommand = new MaterializeFileCommand(cmd.File, cmd.FullFilePath);
+            var materializeResult = await ExecuteMaterializeFileAsync(materializeCommand);
+            if (!materializeResult.Succeeded)
+            {
+                return new Failure<string>("Unable to materialize file = " + cmd.File.Path.ToString(m_context.PathTable) + " with hash: " + cmd.Hash.Serialize());
+            }
+
+            // Open content stream for locally available file
+            var loadFileContentResult = await m_engineCache.ArtifactContentCache.TryOpenContentStreamAsync(cmd.Hash);
+
+            if (loadFileContentResult.Succeeded)
+            {
+                using (var streamWithLength = loadFileContentResult.Result)
+                {
+                    try
+                    {
+                        return await ContentHashingUtilities.HashContentStreamAsync(streamWithLength, ContentHashingUtilities.BuildManifestHashType);
+                    }
+                    catch (BuildXLException ex)
+                    {
+                        return new Failure<string>(ex.Message);
+                    }
+                }
+            }
+
+            return new Failure<string>(loadFileContentResult.Failure.DescribeIncludingInnerFailures());
         }
 
         /// <summary>
@@ -88,6 +207,8 @@ namespace BuildXL.Scheduler
             Logger.Log.BulkStatistic(loggingContext, new Dictionary<string, long>
             {
                 [Statistics.ApiTotalMaterializeFileCalls] = Volatile.Read(ref m_numMaterializeFile),
+                [Statistics.ApiTotalRegisterBuildManifestHashCalls] = Volatile.Read(ref m_numRegisterBuildManifestHash),
+                [Statistics.ApiTotalGenerateBuildManifestFileCalls] = Volatile.Read(ref m_numGenerateBuildManifestFile),
                 [Statistics.ApiTotalReportStatisticsCalls] = Volatile.Read(ref m_numReportStatistics),
                 [Statistics.ApiTotalGetSealedDirectoryContentCalls] = Volatile.Read(ref m_numGetSealedDirectoryContent),
                 [Statistics.ApiTotalLogMessageCalls] = Volatile.Read(ref m_numLogMessage),
@@ -122,6 +243,20 @@ namespace BuildXL.Scheduler
                 return new Possible<IIpcResult>(result);
             }
 
+            var registerBuildManifestHashCmd = cmd as RegisterFileForBuildManifestCommand;
+            if (registerBuildManifestHashCmd != null)
+            {
+                var result = await ExecuteCommandWithStats(ExecuteGetBuildManifestHashAsync, registerBuildManifestHashCmd, ref m_numRegisterBuildManifestHash);
+                return new Possible<IIpcResult>(result);
+            }
+
+            var generateBuildManifestDataCmd = cmd as GenerateBuildManifestDataCommand;
+            if (generateBuildManifestDataCmd != null)
+            {
+                var result = await ExecuteCommandWithStats(ExecuteGenerateBuildManifestDataAsync, generateBuildManifestDataCmd, ref m_numGenerateBuildManifestFile);
+                return new Possible<IIpcResult>(result);
+            }
+
             var reportStatisticsCmd = cmd as ReportStatisticsCommand;
             if (reportStatisticsCmd != null)
             {
@@ -150,23 +285,37 @@ namespace BuildXL.Scheduler
 
         /// <summary>
         /// Executes <see cref="MaterializeFileCommand"/>.  First check that <see cref="MaterializeFileCommand.File"/>
-        /// and <see cref="MaterializeFileCommand.FullFilePath"/> match, then delegates to <see cref="FileContentManager.TryMaterializeFileAsync"/>.
+        /// and <see cref="MaterializeFileCommand.FullFilePath"/> match, then delegates to <see cref="FileContentManager.TryMaterializeFileAsync(FileArtifact)"/>.
+        /// If provided <see cref="MaterializeFileCommand.File"/> is not valid, no checks are done, and the call is delegated
+        /// to <see cref="FileContentManager.TryMaterializeSealedFileAsync(AbsolutePath)"/>
         /// </summary>
         private async Task<IIpcResult> ExecuteMaterializeFileAsync(MaterializeFileCommand cmd)
         {
             Contract.Requires(cmd != null);
 
-            // for extra safety, check that provided file path and file id match
+            // If the FileArtifact was provided, for extra safety, check that provided file path and file id match
             AbsolutePath filePath;
             bool isValidPath = AbsolutePath.TryCreate(m_context.PathTable, cmd.FullFilePath, out filePath);
-            if (!isValidPath || !cmd.File.Path.Equals(filePath))
+            if (cmd.File.IsValid && (!isValidPath || !cmd.File.Path.Equals(filePath)))
             {
                 return new IpcResult(
                     IpcResultStatus.ExecutionError,
                     "file path ids differ; file = " + cmd.File.Path.ToString(m_context.PathTable) + ", file path = " + cmd.FullFilePath);
+            }            
+            // If only path was provided, check that it's a valid path.
+            else if (!cmd.File.IsValid && !filePath.IsValid)
+            {
+                return new IpcResult(
+                   IpcResultStatus.ExecutionError,
+                   $"failed to create AbsolutePath from '{cmd.FullFilePath}'");
             }
 
-            var result = await m_fileContentManager.TryMaterializeFileAsync(cmd.File);
+            var result = cmd.File.IsValid
+                ? await m_fileContentManager.TryMaterializeFileAsync(cmd.File)
+                // If file artifact is unknown, try materializing using only the file path.
+                // This method has lower chance of success, since it depends on FileContentManager's
+                // ability to infer FileArtifact associated with this path.
+                : await m_fileContentManager.TryMaterializeSealedFileAsync(filePath);
             bool succeeded = result == ArtifactMaterializationResult.Succeeded;
             string absoluteFilePath = cmd.File.Path.ToString(m_context.PathTable);
 
@@ -174,7 +323,12 @@ namespace BuildXL.Scheduler
             // (i.e., the "ErrorBucket") instead of whatever fallout ends up happening (e.g., IPC pip fails)
             if (!succeeded)
             {
-                Tracing.Logger.Log.ErrorApiServerMaterializeFileFailed(m_loggingContext, absoluteFilePath, result.ToString());
+                // For sealed files, materialization might not have succeeded because a path is not known to BXL.
+                // In such a case, do not log an error, and let the caller deal with the failure.
+                if (cmd.File.IsValid || result != ArtifactMaterializationResult.None)
+                {
+                    Tracing.Logger.Log.ErrorApiServerMaterializeFileFailed(m_loggingContext, absoluteFilePath, cmd.File.IsValid, result.ToString());
+                }
             }
             else
             {
@@ -182,6 +336,82 @@ namespace BuildXL.Scheduler
             }
 
             return IpcResult.Success(cmd.RenderResult(succeeded));
+        }
+
+        private Task<IIpcResult> ExecuteGenerateBuildManifestDataAsync(GenerateBuildManifestDataCommand cmd)
+            => Task.FromResult(ExecuteGenerateBuildManifestData(cmd));
+
+        /// <summary>
+        /// Executes <see cref="GenerateBuildManifestDataCommand"/>. Generates a BuildManifest.json file for given
+        /// <see cref="GenerateBuildManifestDataCommand.DropName"/>.
+        /// </summary>
+        private IIpcResult ExecuteGenerateBuildManifestData(GenerateBuildManifestDataCommand cmd)
+        {
+            Contract.Requires(cmd != null);
+            Contract.Requires(m_buildManifestGenerator != null, "Build Manifest data can only be generated on master");
+
+            var duplicateEntries = m_buildManifestGenerator.DuplicateEntries(cmd.DropName);
+            if (duplicateEntries.Count != 0)
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append($"Operation Register BuildManifest Hash for Drop '{cmd.DropName}' failed due to files with different hashes being uploaded to the same path: ");
+                foreach (var entry in duplicateEntries)
+                {
+                    sb.Append($"[Path: {entry.relativePath}'. RecordedHash: '{entry.recordedHash}'. RejectedHash: '{entry.rejectedHash}'] ");
+                }
+
+                return new IpcResult(IpcResultStatus.ExecutionError, sb.ToString());
+            }
+
+            BuildManifestData buildManifestData = m_buildManifestGenerator.GenerateBuildManifestData(cmd.DropName);
+
+            return IpcResult.Success(cmd.RenderResult(buildManifestData));
+        }
+
+        /// <summary>
+        /// Executes <see cref="RegisterFileForBuildManifestCommand"/>. Checks if local file exists and computes it's ContentHash. 
+        /// Else checks if Cache contains SHA-256 Hash for given <see cref="RegisterFileForBuildManifestCommand.Hash"/>.
+        /// Returns true if SHA-256 ContentHash exists.
+        /// Else the file is materialized using <see cref="ExecuteMaterializeFileAsync"/>, the build manifest hash is computed and stored into cache.
+        /// </summary>
+        private async Task<IIpcResult> ExecuteGetBuildManifestHashAsync(RegisterFileForBuildManifestCommand cmd)
+        {
+            Contract.Requires(cmd != null);
+
+            if (m_inMemoryBuildManifestStore.TryGetValue(cmd.Hash, out var buildManifestHash))
+            {
+                RecordFileForBuildManifestInXLG(cmd.DropName, cmd.RelativePath, cmd.Hash, buildManifestHash);
+                return IpcResult.Success(cmd.RenderResult(true));
+            }
+
+            ContentHash? sha256Hash =
+                await TryGetBuildManifestHashFromLocalFileAsync(cmd.FullFilePath) ??
+                await TryGetBuildManifestHashAsync(cmd.Hash);
+
+            if (sha256Hash.HasValue)
+            {
+                m_inMemoryBuildManifestStore.TryAdd(cmd.Hash, sha256Hash.Value);
+                RecordFileForBuildManifestInXLG(cmd.DropName, cmd.RelativePath, cmd.Hash, sha256Hash.Value);
+                return IpcResult.Success(cmd.RenderResult(true));
+            }
+
+            var computeHashResult = await ComputeBuildManifestHashFromCacheAsync(cmd);
+            if (computeHashResult.Succeeded)
+            {
+                m_inMemoryBuildManifestStore.TryAdd(cmd.Hash, computeHashResult.Result);
+                RecordFileForBuildManifestInXLG(cmd.DropName, cmd.RelativePath, cmd.Hash, computeHashResult.Result);
+                await StoreBuildManifestHashAsync(cmd.Hash, computeHashResult.Result);
+
+                return IpcResult.Success(cmd.RenderResult(true));
+            }
+            Tracing.Logger.Log.ErrorApiServerGetBuildManifestHashFromCacheFailed(m_loggingContext, cmd.Hash.Serialize(), computeHashResult.Failure.DescribeIncludingInnerFailures());
+            return IpcResult.Success(cmd.RenderResult(false));
+        }
+
+        private void RecordFileForBuildManifestInXLG(string dropName, string relativePath, ContentHash azureArtifactsHash, ContentHash buildManifestHash)
+        {
+            Tracing.RecordFileForBuildManifestEventData data = new Tracing.RecordFileForBuildManifestEventData(dropName, relativePath, azureArtifactsHash, buildManifestHash);
+            m_executionLog.RecordFileForBuildManifest(data);
         }
 
         /// <summary>

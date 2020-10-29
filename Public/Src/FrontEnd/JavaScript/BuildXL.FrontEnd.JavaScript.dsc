@@ -34,6 +34,7 @@ namespace JavaScript {
             Sdk.dll,
         ],
         internalsVisibleTo: [
+            "Test.BuildXL.FrontEnd.Lage",
             "Test.BuildXL.FrontEnd.Rush",
             "Test.BuildXL.FrontEnd.Yarn",
             "Test.BuildXL.FrontEnd.Core"

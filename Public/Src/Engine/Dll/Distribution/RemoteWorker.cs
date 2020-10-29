@@ -790,6 +790,7 @@ namespace BuildXL.Engine.Distribution
                             RewriteCount = file.RewriteCount,
                             PathValue = file.Path.Value.Value,
                             PathString = isDynamicFile ? file.Path.ToString(pathTable) : null,
+                            IsAllowedFileRewrite = environment.State.FileContentManager.IsAllowedFileRewriteOutput(file.Path)
                         }.SetFileMaterializationInfo(pathTable, fileMaterializationInfo);
 
                         if (isDynamicFile)
@@ -870,7 +871,7 @@ namespace BuildXL.Engine.Distribution
                     step: runnablePip.Step.AsString(),
                     callerName: callerName);
 
-                result = ExecutionResult.GetRetryableNotRunResult(operationContext, Processes.RetryInfo.RetryOnDifferentWorker(Processes.RetryReason.StoppedWorker));
+                result = ExecutionResult.GetRetryableNotRunResult(operationContext, Processes.RetryInfo.GetDefault(Processes.RetryReason.StoppedWorker));
 
                 pipCompletionTask.TrySet(result);
                 return;

@@ -237,7 +237,10 @@ namespace BuildXL.Cache.ContentStore.Stores
             }
         }
 
-        internal async Task<ContentHashWithSize?> TryHashFileAsync(Context context, AbsolutePath path, HashType hashType, Func<Stream, Stream>? wrapStream = null)
+        /// <summary>
+        /// Attempts to hash the given file and returns null if file does not exist
+        /// </summary>
+        public async Task<ContentHashWithSize?> TryHashFileAsync(Context context, AbsolutePath path, HashType hashType, Func<Stream, Stream>? wrapStream = null)
         {
             // We only hash the file if a trusted hash is not supplied
             using var stream = await FileSystem.OpenAsync(path, FileAccess.Read, FileMode.Open, FileShare.Read | FileShare.Delete);
@@ -677,7 +680,7 @@ namespace BuildXL.Cache.ContentStore.Stores
             // If we are given the empty file, the put is a no-op.
             // We have dedicated logic for pinning and returning without having
             // the empty file in the cache directory.
-            if (content.Hash.IsEmptyHash())
+            if (UseEmptyContentShortcut(content.Hash))
             {
                 return new PutResult(content.Hash, 0L, contentAlreadyExistsInCache: true);
             }
@@ -932,7 +935,7 @@ namespace BuildXL.Cache.ContentStore.Stores
             {
                 if (fileInfo == null || await RemoveEntryIfNotOnDiskAsync(context, contentHash))
                 {
-                    var txn = await QuotaKeeper.ReserveAsync(contentSize);
+                    var txn = await ReserveAsync(contentSize);
                     FileSystem.CreateDirectory(primaryPath.GetParent());
 
                     if (!await onContentNotInCache(primaryPath))
@@ -1240,7 +1243,7 @@ namespace BuildXL.Cache.ContentStore.Stores
                 }
                 catch (IOException ex)
                 {
-                    context.Warning("AllowAttributeWrites failed: " + ex);
+                    _tracer.Warning(context, "AllowAttributeWrites failed: " + ex);
                 }
             }
         }
@@ -1354,9 +1357,16 @@ namespace BuildXL.Cache.ContentStore.Stores
         /// <summary>
         /// Gets the relative path to the primary replica from the CAS root
         /// </summary>
-        public static RelativePath GetPrimaryRelativePath(ContentHash contentHash)
+        public static RelativePath GetPrimaryRelativePath(ContentHash contentHash, bool includeSharedFolder = true)
         {
-            return new RelativePath(Path.Combine(Constants.SharedDirectoryName, contentHash.HashType.Serialize(), GetRelativePathFor(contentHash, 0).Path));
+            if (includeSharedFolder)
+            {
+                return new RelativePath(Path.Combine(Constants.SharedDirectoryName, contentHash.HashType.Serialize(), GetRelativePathFor(contentHash, 0).Path));
+            }
+            else
+            {
+                return new RelativePath(Path.Combine(contentHash.HashType.Serialize(), GetRelativePathFor(contentHash, 0).Path));
+            }
         }
 
         private static RelativePath GetRelativePathFor(ContentHash contentHash, int replicaIndex)
@@ -1443,7 +1453,7 @@ namespace BuildXL.Cache.ContentStore.Stores
 
         private IEnumerable<FileInfo> EnumerateBlobPathsFromDiskFor(ContentHash contentHash)
         {
-            var hashSubPath = _contentRootDirectory / contentHash.HashType.ToString() / GetHashSubDirectory(contentHash);
+            var hashSubPath = _contentRootDirectory / contentHash.HashType.Serialize() / GetHashSubDirectory(contentHash);
             if (!FileSystem.DirectoryExists(hashSubPath))
             {
                 return new FileInfo[] {};
@@ -1463,7 +1473,7 @@ namespace BuildXL.Cache.ContentStore.Stores
         internal static bool TryGetHashFromPath(AbsolutePath path, out ContentHash contentHash)
         {
             var hashName = path.GetParent().GetParent().FileName;
-            if (Enum.TryParse<HashType>(hashName, ignoreCase: true, out var hashType))
+            if (HashTypeExtensions.Deserialize(hashName, out var hashType))
             {
                 string hashHexString = GetFileNameWithoutExtension(path);
                 try
@@ -1787,7 +1797,7 @@ namespace BuildXL.Cache.ContentStore.Stores
                 // If this is the empty hash, then directly create an empty file.
                 // This avoids hash-level lock, all I/O in the cache directory, and even
                 // operations in the in-memory representation of the cache.
-                if (contentHashWithPath.Hash.IsEmptyHash())
+                if (UseEmptyContentShortcut(contentHashWithPath.Hash))
                 {
                     await FileSystem.CreateEmptyFileAsync(contentHashWithPath.Path);
                     return new PlaceFileResult(PlaceFileResult.ResultCode.PlacedWithCopy);
@@ -2126,7 +2136,7 @@ namespace BuildXL.Cache.ContentStore.Stores
             if (replicaExistence == ReplicaExistence.DoesNotExist)
             {
                 // Create a new replica
-                var txn = await QuotaKeeper.ReserveAsync(info.FileSize);
+                var txn = await ReserveAsync(info.FileSize);
                 await RetryOnUnexpectedReplicaAsync(
                     context,
                     () => SafeCopyFileAsync(
@@ -2182,6 +2192,23 @@ namespace BuildXL.Cache.ContentStore.Stores
             }
 
             return hardLinkResult;
+        }
+
+        private async Task<ReserveTransaction> ReserveAsync(long size)
+        {
+            Contract.Requires(QuotaKeeper != null);
+
+            try
+            {
+                // It is safe to pass ReserveTimeout, because if the timeout is not configured
+                // then ReserveTimeout equals to InfiniteTimeSpan and in that case
+                // WithTimeoutAsync will just ignore it.
+                return await QuotaKeeper.ReserveAsync(size).WithTimeoutAsync(_settings.ReserveTimeout);
+            }
+            catch (TimeoutException e)
+            {
+                throw new CacheException($"Failed to reserve space for content size=[{size}] in '{_settings.ReserveTimeout}'", e);
+            }
         }
 
         private async Task SafeCopyFileAsync(
@@ -2420,7 +2447,7 @@ namespace BuildXL.Cache.ContentStore.Stores
                 {
                     // Pinning the empty file always succeeds; no I/O or other operations required,
                     // because we have dedicated logic to place it when required.
-                    if (contentHash.IsEmptyHash())
+                    if (UseEmptyContentShortcut(contentHash))
                     {
                         results.Add(new PinResult(contentSize: 0, lastAccessTime: Clock.UtcNow, code: PinResult.ResultCode.Success));
                     }
@@ -2570,7 +2597,7 @@ namespace BuildXL.Cache.ContentStore.Stores
             {
                 // Short-circuit requests for the empty stream
                 // No lock is required since no file is involved.
-                if (contentHash.IsEmptyHash())
+                if (UseEmptyContentShortcut(contentHash))
                 {
                     return new OpenStreamResult(_emptyFileStream);
                 }
@@ -2582,6 +2609,11 @@ namespace BuildXL.Cache.ContentStore.Stores
                         .WithLockAcquisitionDuration(lockHandle);
                 }
             });
+        }
+
+        private bool UseEmptyContentShortcut(ContentHash hash)
+        {
+            return _settings.UseEmptyContentShortcut && hash.IsEmptyHash();
         }
 
         private async Task<StreamWithLength?> OpenStreamInternalWithLockAsync(Context context, ContentHash contentHash, PinRequest? pinRequest, FileShare share)

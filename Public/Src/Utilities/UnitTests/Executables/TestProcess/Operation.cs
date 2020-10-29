@@ -22,7 +22,7 @@ namespace Test.BuildXL.Executables.TestProcess
     /// </summary>
     public sealed class Operation
     {
-        private const int NumArgsExpected = 6;
+        private const int NumArgsExpected = 7;
         private const int ERROR_ALREADY_EXISTS = 183;
         private const string StdErrMoniker = "stderr";
         private const string WaitToFinishMoniker = "wait";
@@ -134,6 +134,11 @@ namespace Test.BuildXL.Executables.TestProcess
             Probe,
 
             /// <summary>
+            /// Type for probing a dir
+            /// </summary>
+            DirectoryProbe,
+
+            /// <summary>
             /// Type for enumerating a directory
             /// </summary>
             EnumerateDir,
@@ -142,6 +147,11 @@ namespace Test.BuildXL.Executables.TestProcess
             /// Type for creating a symlink to a file or directory
             /// </summary>
             CreateSymlink,
+
+            /// <summary>
+            /// Type for creating a junction to a directory
+            /// </summary>
+            CreateJunction,
 
             /// <summary>
             /// Type for creating a hardlink
@@ -324,6 +334,11 @@ namespace Test.BuildXL.Executables.TestProcess
         public string AdditionalArgs { get; private set; }
 
         /// <summary>
+        /// An environment variable the operation going to set, in the format of key=value, e.g. PATH=c:/
+        /// </summary>
+        public string EnvironmentVariablesToSet { get; private set; }
+
+        /// <summary>
         /// Number of retries when writing to a file
         /// </summary>
         public int RetriesOnWrite { get; }
@@ -336,7 +351,8 @@ namespace Test.BuildXL.Executables.TestProcess
             SymbolicLinkFlag? symLinkFlag = null,
             bool? doNotInfer = null,
             string additionalArgs = null, 
-            int retriesOnWrite = 5)
+            int retriesOnWrite = 5,
+            string environmentVariablesToSet = null)
         {
             Contract.Requires(content == null || !content.Contains(Environment.NewLine));
 
@@ -348,10 +364,11 @@ namespace Test.BuildXL.Executables.TestProcess
             SymLinkFlag = symLinkFlag ?? SymbolicLinkFlag.None;
             DoNotInfer = doNotInfer ?? true;
             AdditionalArgs = additionalArgs;
+            EnvironmentVariablesToSet = environmentVariablesToSet;
         }
 
 #if TestProcess
-        private static Operation FromCommandLine(Type type, string path = null, string content = null, string linkPath = null, SymbolicLinkFlag? symLinkFlag = null, string additionalArgs = null)
+        private static Operation FromCommandLine(Type type, string path = null, string content = null, string linkPath = null, SymbolicLinkFlag? symLinkFlag = null, string additionalArgs = null, string environmentVariablesToSet = null)
         {
             Contract.Requires(content == null || !content.Contains(Environment.NewLine));
 
@@ -359,7 +376,8 @@ namespace Test.BuildXL.Executables.TestProcess
                 content: content,
                 symLinkFlag: symLinkFlag,
                 doNotInfer: false,
-                additionalArgs: additionalArgs);
+                additionalArgs: additionalArgs,
+                environmentVariablesToSet: environmentVariablesToSet);
             result.PathAsString = path;
             result.LinkPathAsString = linkPath;
 
@@ -425,11 +443,17 @@ namespace Test.BuildXL.Executables.TestProcess
                     case Type.Probe:
                         DoProbe();
                         return;
+                    case Type.DirectoryProbe:
+                        DoDirProbe();
+                        return;
                     case Type.EnumerateDir:
                         DoEnumerateDir();
                         return;
                     case Type.CreateSymlink:
                         DoCreateSymlink();
+                        return;
+                    case Type.CreateJunction:
+                        DoCreateJunction();
                         return;
                     case Type.CreateHardlink:
                         DoCreateHardlink();
@@ -659,6 +683,14 @@ namespace Test.BuildXL.Executables.TestProcess
         }
 
         /// <summary>
+        /// Creates a probe operation
+        /// </summary>
+        public static Operation DirProbe(FileOrDirectoryArtifact path)
+        {
+            return new Operation(Type.DirectoryProbe, path, doNotInfer: false);
+        }
+
+        /// <summary>
         /// Creates a enumerate directory operation
         /// The path is a FileOrDirectoryArtifact, because we can enumerate directories through directory symlinks - which are FileArtifacts.
         /// </summary>
@@ -687,6 +719,15 @@ namespace Test.BuildXL.Executables.TestProcess
         public static Operation CreateSymlink(FileOrDirectoryArtifact linkPath, string target, SymbolicLinkFlag symLinkFlag, bool doNotInfer = false)
         {
             return new Operation(Type.CreateSymlink, linkPath: linkPath, additionalArgs: target, symLinkFlag: symLinkFlag, doNotInfer: doNotInfer);
+        }
+
+        /// <summary>
+        /// Creates a junction operation (windows only), fails on other operating systems
+        /// Requires process to run with elevated permissions for success
+        /// </summary>
+        public static Operation CreateJunction(FileOrDirectoryArtifact junctionPath, FileOrDirectoryArtifact targetPath, bool doNotInfer = false)
+        {
+            return new Operation(Type.CreateJunction, targetPath, linkPath: junctionPath, doNotInfer: doNotInfer);
         }
 
         /// <summary>
@@ -759,11 +800,28 @@ namespace Test.BuildXL.Executables.TestProcess
         }
 
         /// <summary>
+        /// Like <see cref="SpawnAndWritePidFile"/> except it sets the given environment variables.
+        /// </summary>
+        public static Operation SpawnAndWritePidFileWithEnvs(PathTable pathTable, bool waitToFinish, Operation[] childOperations, FileOrDirectoryArtifact? pidFile, bool doNotInfer = false, string envs = null )
+        {
+            var args = childOperations.Select(o => (o.ToCommandLine(pathTable, escapeResult: true))).ToArray();
+            return new Operation(Type.Spawn, path: pidFile, content: EncodeList(args), additionalArgs: waitToFinish ? WaitToFinishMoniker : null, doNotInfer: doNotInfer, environmentVariablesToSet: envs);
+        }
+
+        /// <summary>
         /// Like <see cref="SpawnAndWritePidFile"/> except it doesn't write out spawned process pid to file.
         /// </summary>
         public static Operation Spawn(PathTable pathTable, bool waitToFinish, params Operation[] childOperations)
         {
             return SpawnAndWritePidFile(pathTable, waitToFinish, pidFile: null, doNotInfer: false, childOperations);
+        }
+
+        /// <summary>
+        /// Like <see cref="Spawn"/> except it sets the given environment variables.
+        /// </summary>
+        public static Operation SpawnWithEnvs(PathTable pathTable, bool waitToFinish, Operation[] childOperations, string envs = null)
+        {
+            return SpawnAndWritePidFileWithEnvs(pathTable, waitToFinish, childOperations, pidFile: null, doNotInfer: false, envs: envs);
         }
 
         /// <summary>
@@ -838,14 +896,15 @@ namespace Test.BuildXL.Executables.TestProcess
         }
 
         /// <summary>
-        /// Process that fails on first invocation and succeeds on second invocation.
+        /// Process that fails on the first invocations and succeeds on the last.
         /// </summary>
         /// <param name="untrackedStateFilePath">File used to track state. This path should be untracked when scheduling the pip</param>
-        /// <param name="firstFailExitCode">Exit code for first failed invocation</param>
+        /// <param name="failExitCode">Exit code for failed invocations</param>
+        /// <param name="numberOfRetriesToSucceed">The number of retries the pip needs to succed. Defaults to 1.</param>
         /// <returns></returns>
-        public static Operation SucceedOnRetry(FileArtifact untrackedStateFilePath, int firstFailExitCode = -1)
+        public static Operation SucceedOnRetry(FileArtifact untrackedStateFilePath, int failExitCode = -1, int numberOfRetriesToSucceed = 1)
         {
-            return new Operation(Type.SucceedOnRetry, path: untrackedStateFilePath, content: firstFailExitCode.ToString());
+            return new Operation(Type.SucceedOnRetry, path: untrackedStateFilePath, content: failExitCode.ToString(), additionalArgs: numberOfRetriesToSucceed.ToString());
         }
 
         /// <summary>
@@ -979,10 +1038,15 @@ namespace Test.BuildXL.Executables.TestProcess
                 {
                     file = file.ToUpperInvariant();
                 }
+
                 if (AdditionalArgs == UseLongPathPrefix)
                 {
-                    file = @"\\?\" + file.ToUpperInvariant();
+                    file = @"\\?\" + file;
                 }
+
+                // Ensure directory exists.
+                string directory = System.IO.Path.GetDirectoryName(file);
+                Directory.CreateDirectory(directory);
 
                 File.AppendAllText(file, content);
             }
@@ -1128,6 +1192,12 @@ namespace Test.BuildXL.Executables.TestProcess
             File.Exists(PathAsString);
         }
 
+        private void DoDirProbe()
+        {
+            // Trailing backslash is needed for BuildXL to interpret it as a directory probe.
+            Directory.Exists(PathAsString + (OperatingSystemHelper.IsUnixOS ? "/" : @"\"));
+        }
+
         private void DoEnumerateDir()
         {
             try
@@ -1156,6 +1226,17 @@ namespace Test.BuildXL.Executables.TestProcess
             var linkPath = LinkPathAsString;
             FileUtilities.DeleteFile(linkPath);
             var maybeSymlink = FileUtilities.TryCreateSymbolicLink(linkPath, target, SymLinkFlag == SymbolicLinkFlag.FILE);
+            if (!maybeSymlink.Succeeded)
+            {
+                throw maybeSymlink.Failure.CreateException();
+            }
+        }
+        
+        private void DoCreateJunction()
+        {
+            Contract.Assert(!OperatingSystemHelper.IsUnixOS);
+
+            var maybeSymlink = FileUtilities.TryCreateReparsePointIfNotExistsOrTargetsDoNotMatch(LinkPathAsString, PathAsString, ReparsePointType.Junction, out var created);
             if (!maybeSymlink.Succeeded)
             {
                 throw maybeSymlink.Failure.CreateException();
@@ -1248,6 +1329,19 @@ namespace Test.BuildXL.Executables.TestProcess
                 CreateNoWindow = true,
             };
 
+            // Set environment varialbes for the child process
+            if (EnvironmentVariablesToSet != null)
+            {
+                foreach (var kvp in EnvironmentVariablesToSet.Split('\0'))
+                {
+                    string[] s = kvp.Split('=');
+                    if (s.Length == 2)
+                    {
+                        process.StartInfo.EnvironmentVariables[s[0]] = s[1];
+                    }
+                }
+            }
+
             process.Start();
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
@@ -1329,16 +1423,35 @@ namespace Test.BuildXL.Executables.TestProcess
 
         private void DoSucceedOnRetry()
         {
-            // Use this state file to differentiate between the first run and the second run. The file will contain the exit code for the second run
-            if (File.Exists(PathAsString))
+            // Use this state file to differentiate between the first and subsequent runs. The file contains the number of retries left to succeed
+            if (!File.Exists(PathAsString))
             {
-                int thisRunExitCode = int.Parse(File.ReadAllText(PathAsString));
-                Environment.Exit(thisRunExitCode);
+                // If this is the first run, but the number of retries needed to succeed is 0, then exit successfully
+                if (int.Parse(AdditionalArgs) == 0)
+                {
+                    Environment.Exit(0);
+                }
+
+                File.WriteAllText(PathAsString, AdditionalArgs);
+                Environment.Exit(int.Parse(Content));
             }
             else
             {
-                File.WriteAllText(PathAsString, "0");
-                Environment.Exit(int.Parse(Content));
+                // Retrieve the number of retries left
+                int retriesLeft = int.Parse(File.ReadAllText(PathAsString));
+                retriesLeft--;
+
+                // If this is the last one, exit with succesfully
+                if (retriesLeft == 0)
+                {
+                    Environment.Exit(0);
+                }
+                else
+                {
+                    // Otherwise, update the number of retries left in the file and return the configured error code
+                    File.WriteAllText(PathAsString, (retriesLeft--).ToString());
+                    Environment.Exit(int.Parse(Content));
+                }
             }
         }
 
@@ -1405,13 +1518,16 @@ namespace Test.BuildXL.Executables.TestProcess
 
             string additionalArgs = opArgs[5].Length == 0 ? null : opArgs[5];
 
+            string envToSet = opArgs[6].Length == 0 ? null : opArgs[6];
+
             return Operation.FromCommandLine(
                 type: opType, 
                 path: pathAsString, 
                 content: content, 
                 linkPath: linkPathAsString, 
                 symLinkFlag: symLinkFlag, 
-                additionalArgs: additionalArgs);
+                additionalArgs: additionalArgs,
+                environmentVariablesToSet: envToSet);
         }
 
         /// <summary>
@@ -1431,7 +1547,8 @@ namespace Test.BuildXL.Executables.TestProcess
                 Content,
                 LinkPath.IsValid ? FileOrDirectoryToString(LinkPath) : null,
                 SymLinkFlag.ToString(),
-                AdditionalArgs
+                AdditionalArgs,
+                EnvironmentVariablesToSet,
                 // The process as a test executable does not use the DoNotInfer field
             };
 

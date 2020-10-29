@@ -11,7 +11,6 @@ using BuildXL.Cache.ContentStore.Service;
 using BuildXL.Cache.ContentStore.Service.Grpc;
 using BuildXL.Cache.ContentStore.Sessions;
 using BuildXL.Cache.ContentStore.Stores;
-using BuildXL.Cache.ContentStore.Synchronization;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
@@ -20,6 +19,7 @@ using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest.Results;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
 using ContentStoreTest.Extensions;
 using ContentStoreTest.Test;
 using FluentAssertions;
@@ -129,9 +129,10 @@ namespace ContentStoreTest.Grpc
         }
 
         private async Task LongCallCanceledOnShutdownAsync<T>(
-            string scenario, bool respectsCancellationToken, Func<Context, AbsolutePath, IRpcClient, Task<T>> unresponsiveFunc)
+            string scenario, bool respectsCancellationToken, Func<OperationContext, AbsolutePath, IRpcClient, Task<T>> unresponsiveFunc)
         {
-            var context = new Context(Logger);
+            var tracingContext = new Context(Logger);
+            var context = new OperationContext(tracingContext);
             using (var directory = new DisposableDirectory(FileSystem))
             {
                 var rootPath = directory.Path;
@@ -162,7 +163,7 @@ namespace ContentStoreTest.Grpc
                     await server.StartupAsync(context).ShouldBeSuccess();
 
                     var port = new MemoryMappedFilePortReader(grpcPortFileName, Logger).ReadPort();
-                    rpcClient = new GrpcContentClient(tracer, FileSystem, port, scenario);
+                    rpcClient = new GrpcContentClient(tracer, FileSystem, new ServiceClientRpcConfiguration(grpcPort), scenario);
 
                     await rpcClient.CreateSessionAsync(
                         context, SessionName, CacheName, ImplicitPin.None).ShouldBeSuccess();
@@ -197,7 +198,8 @@ namespace ContentStoreTest.Grpc
         public async Task DoesNotRespectFileReplacementMode(FileReplacementMode requestedReplacementMode)
         {
             string scenario = nameof(DoesNotRespectFileReplacementMode) + requestedReplacementMode;
-            var context = new Context(Logger);
+            var tracingContext = new Context(Logger);
+            var context = new OperationContext(tracingContext);
             using (var directory = new DisposableDirectory(FileSystem))
             {
                 var rootPath = directory.Path;
@@ -226,7 +228,7 @@ namespace ContentStoreTest.Grpc
                     await server.StartupAsync(context).ShouldBeSuccess();
 
                     var port = new MemoryMappedFilePortReader(grpcPortFileName, Logger).ReadPort();
-                    IRpcClient rpcClient = new GrpcContentClient(tracer, FileSystem, port, scenario);
+                    IRpcClient rpcClient = new GrpcContentClient(tracer, FileSystem, new ServiceClientRpcConfiguration(grpcPort), scenario);
 
                     await rpcClient.CreateSessionAsync(
                         context, SessionName, CacheName, ImplicitPin.None).ShouldBeSuccess();
@@ -259,7 +261,8 @@ namespace ContentStoreTest.Grpc
         public async Task CreateSessionThrowsClientCanRetryExceptionWhenServiceOffline()
         {
             string scenario = nameof(CreateSessionThrowsClientCanRetryExceptionWhenServiceOffline);
-            var context = new Context(Logger);
+            var tracingContext = new Context(Logger);
+            var context = new OperationContext(tracingContext);
             using (var directory = new DisposableDirectory(FileSystem))
             {
                 var rootPath = directory.Path;
@@ -290,7 +293,7 @@ namespace ContentStoreTest.Grpc
                     r.ShouldBeSuccess();
 
                     var port = new MemoryMappedFilePortReader(grpcPortFileName, Logger).ReadPort();
-                    rpcClient = new GrpcContentClient(tracer, FileSystem, port, scenario);
+                    rpcClient = new GrpcContentClient(tracer, FileSystem, new ServiceClientRpcConfiguration(grpcPort), scenario);
 
                     r = await server.ShutdownAsync(context);
                     r.ShouldBeSuccess();
@@ -307,7 +310,8 @@ namespace ContentStoreTest.Grpc
         public async Task PutStreamRetriesWhenTempFileDisappears()
         {
             string scenario = nameof(PutStreamRetriesWhenTempFileDisappears);
-            var context = new Context(Logger);
+            var tracingContext = new Context(Logger);
+            var context = new OperationContext(tracingContext);
             using (var directory = new DisposableDirectory(FileSystem))
             {
                 var rootPath = directory.Path;
@@ -330,7 +334,7 @@ namespace ContentStoreTest.Grpc
                     await server.StartupAsync(context).ShouldBeSuccess();
 
                     var port = new MemoryMappedFilePortReader(grpcPortFileName, Logger).ReadPort();
-                    using (IRpcClient rpcClient = new GrpcContentClient(tracer, FileSystem, port, scenario))
+                    using (IRpcClient rpcClient = new GrpcContentClient(tracer, FileSystem, new ServiceClientRpcConfiguration(grpcPort), scenario))
                     {
                         await rpcClient.CreateSessionAsync(
                             context, SessionName, CacheName, ImplicitPin.None).ShouldBeSuccess();
@@ -353,7 +357,8 @@ namespace ContentStoreTest.Grpc
         public async Task OpenStreamRetriesWhenTempFileDisappears()
         {
             string scenario = nameof(PutStreamRetriesWhenTempFileDisappears);
-            var context = new Context(Logger);
+            var tracingContext = new Context(Logger);
+            var context = new OperationContext(tracingContext);
             using (var directory = new DisposableDirectory(FileSystem))
             {
                 var rootPath = directory.Path;
@@ -376,7 +381,7 @@ namespace ContentStoreTest.Grpc
                     await server.StartupAsync(context).ShouldBeSuccess();
 
                     var port = new MemoryMappedFilePortReader(grpcPortFileName, Logger).ReadPort();
-                    using (IRpcClient rpcClient = new GrpcContentClient(tracer, FileSystem, port, scenario))
+                    using (IRpcClient rpcClient = new GrpcContentClient(tracer, FileSystem, new ServiceClientRpcConfiguration(grpcPort), scenario))
                     {
                         await rpcClient.CreateSessionAsync(
                             context, SessionName, CacheName, ImplicitPin.None).ShouldBeSuccess();

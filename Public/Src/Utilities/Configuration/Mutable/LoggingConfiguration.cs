@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
@@ -21,7 +22,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             ConsoleVerbosity = VerbosityLevel.Informational;
             FileVerbosity = VerbosityLevel.Verbose;
             LogCounters = true;
-            TraceInfo = new Dictionary<string, string>();
+            TraceInfo = new Dictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
             Color = true;
             AnimateTaskbar = true;
             LogStats = true;
@@ -324,7 +325,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public AbsolutePath RpcLog { get; set; }
 
         /// <inheritdoc />
-        public AbsolutePath PipOutputLog { get; set; }
+        public AbsolutePath PipOutputLog { get; set; } 
+        
+        /// <inheritdoc />
+        public AbsolutePath PluginLog { get; set; }
 
         /// <inheritdoc />
         public int StatusFrequencyMs { get; set; }

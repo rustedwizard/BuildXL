@@ -3,11 +3,12 @@
 
 using System;
 using System.Threading;
+using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 
 namespace BuildXL.Cache.ContentStore.Tracing.Internal
 {
     /// <summary>
-    /// Operation context with additional managed resources associated with it.
+    /// An operation context that triggers cancellation when one of the cancellation tokens provided to the constructor are cancelled.
     /// </summary>
     public readonly struct CancellableOperationContext : IDisposable
     {
@@ -35,11 +36,15 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
         /// <inheritdoc />
         public void Dispose()
         {
-            _cts?.Cancel();
+            // No need to cancel the source.
+            // We don't want to have a scope based cancellation here.
             _cts?.Dispose();
         }
 
         /// <nodoc />
         public static implicit operator OperationContext(CancellableOperationContext context) => context.Context;
+
+        /// <nodoc />
+        public static implicit operator Context(CancellableOperationContext context) => context.Context.TracingContext;
     }
 }

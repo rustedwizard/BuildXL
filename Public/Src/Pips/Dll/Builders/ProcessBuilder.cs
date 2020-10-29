@@ -9,6 +9,7 @@ using BuildXL.Pips.Operations;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
+using BuildXL.Utilities.Configuration.Mutable;
 using static BuildXL.Pips.Operations.Process;
 
 namespace BuildXL.Pips.Builders
@@ -34,6 +35,7 @@ namespace BuildXL.Pips.Builders
         private readonly Dictionary<StringId, PipData> m_environmentVariables;
 
         private readonly PooledObjectWrapper<PipDataBuilder> m_argumentsBuilder;
+        private readonly IConfiguration m_configuration;
 
         /// <nodoc />
         public PipDataBuilder ArgumentsBuilder => m_argumentsBuilder.Instance;
@@ -136,9 +138,9 @@ namespace BuildXL.Pips.Builders
         // Container related
 
         /// <summary>
-        /// <see cref="DoubleWritePolicy"/>. Only in effect if <see cref="Options.NeedsToRunInContainer"/> is true.
+        /// <see cref="RewritePolicy"/>. 
         /// </summary>
-        public DoubleWritePolicy DoubleWritePolicy { get; set; }
+        public RewritePolicy RewritePolicy { get; set; }
 
         /// <summary>
         /// <see cref="ContainerIsolationLevel"/>. Only in effect if <see cref="Options.NeedsToRunInContainer"/> is true.
@@ -184,13 +186,16 @@ namespace BuildXL.Pips.Builders
         private readonly AbsolutePath m_redirectedUserProfilePath;
 
         private FileArtifact m_changeAffectedInputListWrittenFile;
+        private StringId m_retryAttemptEnvironmentVariable = StringId.Invalid;
+
+        private int? m_processRetries;
 
         /// <nodoc />
-        private ProcessBuilder(PathTable pathTable, PooledObjectWrapper<PipDataBuilder> argumentsBuilder)
+        private ProcessBuilder(PathTable pathTable, PooledObjectWrapper<PipDataBuilder> argumentsBuilder, IConfiguration configuration)
         {
             m_pathTable = pathTable;
             m_argumentsBuilder = argumentsBuilder;
-
+            m_configuration = configuration;
             m_inputFiles = Pools.GetFileArtifactSet();
             m_inputDirectories = Pools.GetDirectoryArtifactSet();
             m_servicePipDependencies = PipPools.PipIdSetPool.GetInstance();
@@ -222,20 +227,20 @@ namespace BuildXL.Pips.Builders
         /// <summary>
         /// Creates a new ProcessBuilder
         /// </summary>
-        public static ProcessBuilder Create(PathTable pathTable, PooledObjectWrapper<PipDataBuilder> argumentsBuilder)
+        public static ProcessBuilder Create(PathTable pathTable, PooledObjectWrapper<PipDataBuilder> argumentsBuilder, IConfiguration configuration)
         {
             Contract.Requires(pathTable != null);
             Contract.Requires(argumentsBuilder.Instance != null);
-            return new ProcessBuilder(pathTable, argumentsBuilder);
+            return new ProcessBuilder(pathTable, argumentsBuilder, configuration);
         }
 
         /// <summary>
         /// Helper to create a new ProcessBuilder for testing that doesn't need to pass the pooled PipDataBuilder for convenience
         /// </summary>
-        public static ProcessBuilder CreateForTesting(PathTable pathTable)
+        public static ProcessBuilder CreateForTesting(PathTable pathTable, IConfiguration configuration = null)
         {
             var tempPool = new ObjectPool<PipDataBuilder>(() => new PipDataBuilder(pathTable.StringTable), _ => { });
-            return new ProcessBuilder(pathTable, tempPool.GetInstance());
+            return new ProcessBuilder(pathTable, tempPool.GetInstance(), configuration ?? new ConfigurationImpl());
         }
 
         /// <nodoc />
@@ -492,7 +497,13 @@ namespace BuildXL.Pips.Builders
             Contract.Requires(key.IsValid);
 
             m_environmentVariables[key] = PipData.Invalid;
-        }                 
+        }
+
+        /// <nodoc />
+        public void SetProcessRetries(int processRetries)
+        {
+            m_processRetries = processRetries;
+        }
 
         private ReadOnlyArray<EnvironmentVariable> FinishEnvironmentVariables()
         {
@@ -532,6 +543,18 @@ namespace BuildXL.Pips.Builders
         {
             m_responseFileSpecification = specification;
         }
+
+        /// <nodoc/>
+        public void SetRetryAttemptEnvironmentVariable(StringId environmentVariableName)
+        {
+            Contract.Assert(environmentVariableName.IsValid);
+
+            // This env var is always a passthrough from a caching perspective.
+            SetPassthroughEnvironmentVariable(environmentVariableName);
+
+            m_retryAttemptEnvironmentVariable = environmentVariableName;
+        }
+
 
         private PipData FinishArgumentsAndCreateResponseFileIfNeeded(DirectoryArtifact defaultDirectory)
         {
@@ -698,7 +721,7 @@ namespace BuildXL.Pips.Builders
                 serviceInfo: serviceInfo,
                 allowedSurvivingChildProcessNames: AllowedSurvivingChildProcessNames,
                 nestedProcessTerminationTimeout: NestedProcessTerminationTimeout,
-                doubleWritePolicy: DoubleWritePolicy,
+                rewritePolicy: RewritePolicy,
                 containerIsolationLevel: ContainerIsolationLevel,
                 absentPathProbeMode: AbsentPathProbeUnderOpaquesMode,
                 weight: Weight,
@@ -707,7 +730,11 @@ namespace BuildXL.Pips.Builders
                 changeAffectedInputListWrittenFile: m_changeAffectedInputListWrittenFile,
                 preserveOutputsTrustLevel: PreserveOutputsTrustLevel,
                 childProcessesToBreakawayFromSandbox: ChildProcessesToBreakawayFromSandbox,
-                outputDirectoryExclusions: ReadOnlyArray<AbsolutePath>.From(outputDirectoryExclusions));
+                outputDirectoryExclusions: ReadOnlyArray<AbsolutePath>.From(outputDirectoryExclusions),
+                // If process retries was not defined, use the global configured one
+                processRetries: m_processRetries ?? m_configuration.Schedule.ProcessRetries,
+                retryAttemptEnvironmentVariable: m_retryAttemptEnvironmentVariable
+                );
 
             return true;
         }

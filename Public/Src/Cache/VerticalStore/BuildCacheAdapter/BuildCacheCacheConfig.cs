@@ -109,12 +109,13 @@ namespace BuildXL.Cache.BuildCacheAdapter
                 MaxFingerprintsPerIncorporateRequest = MaxFingerprintsPerIncorporateRequest,
                 MaxDegreeOfParallelismForIncorporateRequests = MaxDegreeOfParallelismForIncorporateRequests,
                 HttpSendTimeoutMinutes = HttpSendTimeoutMinutes,
-                DownloadBlobsThroughBlobStore = DownloadBlobsThroughBlobStore,
                 UseDedupStore = UseDedupStore,
                 OverrideUnixFileAccessMode = OverrideUnixFileAccessMode,
                 ImplicitPin = ImplicitPin,
                 IgnorePinThresholdHours = IgnorePinThresholdHours,
-                PinInlineThresholdMinutes = PinInlineThresholdMinutes
+                PinInlineThresholdMinutes = PinInlineThresholdMinutes,
+                DomainId = DomainId,
+                DownloadBlobsUsingHttpClient = DownloadBlobsUsingHttpClient
             };
         }
     }

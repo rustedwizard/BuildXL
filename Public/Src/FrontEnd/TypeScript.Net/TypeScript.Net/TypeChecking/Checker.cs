@@ -9896,7 +9896,8 @@ namespace TypeScript.Net.TypeChecking
         private IType GetOrSetResolvedType<T>(INode node, T data, Func<NodeLinks, T, Tuple<IType, ISymbol>> getResolvedTypeAndSymbolFactory)
         {
             var links = GetNodeLinks(node);
-            if (links.ResolvedType != null)
+            if (links.ResolvedType != null 
+                && GetResolvedSymbol(node) != null /* Defensive: just to ensure that resolved symbol is set */)
             {
                 return links.ResolvedType;
             }
@@ -9906,8 +9907,8 @@ namespace TypeScript.Net.TypeChecking
                 if (links.ResolvedType == null)
                 {
                     var result = getResolvedTypeAndSymbolFactory(links, data);
-                    links.ResolvedType = result.Item1;
                     SetResolvedSymbol(node, result.Item2);
+                    links.ResolvedType = result.Item1;
                 }
             }
 
@@ -18189,13 +18190,13 @@ namespace TypeScript.Net.TypeChecking
                 var symbol = GetSymbolOfNode(node);
                 var localSymbol = node.LocalSymbol ?? symbol;
 
-                // Since the javascript won't do semantic analysis like typescript,
-                // if the javascript file comes before the typescript file and both contain same name functions,
-                // checkFunctionOrConstructorISymbol wouldn't be called if we didnt ignore javascript function.
+                // Since the JavaScript won't do semantic analysis like typescript,
+                // if the JavaScript file comes before the typescript file and both contain same name functions,
+                // checkFunctionOrConstructorISymbol wouldn't be called if we didnt ignore JavaScript function.
                 var firstDeclaration = ForEachUntil(
                     localSymbol.DeclarationList,
                     this,
-                    (declaration, @this) => // Get first non javascript  declaration
+                    (declaration, @this) => // Get first non JavaScript  declaration
                     {
                         return
                             declaration.Kind == node.Kind && !declaration.IsJavaScriptFile()
@@ -21952,7 +21953,7 @@ namespace TypeScript.Net.TypeChecking
             {
                 // In this case, we call GetSymbolOfNode instead of GetSymbolAtLocation because it is a declaration
                 var symbol = GetSymbolOfNode(node);
-                return GetTypeOfSymbol(symbol);
+                return symbol != null ? GetTypeOfSymbol(symbol) : null;
             }
 
             if (IsDeclarationName(node) != null)

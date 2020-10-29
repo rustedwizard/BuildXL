@@ -46,6 +46,7 @@ namespace BuildXL.FrontEnd.JavaScript
         private readonly IEnumerable<KeyValuePair<string, string>> m_userDefinedEnvironment;
         private readonly IEnumerable<string> m_userDefinedPassthroughVariables;
         private readonly IReadOnlyDictionary<string, IReadOnlyList<JavaScriptArgument>> m_customCommands;
+        private readonly IEnumerable<AbsolutePath> m_allProjectRoots;
 
         /// <nodoc/>
         protected PathTable PathTable => m_context.PathTable;
@@ -68,7 +69,8 @@ namespace BuildXL.FrontEnd.JavaScript
             IJavaScriptResolverSettings resolverSettings,
             IEnumerable<KeyValuePair<string, string>> userDefinedEnvironment,
             IEnumerable<string> userDefinedPassthroughVariables,
-            IReadOnlyDictionary<string, IReadOnlyList<JavaScriptArgument>> customCommands)
+            IReadOnlyDictionary<string, IReadOnlyList<JavaScriptArgument>> customCommands,
+            IEnumerable<JavaScriptProject> allProjectsToBuild)
         {
             Contract.RequiresNotNull(context);
             Contract.RequiresNotNull(frontEndHost);
@@ -77,6 +79,7 @@ namespace BuildXL.FrontEnd.JavaScript
             Contract.RequiresNotNull(userDefinedEnvironment);
             Contract.RequiresNotNull(userDefinedPassthroughVariables);
             Contract.RequiresNotNull(customCommands);
+            Contract.RequiresNotNull(allProjectsToBuild);
 
             m_context = context;
             m_frontEndHost = frontEndHost;
@@ -85,6 +88,7 @@ namespace BuildXL.FrontEnd.JavaScript
             m_userDefinedEnvironment = userDefinedEnvironment;
             m_userDefinedPassthroughVariables = userDefinedPassthroughVariables;
             m_customCommands = customCommands;
+            m_allProjectRoots = allProjectsToBuild.Select(project => project.ProjectFolder);
         }
 
         /// <summary>
@@ -138,7 +142,7 @@ namespace BuildXL.FrontEnd.JavaScript
         /// </summary>
         protected virtual Dictionary<string, string> DoCreateEnvironment(JavaScriptProject project)
         {
-            var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var env = new Dictionary<string, string>(OperatingSystemHelper.EnvVarComparer);
 
             //
             // Initial environment variables that may be overwritten by the outer environment.
@@ -176,7 +180,7 @@ namespace BuildXL.FrontEnd.JavaScript
             // We create a pip construction helper for each project
             var pipConstructionHelper = GetPipConstructionHelperForProject(project, qualifierId);
 
-            using (var processBuilder = ProcessBuilder.Create(PathTable, m_context.GetPipDataBuilder()))
+            using (var processBuilder = ProcessBuilder.Create(PathTable, m_context.GetPipDataBuilder(), m_frontEndHost.Configuration))
             {
                 // Configure the process to add an assortment of settings: arguments, response file, etc.
                 ConfigureProcessBuilder(processBuilder, project);
@@ -267,9 +271,12 @@ namespace BuildXL.FrontEnd.JavaScript
             // Each project is automatically allowed to write anything under its project root
             processBuilder.AddOutputDirectory(DirectoryArtifact.CreateWithZeroPartialSealId(project.ProjectFolder), SealDirectoryKind.SharedOpaque);
 
-            // There shouldn't be any writes under node_modules. So exclude it explicitly, since that also avoids a usually expensive enumeration
-            // under node_modules when scrubbing. 
-            processBuilder.AddOutputDirectoryExclusion(project.NodeModulesFolder(m_context.PathTable));
+            if (m_resolverSettings.BlockWritesUnderNodeModules == true)
+            {
+                // There shouldn't be any writes under node_modules. So exclude it explicitly, since that also avoids a usually expensive enumeration
+                // under node_modules when scrubbing. 
+                processBuilder.AddOutputDirectoryExclusion(project.NodeModulesFolder(m_context.PathTable));
+            }
 
             // Some projects share their temp folder across their build scripts (e.g. build and test)
             // So we cannot make them share the temp folder with the infrastructure we have today
@@ -328,8 +335,8 @@ namespace BuildXL.FrontEnd.JavaScript
             // Otherwise in Windows we force path sets to be all uppercase
             processBuilder.Options |= Process.Options.PreservePathSetCasing;
 
-            // By default the double write policy is to allow same content double writes.
-            processBuilder.DoubleWritePolicy |= DoubleWritePolicy.AllowSameContentDoubleWrites;
+            // By default the double write policy is to allow same content double writes and safe rewrites.
+            processBuilder.RewritePolicy |= RewritePolicy.DefaultSafe;
 
             // Untrack the user profile. The corresponding mount is already configured for not tracking source files, and with allowed undeclared source reads,
             // any attempt to read into the user profile will fail to compute its corresponding hash
@@ -344,7 +351,7 @@ namespace BuildXL.FrontEnd.JavaScript
                 processBuilder.Options |= Process.Options.WritingToStandardErrorFailsExecution;
             }
 
-            PipConstructionUtilities.UntrackUserConfigurableArtifacts(processBuilder, m_resolverSettings);
+            PipConstructionUtilities.UntrackUserConfigurableArtifacts(m_context.PathTable, project.ProjectFolder, m_allProjectRoots, processBuilder, m_resolverSettings);
 
             var logDirectory = GetLogDirectory(project);
             processBuilder.SetStandardOutputFile(logDirectory.Combine(m_context.PathTable, "build.log"));

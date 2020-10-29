@@ -153,6 +153,12 @@
   <data name="ApiTotalMaterializeFileCalls" xml:space="preserve">
     <value>BuildXLApiTotalMaterializeFileCalls</value>
   </data>
+    <data name="ApiTotalRegisterBuildManifestHashCalls" xml:space="preserve">
+    <value>BuildXLApiTotalRegisterBuildManifestHashCalls</value>
+  </data>
+    <data name="ApiTotalGenerateBuildManifestFileCalls" xml:space="preserve">
+    <value>BuildXLApiTotalGenerateBuildManifestFileCalls</value>
+  </data>
   <data name="ApiTotalReportStatisticsCalls" xml:space="preserve">
     <value>BuildXLApiTotalReportStatisticsCalls</value>
   </data>
@@ -293,5 +299,41 @@
   </data>
   <data name="TotalMaterializedOutputsSize" xml:space="preserve">
     <value>TotalMaterializedOutputsSize</value>
+  </data>
+  <data name="PluginLoadedFailureCounts" xml:space="preserve">
+    <value>PluginLoadedFailureCounts</value>
+  </data>
+  <data name="PluginLoadedSuccessfulCounts" xml:space="preserve">
+    <value>PluginLoadedSuccessfulCounts</value>
+  </data>
+  <data name="PluginLoadingTime" xml:space="preserve">
+    <value>PluginLoadingTime</value>
+  </data>
+  <data name="PluginProcessedRequestCounts" xml:space="preserve">
+    <value>PluginProcessedRequestCounts</value>
+  </data>
+  <data name="PluginTotalProcessTime" xml:space="preserve">
+    <value>PluginTotalProcessTime</value>
+  </data>
+  <data name="TotalMaterializedInputsCount" xml:space="preserve">
+    <value>TotalMaterializedInputsCount</value>
+  </data>
+  <data name="TotalMaterializedInputsExpensiveCount" xml:space="preserve">
+    <value>TotalMaterializedInputsExpensiveCount</value>
+  </data>
+  <data name="TotalMaterializedOutputsCount" xml:space="preserve">
+    <value>TotalMaterializedOutputsCount</value>
+  </data>
+  <data name="TotalMaterializedOutputsExpensiveCount" xml:space="preserve">
+    <value>TotalMaterializedOutputsExpensiveCount</value>
+  </data>
+  <data name="PerformanceCollectorInitializationDurationMs" xml:space="preserve">
+    <value>PerformanceCollectorInitializationDurationMs</value>
+  </data>
+  <data name="TotalApiServerMaterializedOutputsSize" xml:space="preserve">
+    <value>TotalApiServerMaterializedOutputsSize</value>
+  </data>
+  <data name="TotalApiServerMaterializedOutputsCount" xml:space="preserve">
+    <value>TotalApiServerMaterializedOutputsCount</value>
   </data>
 </root>

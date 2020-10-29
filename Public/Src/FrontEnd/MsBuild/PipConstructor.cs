@@ -62,6 +62,7 @@ namespace BuildXL.FrontEnd.MsBuild
         private readonly string m_frontEndName;
         private readonly IEnumerable<KeyValuePair<string, string>> m_userDefinedEnvironment;
         private readonly IEnumerable<string> m_userDefinedPassthroughVariables;
+        private readonly IEnumerable<AbsolutePath> m_allProjectRoots;
 
         private PathTable PathTable => m_context.PathTable;
         private FrontEndEngineAbstraction Engine => m_frontEndHost.Engine;
@@ -90,7 +91,8 @@ namespace BuildXL.FrontEnd.MsBuild
             AbsolutePath pathToDotnetExe,
             string frontEndName,
             IEnumerable<KeyValuePair<string, string>> userDefinedEnvironment,
-            IEnumerable<string> userDefinedPassthroughVariables)
+            IEnumerable<string> userDefinedPassthroughVariables,
+            IEnumerable<ProjectWithPredictions> allProjects)
         {
             Contract.Requires(context != null);
             Contract.Requires(frontEndHost != null);
@@ -101,6 +103,7 @@ namespace BuildXL.FrontEnd.MsBuild
             Contract.Requires(!string.IsNullOrEmpty(frontEndName));
             Contract.Requires(userDefinedEnvironment != null);
             Contract.Requires(userDefinedPassthroughVariables != null);
+            Contract.RequiresNotNull(allProjects);
 
             m_context = context;
             m_frontEndHost = frontEndHost;
@@ -111,6 +114,7 @@ namespace BuildXL.FrontEnd.MsBuild
             m_frontEndName = frontEndName;
             m_userDefinedEnvironment = userDefinedEnvironment;
             m_userDefinedPassthroughVariables = userDefinedPassthroughVariables;
+            m_allProjectRoots = allProjects.Select(project => project.FullPath);
         }
 
         /// <summary>
@@ -154,7 +158,7 @@ namespace BuildXL.FrontEnd.MsBuild
 
         private IReadOnlyDictionary<string, string> CreateEnvironment(AbsolutePath logDirectory, ProjectWithPredictions project)
         {
-            var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var env = new Dictionary<string, string>(OperatingSystemHelper.EnvVarComparer);
 
             //
             // Initial environment variables that may be overwritten by the outer environment.
@@ -229,7 +233,7 @@ namespace BuildXL.FrontEnd.MsBuild
             // We create a pip construction helper for each project
             var pipConstructionHelper = GetPipConstructionHelperForProject(project, qualifierId, deltaGlobalProperties);
 
-            using (var processBuilder = ProcessBuilder.Create(PathTable, m_context.GetPipDataBuilder()))
+            using (var processBuilder = ProcessBuilder.Create(PathTable, m_context.GetPipDataBuilder(), m_frontEndHost.Configuration))
             {
                 // Configure the process to add an assortment of settings: arguments, response file, etc.
                 if (!TryConfigureProcessBuilder(processBuilder, pipConstructionHelper, project, deltaGlobalProperties, out AbsolutePath outputResultCacheFile, out failureDetail))
@@ -513,10 +517,10 @@ namespace BuildXL.FrontEnd.MsBuild
             // to avoid a large number of path sets
             processBuilder.Options |= Process.Options.EnforceWeakFingerprintAugmentation;
 
-            // By default the double write policy is to allow same content double writes.
-            processBuilder.DoubleWritePolicy |= m_resolverSettings.DoubleWritePolicy ?? DoubleWritePolicy.AllowSameContentDoubleWrites;
+            // By default the double write policy is to allow same content double writes
+            processBuilder.RewritePolicy |= m_resolverSettings.DoubleWritePolicy ?? RewritePolicy.AllowSameContentDoubleWrites;
 
-            SetUntrackedFilesAndDirectories(processBuilder);
+            SetUntrackedFilesAndDirectories(processBuilder.WorkingDirectory, processBuilder);
 
             // Add the log directory and its corresponding files
             AbsolutePath logDirectory = GetLogDirectory(project, deltaGlobalProperties);
@@ -747,7 +751,7 @@ namespace BuildXL.FrontEnd.MsBuild
             }
         }
 
-        private void SetUntrackedFilesAndDirectories(ProcessBuilder processBuilder)
+        private void SetUntrackedFilesAndDirectories(AbsolutePath projectRoot, ProcessBuilder processBuilder)
         {
             // On some machines, the current user and public user desktop.ini are read by Powershell.exe.
             // Ignore accesses to the user profile and Public common user profile.
@@ -758,7 +762,7 @@ namespace BuildXL.FrontEnd.MsBuild
                 processBuilder.AddUntrackedDirectoryScope(DirectoryArtifact.CreateWithZeroPartialSealId(AbsolutePath.Create(PathTable, publicDir)));
             }
 
-            PipConstructionUtilities.UntrackUserConfigurableArtifacts(processBuilder, m_resolverSettings);
+            PipConstructionUtilities.UntrackUserConfigurableArtifacts(PathTable, projectRoot, m_allProjectRoots, processBuilder, m_resolverSettings);
 
             // Git accesses should be ignored if .git directory is there
             var gitDirectory = Root.Combine(PathTable, ".git");

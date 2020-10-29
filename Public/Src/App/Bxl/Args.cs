@@ -365,6 +365,9 @@ namespace BuildXL
                             "disableCompositeOpaqueFilters",
                             sign => schedulingConfiguration.DisableCompositeOpaqueFilters = sign),
                         OptionHandlerFactory.CreateBoolOption(
+                            "disableIsObsoleteCheckDuringConversion",
+                            sign => frontEndConfiguration.DisableIsObsoleteCheckDuringConversion = sign),
+                        OptionHandlerFactory.CreateBoolOption(
                             "distributeCacheLookups",
                             sign => distributionConfiguration.DistributeCacheLookups = sign),
                         OptionHandlerFactory.CreateOption2(
@@ -398,26 +401,13 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "enableHistoricCommitMemoryProjection",
                             sign => schedulingConfiguration.EnableHistoricCommitMemoryProjection = sign),
-                        OptionHandlerFactory.CreateBoolOption(
-                            "enableDedup",
-                            sign =>
-                            {
-                                if (sign)
-                                {
-                                    ContentHashingUtilities.SetDefaultHashType(HashType.DedupNodeOrChunk);
-                                    cacheConfiguration.UseDedupStore = true;
-                                }
-                            }),
                         OptionHandlerFactory.CreateOption(
                             "hashType",
                             option =>
                             {
                                 var hashType = option.Value.FindHashTypeByName();
                                 ContentHashingUtilities.SetDefaultHashType(hashType);
-                                if (hashType == HashType.DedupNodeOrChunk)
-                                {
-                                    cacheConfiguration.UseDedupStore = true;
-                                }
+                                cacheConfiguration.UseDedupStore = hashType.IsValidDedup();
                             }),
                         OptionHandlerFactory.CreateBoolOption(
                             "enableGrpc",
@@ -490,6 +480,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "fileChangeTrackingInclusionRoot",
                             opt => cacheConfiguration.FileChangeTrackingInclusionRoots.Add(CommandLineUtilities.ParsePathOption(opt, pathTable))),
+                        OptionHandlerFactory.CreateOption(
+                            "fileContentTableEntryTimeToLive",
+                            opt => cacheConfiguration.FileContentTableEntryTimeToLive = (ushort)CommandLineUtilities.ParseInt32Option(opt, 1, short.MaxValue)),
                         OptionHandlerFactory.CreateOption(
                             "fileContentTableFile",
                             opt => layoutConfiguration.FileContentTableFile = CommandLineUtilities.ParsePathOption(opt, pathTable)),
@@ -676,6 +669,9 @@ namespace BuildXL
                             "maxCacheLookup",
                             opt => schedulingConfiguration.MaxCacheLookup = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
+                            "maxChooseWorkerCacheLookup",
+                            opt => schedulingConfiguration.MaxChooseWorkerCacheLookup = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
+                         OptionHandlerFactory.CreateOption(
                             "maxChooseWorkerCpu",
                             opt => schedulingConfiguration.MaxChooseWorkerCpu = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateOption2(
@@ -734,6 +730,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "maxTypeCheckingConcurrency",
                             opt => frontEndConfiguration.MaxTypeCheckingConcurrency = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
+                        OptionHandlerFactory.CreateOption(
+                            "maxWorkersPerModule",
+                            opt => schedulingConfiguration.MaxWorkersPerModule = CommandLineUtilities.ParseInt32Option(opt, 0, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
                             "minAvailableRamMb",
                             opt => schedulingConfiguration.MinimumTotalAvailableRamMb = CommandLineUtilities.ParseInt32Option(opt, 0, int.MaxValue)),
@@ -889,7 +888,7 @@ namespace BuildXL
                                 var parsedOption = CommandLineUtilities.ParseEnumOption<SandboxKind>(opt);
 #if PLATFORM_OSX
                                 var isEndpointSecurityOrHybridSandboxKind = (parsedOption == SandboxKind.MacOsEndpointSecurity || parsedOption == SandboxKind.MacOsHybrid);
-                                if (isEndpointSecurityOrHybridSandboxKind && !OperatingSystemHelper.IsMacOSCatalinaOrHigher)
+                                if (isEndpointSecurityOrHybridSandboxKind && !OperatingSystemHelper.IsMacWithoutKernelExtensionSupport)
                                 {
                                     parsedOption = SandboxKind.MacOsKext;
                                 }
@@ -1011,6 +1010,9 @@ namespace BuildXL
                             "translateDirectory",
                             opt => ParseTranslateDirectoriesOption(pathTable, opt, engineConfiguration.DirectoriesToTranslate)),
                         OptionHandlerFactory.CreateBoolOption(
+                            "treatAbsentDirectoryAsExistentUnderOpaque",
+                            sign => schedulingConfiguration.TreatAbsentDirectoryAsExistentUnderOpaque = sign),
+                        OptionHandlerFactory.CreateBoolOption(
                             "treatDirectoryAsAbsentFileOnHashingInputContent",
                             sign => schedulingConfiguration.TreatDirectoryAsAbsentFileOnHashingInputContent = sign),
                         OptionHandlerFactory.CreateBoolOption(
@@ -1114,14 +1116,15 @@ namespace BuildXL
                             },
                             isUnsafe: true),
                         OptionHandlerFactory.CreateBoolOption(
-                            "unsafe_IgnoreFullSymlinkResolving",
+                            "unsafe_IgnoreFullReparsePointResolving",
                             sign =>
                             {
                                 if (sign && OperatingSystemHelper.IsUnixOS)
                                 {
-                                    throw CommandLineUtilities.Error("/unsafe_IgnoreFullSymlinkResolving not allowed on non-Windows OS");
+                                    throw CommandLineUtilities.Error("/unsafe_IgnoreFullReparsePointResolving not allowed on non-Windows OS");
                                 }
-                                sandboxConfiguration.UnsafeSandboxConfigurationMutable.IgnoreFullSymlinkResolving = sign;
+                                sandboxConfiguration.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = sign;
+                                sandboxConfiguration.UnsafeSandboxConfigurationMutable.EnableFullReparsePointResolving = !sign;
                             },
                             isUnsafe: true),
                         OptionHandlerFactory.CreateBoolOption(
@@ -1135,8 +1138,8 @@ namespace BuildXL
                             "unsafe_IgnoreDynamicWritesOnAbsentProbes",
                             (opt, sign) =>
                             {
-                                var value = CommandLineUtilities.ParseBoolEnumOption(opt, sign, 
-                                    trueValue: DynamicWriteOnAbsentProbePolicy.IgnoreAll, 
+                                var value = CommandLineUtilities.ParseBoolEnumOption(opt, sign,
+                                    trueValue: DynamicWriteOnAbsentProbePolicy.IgnoreAll,
                                     falseValue: DynamicWriteOnAbsentProbePolicy.IgnoreNothing);
                                 sandboxConfiguration.UnsafeSandboxConfigurationMutable.IgnoreDynamicWritesOnAbsentProbes = value;
                             },
@@ -1211,8 +1214,16 @@ namespace BuildXL
                                 }
                             },
                             isUnsafe: true),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "unsafe_SkipFlaggingSharedOpaqueOutputs",
+                            sign => { sandboxConfiguration.UnsafeSandboxConfigurationMutable.SkipFlaggingSharedOpaqueOutputs = sign; },
+                            isUnsafe: true),
                         // </ end unsafe options>
-                         OptionHandlerFactory.CreateBoolOption(
+
+                        OptionHandlerFactory.CreateBoolOption(
+                            "updateFileContentTableByScanningChangeJournal",
+                            sign => schedulingConfiguration.UpdateFileContentTableByScanningChangeJournal = sign),
+                        OptionHandlerFactory.CreateBoolOption(
                             "useCustomPipDescriptionOnConsole",
                             sign => loggingConfiguration.UseCustomPipDescriptionOnConsole = sign),
                         OptionHandlerFactory.CreateBoolOption(
@@ -1301,6 +1312,14 @@ namespace BuildXL
                                 }
                             }
                         ),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "enablePlugins",
+                            sign => schedulingConfiguration.EnablePlugin = sign),
+
+                        OptionHandlerFactory.CreateOption(
+                            "pluginPaths",
+                            opt => schedulingConfiguration.PluginLocations.AddRange(CommandLineUtilities.ParseRepeatingPathOption(opt, pathTable, ";"))),
+
                         /////////// ATTENTION
                         // When you insert new options, maintain the alphabetical order as much as possible, at least
                         // according to the long names of the options. For details, please read the constraints specified as notes
@@ -1478,8 +1497,8 @@ namespace BuildXL
             {
                 startupConfiguration.ABTestingArgs.Add(key, string.Empty);
                 // AB testing argument might be chosen before BuildXL is started; for instance, GenericBuildRunner in CloudBuild.
-                // In those cases, we do not choose one among /abTesting args, instead use the one provided. 
-                // That argument is already applied, so we just need to set ChosenABTestingKey. 
+                // In those cases, we do not choose one among /abTesting args, instead use the one provided.
+                // That argument is already applied, so we just need to set ChosenABTestingKey.
                 startupConfiguration.ChosenABTestingKey = key;
                 return;
             }
@@ -1504,7 +1523,7 @@ namespace BuildXL
                 {
                     helper.Add(loggingConfiguration.RelatedActivityId);
                     // NetCORE string.GetHashCode() is not deterministic across program executions unlike net472.
-                    // Each execution can give a different number with netcore implementation of GetHashCode. 
+                    // Each execution can give a different number with netcore implementation of GetHashCode.
                     // That's why, we use HashingHelper to get fingerprint and then get hashcode with our own implementation.
                     randomGen = new Random(helper.GenerateHash().GetHashCode());
                 }
@@ -1541,7 +1560,7 @@ namespace BuildXL
 
         private void SetEngineConfigurationVersionIfSpecified(CommandLineUtilities cl)
         {
-            var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var properties = new Dictionary<string, string>(OperatingSystemHelper.EnvVarComparer);
 
             foreach (CommandLineUtilities.Option opt in cl.Options)
             {
@@ -1989,7 +2008,7 @@ namespace BuildXL
                 case "RUNINCONTAINERANDALLOWDOUBLEWRITES":
                     sandboxConfiguration.ContainerConfiguration.RunInContainer = experimentalOptionAndValue.Item2;
                     sandboxConfiguration.ContainerConfiguration.ContainerIsolationLevel = ContainerIsolationLevel.IsolateAllOutputs;
-                    sandboxConfiguration.UnsafeSandboxConfigurationMutable.DoubleWritePolicy = DoubleWritePolicy.UnsafeFirstDoubleWriteWins;
+                    sandboxConfiguration.UnsafeSandboxConfigurationMutable.DoubleWritePolicy = RewritePolicy.UnsafeFirstDoubleWriteWins;
                     break;
                 case "LAZYSODELETION":
                     scheduleConfiguration.UnsafeLazySODeletion = experimentalOptionAndValue.Item2;

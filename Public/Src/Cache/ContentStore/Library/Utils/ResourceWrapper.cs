@@ -7,6 +7,7 @@ using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Service.Grpc;
 
 namespace BuildXL.Cache.ContentStore.Utils
 {
@@ -14,8 +15,12 @@ namespace BuildXL.Cache.ContentStore.Utils
     /// Wrapper for a resource within a <see cref="ResourcePool{TKey, TObject}"/>.
     /// </summary>
     /// <typeparam name="TObject">The wrapped type.</typeparam>
-    public sealed class ResourceWrapper<TObject> : IDisposable where TObject : IStartupShutdownSlim
+    public sealed class ResourceWrapper<TObject> : IDisposable
+        where TObject: IStartupShutdownSlim
     {
+        private readonly bool _shutdownOnDispose;
+        private readonly Context _context;
+
         internal DateTime LastUseTime;
         private int _uses;
         internal readonly Lazy<TObject> Resource;
@@ -35,10 +40,13 @@ namespace BuildXL.Cache.ContentStore.Utils
         /// </summary>
         public TObject Value => Resource.Value;
 
+        /// <nodoc />
+        public bool Invalid { get; private set; }
+
         /// <summary>
         /// Constructor.
         /// </summary>
-        public ResourceWrapper(Func<TObject> resourceFactory, Context context)
+        public ResourceWrapper(Func<TObject> resourceFactory, Context context, bool shutdownOnDispose = false)
         {
             LastUseTime = DateTime.MinValue;
             Resource = new Lazy<TObject>(() => {
@@ -46,6 +54,9 @@ namespace BuildXL.Cache.ContentStore.Utils
                 var result = resource.StartupAsync(context).ThrowIfFailure().GetAwaiter().GetResult();
                 return resource;
             });
+
+            _shutdownOnDispose = shutdownOnDispose;
+            _context = context;
         }
 
         /// <summary>
@@ -77,6 +88,12 @@ namespace BuildXL.Cache.ContentStore.Utils
             return false;
         }
 
+        /// <nodoc />
+        public void Invalidate()
+        {
+            Invalid = true;
+        }
+
         /// <summary>
         /// Attempt to prepare the resource for shutdown, based on current uses and last use time.
         /// </summary>
@@ -103,6 +120,11 @@ namespace BuildXL.Cache.ContentStore.Utils
             lock (this)
             {
                 _uses--;
+            }
+
+            if (_shutdownOnDispose && Resource.IsValueCreated)
+            {
+                _ = Value.ShutdownAsync(_context).GetAwaiter().GetResult();
             }
         }
     }

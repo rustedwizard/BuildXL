@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Runtime.Serialization;
+using BuildXL.Cache.ContentStore.Grpc;
 
 namespace BuildXL.Cache.Host.Configuration
 {
@@ -12,7 +13,6 @@ namespace BuildXL.Cache.Host.Configuration
         public const string DefaultFileName = "CASaaS GRPC port";
 
         public const string DefaultCacheName = "DEFAULT";
-        public const string InProcCacheName = "INPROC";
 
         public const uint DefaultGracefulShutdownSeconds = 15;
         public const uint DefaultMaxPipeListeners = 128;
@@ -29,8 +29,7 @@ namespace BuildXL.Cache.Host.Configuration
             uint grpcPort = 0,
             string grpcPortFileName = null,
             int? bufferSizeForGrpcCopies = null,
-            int? gzipBarrierSizeForGrpcCopies = null,
-            int? grpcThreadPoolSize = null
+            int? gzipBarrierSizeForGrpcCopies = null
             )
         {
             DefaultSingleInstanceTimeoutSec = defaultSingleInstanceTimeoutSec;
@@ -41,7 +40,6 @@ namespace BuildXL.Cache.Host.Configuration
             GrpcPortFileName = grpcPortFileName;
             BufferSizeForGrpcCopies = bufferSizeForGrpcCopies;
             GzipBarrierSizeForGrpcCopies = gzipBarrierSizeForGrpcCopies;
-            GrpcThreadPoolSize = grpcThreadPoolSize;
         }
 
         /// <summary>
@@ -114,10 +112,12 @@ namespace BuildXL.Cache.Host.Configuration
         [DataMember]
         public int? GzipBarrierSizeForGrpcCopies { get; set; } = null;
 
-        /// <summary>
-        /// Thread pool size used by GRPC.
-        /// </summary>
+        /// <nodoc />
         [DataMember]
-        public int? GrpcThreadPoolSize { get; set; } = null;
+        public GrpcCoreServerOptions GrpcCoreServerOptions { get; set; }
+
+        /// <nodoc />
+        [DataMember]
+        public GrpcEnvironmentOptions GrpcEnvironmentOptions { get; set; }
     }
 }

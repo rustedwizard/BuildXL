@@ -41,6 +41,7 @@ using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
 using ProcessNativeMethods = BuildXL.Native.Processes.ProcessUtilities;
 using TracingLogEventId = BuildXL.Tracing.LogEventId;
 using PipsLogEventId = BuildXL.Pips.Tracing.LogEventId;
+using PluginLogEventId = BuildXL.Plugin.Tracing.LogEventId;
 using StorageLogEventId = BuildXL.Storage.Tracing.LogEventId;
 
 using Strings = bxl.Strings;
@@ -48,6 +49,7 @@ using Strings = bxl.Strings;
 using BuildXL.Utilities.CrashReporting;
 
 using static BuildXL.Utilities.FormattableStringEx;
+using System.Runtime.InteropServices;
 
 namespace BuildXL
 {
@@ -223,6 +225,8 @@ namespace BuildXL
                 ConfigureCacheMissLogging(pathTable, mutableConfig);
             }
 
+            ConfigurePluginLogging(pathTable, mutableConfig);
+
             m_configuration = mutableConfig;
             m_initialConfiguration = mutableConfig;
 
@@ -264,6 +268,25 @@ namespace BuildXL
                     (int)BuildXL.Scheduler.Tracing.LogEventId.FingerprintStoreSavingFailed,
                     (int)BuildXL.Scheduler.Tracing.LogEventId.FingerprintStoreToCompareTrace,
                     (int)BuildXL.Scheduler.Tracing.LogEventId.SuccessLoadFingerprintStoreToCompare
+                },
+                null));
+        }
+
+        private static void ConfigurePluginLogging(PathTable pathTable, BuildXL.Utilities.Configuration.Mutable.CommandLineConfiguration mutableConfig)
+        {
+            mutableConfig.Logging.CustomLog.Add(
+                mutableConfig.Logging.PluginLog,
+                (new[]
+                {
+                    (int)PluginLogEventId.PluginManagerStarting,
+                    (int)PluginLogEventId.PluginManagerLoadingPlugin,
+                    (int)PluginLogEventId.PluginManagerLogMessage,
+                    (int)PluginLogEventId.PluginManagerLoadingPluginsFinished,
+                    (int)PluginLogEventId.PluginManagerSendOperation,
+                    (int)PluginLogEventId.PluginManagerResponseReceived,
+                    (int)PluginLogEventId.PluginManagerShutDown,
+                    (int)PluginLogEventId.PluginManagerForwardedPluginClientMessage,
+                    (int)PluginLogEventId.PluginManagerErrorMessage
                 },
                 null));
         }
@@ -1286,6 +1309,7 @@ namespace BuildXL
                     global::BuildXL.Native.ETWLogger.Log,
                     global::BuildXL.Storage.ETWLogger.Log,
                     global::BuildXL.Processes.ETWLogger.Log,
+                    global::BuildXL.Plugin.ETWLogger.Log,
                }.Concat(
                 FrontEndControllerFactory.GeneratedEventSources
             );
@@ -1812,17 +1836,53 @@ namespace BuildXL
         /// </returns>
         private PerformanceCollector CreateCounterCollectorIfEnabled(LoggingContext loggingContext)
         {
-            if (m_configuration.Logging.LogMemory)
+            var stopwatch = new StopwatchVar();
+            PerformanceCollector collector = null;
+
+            using (stopwatch.Start())
             {
-                Logger.Log.MemoryLoggingEnabled(loggingContext);
+                if (m_configuration.Logging.LogMemory)
+                {
+                    Logger.Log.MemoryLoggingEnabled(loggingContext);
+                }
+
+                if (m_configuration.Logging.LogCounters)
+                {
+                    collector = new PerformanceCollector(
+                        TimeSpan.FromMilliseconds(EngineSchedule.UpdateStatusIntervalMs),
+                        m_configuration.Logging.LogMemory,
+                        (ex) => Logger.Log.PerformanceCollectorInitializationFailed(loggingContext, ex.Message),
+                        queryJobObject: BuildXLJobObjectCpu);
+                }
             }
 
-            if (m_configuration.Logging.LogCounters)
+            Tracing.Logger.Log.Statistic(
+                loggingContext,
+                new Statistic()
+                {
+                    Name = Statistics.PerformanceCollectorInitializationDurationMs,
+                    Value = (long)stopwatch.TotalElapsed.TotalMilliseconds,
+                });
+
+            return collector;
+        }
+
+        [SuppressMessage("Microsoft.Design", "CA1024:UsePropertiesWhereAppropriate")]
+        private static unsafe (ulong? KernelTime, ulong? UserTime, ulong? NumProcesses) BuildXLJobObjectCpu()
+        {
+            var info = default(JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION);
+
+            if (!Native.Processes.ProcessUtilities.QueryInformationJobObject(
+                  IntPtr.Zero,
+                  JOBOBJECTINFOCLASS.JobObjectBasicAndIOAccountingInformation,
+                  &info,
+                  (uint)Marshal.SizeOf(info),
+                  out _))
             {
-                return new PerformanceCollector(TimeSpan.FromSeconds(1), m_configuration.Logging.LogMemory);
+                return (null, null, null);
             }
 
-            return null;
+            return (info.BasicAccountingInformation.TotalKernelTime, info.BasicAccountingInformation.TotalUserTime, info.BasicAccountingInformation.TotalProcesses);
         }
 
         internal void OnUnexpectedCondition(string condition)
@@ -1885,6 +1945,12 @@ namespace BuildXL
                 // be immediately debugged. The sample user scenario is having cdb/ntsd
                 // being attached during BuildXL builds.
                 NativeMethods.LaunchDebuggerIfAttached();
+            }
+
+            if (ExceptionUtilities.IsKnownUnobservedException(exception))
+            {
+                // Avoid crashing on well know innocuous unobserved exceptions
+                return;
             }
 
             // Given some conditions like running out of disk space, many threads may start crashing at once.
@@ -2110,10 +2176,7 @@ namespace BuildXL
             var asyncLoggingContext = new LoggingContext(loggingContext.ActivityId, loggingContext.LoggerComponentInfo, loggingContext.Session, loggingContext, loggingQueue);
 
             BuildXLEngineResult result = null;
-            // All async logging needs to complete before code that checks the state of logging contexts or tracking event listeners.
-            // The interactions with app loggers (specifically with the TrackingEventListener) presume all
-            // logged events have been flushed. If async logging were still active the state may not be correct
-            // with respect to the Engine's return value.
+            
             using (loggingQueue?.EnterAsyncLoggingScope(asyncLoggingContext))
             {
                 result = engine.Run(asyncLoggingContext, engineState);
@@ -2121,18 +2184,23 @@ namespace BuildXL
 
             Contract.AssertNotNull(result, "Running the engine should return a valid engine result.");
 
+            if (!result.IsSuccess)
+            {
+                // When async logging is enabled, all async logging needs to complete before the following code that checks for
+                // the state of logging contexts or tracking event listeners.
+                // The interactions with app loggers (specifically with the TrackingEventListener) presume all
+                // logged events have been flushed. If async logging were still active the state may not be correct
+                // with respect to the Engine's return value.
+
+                Contract.Assert(
+                    (trackingEventListener == null || trackingEventListener.HasFailures) && loggingContext.ErrorWasLogged,
+                    I($"The build has failed but the logging infrastructure has not encountered an error: TrackingEventListener has errors: {trackingEventListener == null || trackingEventListener.HasFailures} | LoggingContext has errors: [{string.Join(", ", loggingContext.ErrorsLoggedById.ToArray())}]"));
+            }
+
             // Graph caching complicates some things. we'll have to reload state which invalidates the pathtable and everything that holds
             // a pathtable like configuration.
             m_pathTable = engine.Context.PathTable;
             m_configuration = engine.Configuration;
-
-            if (!result.IsSuccess)
-            {
-                // if this returns false, we better have seen some errors being logged
-                Contract.Assert(
-                    trackingEventListener.HasFailures && loggingContext.ErrorWasLogged,
-                    I($"The build has failed but the logging infrastructure has not encountered an error. TrackingEventListener has errors:[{trackingEventListener.HasFailures}.] LoggingContext has errors:[{string.Join(", ", loggingContext.ErrorsLoggedById.ToArray())}]"));
-            }
 
             var engineRunDuration = (int)(DateTime.UtcNow - m_startTimeUtc).TotalMilliseconds;
 

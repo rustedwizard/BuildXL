@@ -58,7 +58,13 @@ namespace BuildXL.Storage.ChangeTracking
         /// <summary>
         /// Envelope for serialization
         /// </summary>
-        public static readonly FileEnvelope FileEnvelope = new FileEnvelope(name: nameof(FileChangeTracker), version: 9);
+        /// <remarks>
+        /// 10: Added All supersede mode.
+        /// 11: Added FileAndParents supersede mode.
+        /// 12: Supersede directory tracking.
+        /// 13: Remove kinds of supersede mode.
+        /// </remarks>
+        public static readonly FileEnvelope FileEnvelope = new FileEnvelope(name: nameof(FileChangeTracker), version: 13);
 
         private int m_trackingStateValue;
 
@@ -627,14 +633,18 @@ namespace BuildXL.Storage.ChangeTracking
         /// The membership of the directory will be invalidated if a name is added or removed directly inside the directory (i.e., when <c>FindFirstFile</c>
         /// and <c>FindNextFile</c> would see a different set of names).
         /// </summary>
-        public Possible<FileChangeTrackingSet.EnumerationResult> TryEnumerateDirectoryAndTrackMembership(string path, Action<string, FileAttributes> handleEntry)
+        public Possible<FileChangeTrackingSet.EnumerationResult> TryEnumerateDirectoryAndTrackMembership(
+            string path,
+            Action<string, FileAttributes> handleEntry,
+            Func<string, FileAttributes, bool> shouldIncludeEntry,
+            bool supersedeWithStrongIdentity)
         {
             Contract.Requires(!string.IsNullOrWhiteSpace(path));
             Contract.Requires(handleEntry != null);
 
             if (IsDisabledOrNullTrackingSet)
             {
-                var possibleFingerprintResult = DirectoryMembershipTrackingFingerprinter.ComputeFingerprint(path, handleEntry);
+                var possibleFingerprintResult = DirectoryMembershipTrackingFingerprinter.ComputeFingerprint(path, handleEntry, shouldIncludeEntry);
                 if (!possibleFingerprintResult.Succeeded)
                 {
                     return possibleFingerprintResult.Failure;
@@ -650,7 +660,10 @@ namespace BuildXL.Storage.ChangeTracking
             // (and if additional tracking succeeds while disabled, there's no harm).
             Possible<FileChangeTrackingSet.EnumerationResult> possibleEnumerationResult = m_changeTrackingSet.TryEnumerateDirectoryAndTrackMembership(
                 path,
-                handleEntry);
+                handleEntry,
+                shouldIncludeEntry,
+                fingerprintFilter: null,
+                supersedeWithStrongIdentity: supersedeWithStrongIdentity);
 
             if (!possibleEnumerationResult.Succeeded)
             {
@@ -666,7 +679,8 @@ namespace BuildXL.Storage.ChangeTracking
         /// </summary>
         public Possible<FileChangeTrackingSet.EnumerationResult> TryTrackDirectoryMembership(
             string path,
-            IReadOnlyList<(string, FileAttributes)> members)
+            IReadOnlyList<(string, FileAttributes)> members,
+            bool supersedeWithStrongIdentity)
         {
             Contract.Requires(!string.IsNullOrWhiteSpace(path));
 
@@ -679,7 +693,10 @@ namespace BuildXL.Storage.ChangeTracking
                     new Failure<string>("Tracking set is disabled"));
             }
 
-            Possible<FileChangeTrackingSet.EnumerationResult> possibleEnumerationResult = m_changeTrackingSet.TryTrackDirectoryMembership(path, members);
+            Possible<FileChangeTrackingSet.EnumerationResult> possibleEnumerationResult = m_changeTrackingSet.TryTrackDirectoryMembership(
+                path,
+                members,
+                supersedeWithStrongIdentity);
 
             if (!possibleEnumerationResult.Succeeded)
             {
@@ -841,7 +858,10 @@ namespace BuildXL.Storage.ChangeTracking
                 if (!scanningJournalResult.Succeeded)
                 {
                     m_trackingStateValue = (int)FileChangeTrackingState.BuildingInitialChangeTrackingSet;
-                    m_changeTrackingSet = FileChangeTrackingSet.CreateForAllCapableVolumes(m_loggingContext, m_volumeMap, m_journal);
+                    m_changeTrackingSet = FileChangeTrackingSet.CreateForAllCapableVolumes(
+                        m_loggingContext,
+                        m_volumeMap,
+                        m_journal);
                 }
 
                 ReportProcessChangesCompletion(scanningJournalResult);

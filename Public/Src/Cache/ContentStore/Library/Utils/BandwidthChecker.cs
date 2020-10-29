@@ -4,17 +4,20 @@
 using System;
 using System.Diagnostics;
 using System.Diagnostics.ContractsLight;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
+using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.Host.Configuration;
+
+#nullable enable
 
 namespace BuildXL.Cache.ContentStore.Utils
 {
     /// <summary>
-    /// Checks that a copy has a minimum bandwidth, and cancells copies otherwise.
+    /// Checks that a copy has a minimum bandwidth, and cancels copies otherwise.
     /// </summary>
     public class BandwidthChecker
     {
@@ -39,8 +42,14 @@ namespace BuildXL.Cache.ContentStore.Utils
         /// </summary>
         /// <param name="context">The context of the operation.</param>
         /// <param name="copyTaskFactory">Function that will trigger the copy.</param>
-        /// <param name="destinationStream">Stream into which the copy is being made. Used to measure bandwidth.</param>
-        public async Task<CopyFileResult> CheckBandwidthAtIntervalAsync(OperationContext context, Func<CancellationToken, Task<CopyFileResult>> copyTaskFactory, Stream destinationStream)
+        /// <param name="options">An option instance that controls the copy operation and allows getting the progress.</param>
+        /// <param name="getErrorResult">Function to get the result in case of a badwidth timeout</param>
+        public async Task<TResult> CheckBandwidthAtIntervalAsync<TResult>(
+            OperationContext context,
+            Func<CancellationToken, Task<TResult>> copyTaskFactory,
+            CopyOptions options,
+            Func<string, TResult> getErrorResult)
+            where TResult : ICopyResult
         {
             if (_historicalBandwidthLimitSource != null)
             {
@@ -59,35 +68,44 @@ namespace BuildXL.Cache.ContentStore.Utils
                 return (await impl()).result;
             }
 
-            async Task<(CopyFileResult result, long bytesCopied)> impl()
+            async Task<(TResult result, long bytesCopied)> impl()
             {
                 // This method should not fail with exceptions because the resulting task may be left unobserved causing an application to crash
                 // (given that the app is configured to fail on unobserved task exceptions).
                 var minimumSpeedInMbPerSec = _bandwidthLimitSource.GetMinimumSpeedInMbPerSec() * _config.BandwidthLimitMultiplier;
                 minimumSpeedInMbPerSec = Math.Min(minimumSpeedInMbPerSec, _config.MaxBandwidthLimit);
 
-                var startPosition = tryGetPosition(destinationStream, out var pos) ? pos : 0;
+                long startPosition = options.TotalBytesCopied;
                 long previousPosition = startPosition;
                 var copyCompleted = false;
                 using var copyCancellation = CancellationTokenSource.CreateLinkedTokenSource(context.Token);
-                var copyTask = copyTaskFactory(copyCancellation.Token);
+
+                Task<TResult> copyTask = copyTaskFactory(copyCancellation.Token);
 
                 // Subscribing for potential task failure here to avoid unobserved task exceptions.
-                traceCopyTaskFailures(copyTask);
+                traceCopyTaskFailures();
 
                 while (!copyCompleted)
                 {
                     // Wait some time for bytes to be copied
+                    var configBandwidthCheckInterval = options.BandwidthConfiguration?.Interval ?? _config.BandwidthCheckInterval;
+
+                    if (options.BandwidthConfiguration != null)
+                    {
+                        minimumSpeedInMbPerSec = options.BandwidthConfiguration.RequiredMegabytesPerSecond;
+                    }
+
                     var firstCompletedTask = await Task.WhenAny(copyTask,
-                        Task.Delay(_config.BandwidthCheckInterval, context.Token));
+                        Task.Delay(configBandwidthCheckInterval, context.Token));
 
                     copyCompleted = firstCompletedTask == copyTask;
                     if (copyCompleted)
                     {
                         var result = await copyTask;
                         result.MinimumSpeedInMbPerSec = minimumSpeedInMbPerSec;
-                        var bytesCopied = result.Size ?? (previousPosition - startPosition);
+                        var bytesCopied = result.Size ?? options.TotalBytesCopied;
 
+                        TrackBytesReceived(bytesCopied - previousPosition);
                         return (result, bytesCopied);
                     }
                     else if (context.Token.IsCancellationRequested)
@@ -97,29 +115,33 @@ namespace BuildXL.Cache.ContentStore.Utils
 
                     // Copy is not completed and operation has not been canceled, perform
                     // bandwidth check
-                    if (tryGetPosition(destinationStream, out var position))
+                    var position = options.TotalBytesCopied;
+
+                    var bytesTransferredPerIteration = position - previousPosition;
+
+                    TrackBytesReceived(bytesTransferredPerIteration);
+
+                    var receivedMiB = bytesTransferredPerIteration / BytesInMb;
+                    var currentSpeed = receivedMiB / configBandwidthCheckInterval.TotalSeconds;
+
+                    if (currentSpeed == 0 || currentSpeed < minimumSpeedInMbPerSec)
                     {
-                        var receivedMiB = (position - previousPosition) / BytesInMb;
-                        var currentSpeed = receivedMiB / _config.BandwidthCheckInterval.TotalSeconds;
-                        if (currentSpeed == 0 || currentSpeed < minimumSpeedInMbPerSec)
-                        {
-                            // Ensure that we signal the copy to cancel
-                            copyCancellation.Cancel();
+                        copyCancellation.Cancel();
 
-                            var bytesCopied = position - startPosition;
-                            var result = new CopyFileResult(CopyResultCode.CopyBandwidthTimeoutError, $"Average speed was {currentSpeed}MiB/s - under {minimumSpeedInMbPerSec}MiB/s requirement. Aborting copy with {bytesCopied} bytes copied");
-                            return (result, bytesCopied);
-                        }
-
-                        previousPosition = position;
+                        var totalBytesCopied = position - startPosition;
+                        var result = getErrorResult(
+                            $"Average speed was {currentSpeed}MiB/s - under {minimumSpeedInMbPerSec}MiB/s requirement. Aborting copy with {totalBytesCopied} bytes copied (received {bytesTransferredPerIteration} bytes in {configBandwidthCheckInterval.TotalSeconds} seconds).");
+                        return (result, totalBytesCopied);
                     }
+
+                    previousPosition = position;
                 }
 
                 var copyFileResult = await copyTask;
                 copyFileResult.MinimumSpeedInMbPerSec = minimumSpeedInMbPerSec;
                 return (copyFileResult, previousPosition - startPosition);
 
-                void traceCopyTaskFailures(Task task)
+                void traceCopyTaskFailures()
                 {
                     // When the operation is cancelled, it is possible for the copy operation to fail.
                     // In this case we still want to trace the failure (but just with the debug severity and not with the error),
@@ -137,23 +159,9 @@ namespace BuildXL.Cache.ContentStore.Utils
                     });
                 }
             }
-
-            static bool tryGetPosition(Stream stream, out long position)
-            {
-                try
-                {
-                    position = stream.Position;
-                    return true;
-                }
-                catch (ObjectDisposedException)
-                {
-                    // If the check task races with the copy completing, it might attempt to check the position of a disposed stream.
-                    // Don't bother logging because the copy completed successfully.
-                    position = 0;
-                    return false;
-                }
-            }
         }
+
+        private static void TrackBytesReceived(long bytesTransferredPerIteration) => CacheActivityTracker.AddValue(CaSaaSActivityTrackingCounters.RemoteCopyBytes, bytesTransferredPerIteration);
 
         /// <nodoc />
         public class Configuration

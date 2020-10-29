@@ -1,6 +1,114 @@
 This page is a curated list of the release notes for releases after 0.20170619.4.0 and a manual copy of notable changes from each build before that. See the repo's commit history full details for what is included in each build.
 
 =======
+# 0.1.0-20201023.7.4 (Release [84361](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=84361)) Released 10/28/2020
+- Expose a DScript flag to control full reparse point resolving
+- Detours Reparse Point Resolver Improvements
+- Made directory fingerprint sensible to new undeclared directories for MinimalGraphWithAlienFiles
+- Added support for untracked scopes/paths in output directories
+- Pip executing in VM can access files using newly introduced fixed host name
+- Add Kusto logging support to launcher and deployment service
+- Split TotalMaterializedOutputsSize into two counters: TotalMaterializedOutputsSize and TotalMaterializedApiServerFilesSize
+- Added limiting resource percentages to stats
+- Detours: Implemented ZwSetFileInformationByHandle with FILE_DISPOSITION_INFO_EX
+- Skip IPC pips when materializing outputs by default
+- Minor bug fixes, flaky Unit Test fixes and some performance improvements
+
+# 0.1.0-20201017.0 (Release [83009](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=83009)) Released 10/21/2020
+- ModuleAffinity extra logging when used with earlyWorkerRelease
+- Add a new machine CPU reporting and jobObject stats
+- Untrack AppData and LocalAppData for QTest
+- CancelSuspend mode to avoid slow thrashing
+- Introduce FileAndParents supersede mode to address slowness in file change tracker
+- [QTest support] Expose an option to let bxl communicate the retry attempt number to a pip via an env variable
+- Various bug fixes
+
+# 0.1.0-20201010.0.1 (Release [82325](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=82325)) Released 10/14/2020
+- Support for specifying per process pip retry.
+- Allow for specifying domain id in drop daemon.
+- QTest: change default retry mode to full.
+- Various bug fixes.
+
+# 0.1.0-20201004.2.3 (Release [81534](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=81534)) Released 10/07/2020
+-	Allow creation junctions to non-existent targets.
+-	Some fixes on the managed reparse point resolver.
+-	SymbolDaemon - don't fail on empty SODs 
+-	Fix module affinity hangs.
+-	MaterializationDaemon - retry external parser on failure
+-	Ensure that a service is running before a finalization pip is called.
+-	Increase drop default timeout from 5m to 15m
+
+# 0.1.0-20200927.0 (Release [80424](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=80424)).  Released 9/30/2020
+- Collecting machine counters became non-blocking for Scheduler
+- Optionally disable IsObsolete check during Ast Conversion for perf reasons
+- Expose preserve path casing as a DScript option
+- QTest: Upgrade QTest package version to 20.9.22.220402
+- QTest: Add untrackedPaths argument to QTest
+
+# 0.1.0-20200918.3 (Release [79359](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=79359)).  Released 9/23/2020
+- Materialization daemon: Add support for materializing output directories
+- Support for adding paths to graph file system
+- Add the case for VisualBasic task in VBCSCompiler
+- QTest: Fix DFA issue for target binaries and add retry mode
+- Some polishing on the Lage frontend
+
+# 0.1.0-20200914.5.2 (Release [78915](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=78915)).  Released 9/16/2020
+- Enable full reparse point resolving in Detours
+- Materialization daemon prep work
+- Add plugin support
+- Add file based service lifetime manager
+- Support caching pips producing junctions as outputs
+- Various bug fixes
+
+# 0.1.0-20200828.6.2 (Release [77557](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=77557)).  Released 9/02/2020
+- Scrub RestrictedTemp post build
+- Scrubber does not traverse directory junctions/symlinks anymore
+- Preserve path casing for all Unix systems inside of the observed path sets
+- Add Lage javascript frontend
+- Set shorter fingerprint store GC cancelation timer for short builds
+- Add timeout for fingerprintstore operations
+- Various bug fixes and optimizations
+
+# 0.1.0-20200822.0 (Release [76190](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=76190)).  Released 8/26/2020
+- [QTest] Increate QTest timeout pip so BuildXL doesn’t cancel a test run before dbs.qtest.exe can
+- Escaping for PipDescription in PipExecutionPerformanceAnalyzer
+- Fix semistable hash in some log events
+- Add ContentHasher counters
+- Stop drop uploading temp files within shared opaque directories
+- Misc changes to support chunk dedup
+- Added timeouts for various cache operations
+- More aggressive retries for pips running on Admin VM
+- Logging for per-pip expected and actual disk usage
+
+# 0.1.0-20200814.1 (Release [75164](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=75164)).  Released 8/19/2020
+- Retry processes that fail in VM
+- Use existing artifacts on disk during file materializations in dev mode
+- Safe source rewrite relaxation policy
+- Report intermediate directory symlink resolved paths as probe/read
+
+# 0.1.0-20200807.11.1 (Release [74593](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=74593)).  Released 8/12/2020
+- Fix blolbID mismatch due to incorrect chunkDedup hashes
+-	Enable manageMemoryMode.EmptyWorkingSet by default for CB 
+-	Remove pip description from distribution logs to reduce logging volume
+-	Disable enableEvaluationThrottling by default
+-	Add an env var to disable retry for detours-related failures
+-	Asynchronous FingerprintStore loading
+-	Fix retry crash with pip failing without logging an error
+-	[QTest] Add CorruptCoverageFileFixer package to QTest SDK files
+-	[JavaScript]Add support for untracking directories based on relative paths
+
+# 0.1.0-20200801.0 (Release [73610](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=73610)).  Released 8/5/2020
+- Add symbols support for output directories 
+- Add support for gRPC keepalive
+- Fix KeyNotFoundException in SandboxedProcessPipExecutor
+
+# 0.1.0-20200724.3.1 (Release [73072](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=73072)).  Released 7/29/2020
+- Fix passthrough user-profile environment variables when running in VM
+- Fix several issues with fingerprint store lookups
+- Fix double-write violations on temporary files under shared opaque directories
+- Fix misclassified pip materialization failures
+- Update to latest QTest
+
 # 0.1.0-20200717.1 (Release [71912](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=71912)).  Released 7/22/2020
 -	Perf improvements on junction resolution in detours
 -	Clean dynamic outputs on pip retry
