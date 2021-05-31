@@ -325,6 +325,24 @@ namespace BuildXL.Scheduler.Tracing
         internal abstract void PipMaterializeDependenciesFromCacheTimeoutFailure(LoggingContext loggingContext, string pipDescription, string errorMessage);
 
         [GeneratedEvent(
+            (ushort)LogEventId.PipHydrateFileFailure,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "[{pipDescription}] Failed to hydrate pip dependency '{file}': {errorMessage}")]
+        internal abstract void PipHydrateFileFailure(LoggingContext loggingContext, string pipDescription, string file, string errorMessage);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.PipHydratedFile,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "[{pipDescription}] Hydrated pip dependency '{file}'.")]
+        internal abstract void PipHydratedFile(LoggingContext loggingContext, string pipDescription, string file);
+
+        [GeneratedEvent(
             (ushort)LogEventId.PipMaterializeDependenciesFromCacheFailureDueToFileDeletionFailure,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
@@ -651,7 +669,7 @@ namespace BuildXL.Scheduler.Tracing
         [GeneratedEvent(
              (ushort)LogEventId.PipInputVerificationMismatch,
              EventGenerators = EventGenerators.LocalOnly,
-             Message = "Pip input '{filePath}' has hash '{actualHash}' which does not match expected hash '{expectedHash}' from master.",
+             Message = "Pip input '{filePath}' has hash '{actualHash}' which does not match expected hash '{expectedHash}' from orchestrator.",
              EventLevel = Level.Error,
              EventTask = (ushort)Tasks.Distribution,
              Keywords = (int)(Keywords.UserMessage | Keywords.InfrastructureError))]
@@ -660,7 +678,7 @@ namespace BuildXL.Scheduler.Tracing
         [GeneratedEvent(
              (ushort)LogEventId.PipInputVerificationMismatchForSourceFile,
              EventGenerators = EventGenerators.LocalOnly,
-             Message = "Pip input '{filePath}' has hash '{actualHash}' which does not match expected hash '{expectedHash}' from master. Ensure that source files are properly replicated from the master.",
+             Message = "Pip input '{filePath}' has hash '{actualHash}' which does not match expected hash '{expectedHash}' from orchestrator. Ensure that source files are properly replicated from the orchestrator.",
              EventLevel = Level.Error,
              EventTask = (ushort)Tasks.Distribution,
              Keywords = (int)(Keywords.UserMessage | Keywords.UserError))]
@@ -669,7 +687,7 @@ namespace BuildXL.Scheduler.Tracing
         [GeneratedEvent(
             (ushort)LogEventId.PipInputVerificationMismatchExpectedExistence,
             EventGenerators = EventGenerators.LocalOnly,
-            Message = "Pip input '{filePath}' not found locally, but exists on the master. Ensure that source files are properly replicated from the master.",
+            Message = "Pip input '{filePath}' not found locally, but exists on the orchestrator. Ensure that source files are properly replicated from the orchestrator.",
             EventLevel = Level.Error,
             EventTask = (ushort)Tasks.Distribution,
             Keywords = (int)(Keywords.UserMessage | Keywords.InfrastructureError))]
@@ -678,7 +696,7 @@ namespace BuildXL.Scheduler.Tracing
         [GeneratedEvent(
             (ushort)LogEventId.PipInputVerificationMismatchExpectedNonExistence,
             EventGenerators = EventGenerators.LocalOnly,
-            Message = "Pip input '{filePath}' found locally, but does NOT exist on the master. Ensure that old files are cleaned up and source files are properly replicated from the master.",
+            Message = "Pip input '{filePath}' found locally, but does NOT exist on the orchestrator. Ensure that old files are cleaned up and source files are properly replicated from the orchestrator.",
             EventLevel = Level.Error,
             EventTask = (ushort)Tasks.Distribution,
             Keywords = (int)(Keywords.UserMessage | Keywords.InfrastructureError))]
@@ -692,33 +710,6 @@ namespace BuildXL.Scheduler.Tracing
             EventTask = (ushort)Tasks.Distribution,
             Keywords = (int)Keywords.UserMessage)]
         public abstract void PipInputVerificationUntrackedInput(LoggingContext context, long pipSemiStableHash, string pipDescription, string filePath);
-
-        [GeneratedEvent(
-            (ushort)LogEventId.PipInputVerificationMismatchRecovery,
-            EventGenerators = EventGenerators.LocalOnly,
-            Message = "[{pipDescription}] Pip input '{filePath}' has hash '{actualHash}' which does not match expected hash '{expectedHash}' from master. Attempting to materialize file from cache.",
-            EventLevel = Level.Verbose,
-            EventTask = (ushort)Tasks.Distribution,
-            Keywords = (int)Keywords.UserMessage)]
-        public abstract void PipInputVerificationMismatchRecovery(LoggingContext context, long pipSemiStableHash, string pipDescription, string actualHash, string expectedHash, string filePath);
-
-        [GeneratedEvent(
-            (ushort)LogEventId.PipInputVerificationMismatchRecoveryExpectedExistence,
-            EventGenerators = EventGenerators.LocalOnly,
-            Message = "[{pipDescription}] Pip input '{filePath}' not found locally, but exists on the master. Attempting to materialize file from cache.",
-            EventLevel = Level.Verbose,
-            EventTask = (ushort)Tasks.Distribution,
-            Keywords = (int)Keywords.UserMessage)]
-        public abstract void PipInputVerificationMismatchRecoveryExpectedExistence(LoggingContext context, long pipSemiStableHash, string pipDescription, string filePath);
-
-        [GeneratedEvent(
-            (ushort)LogEventId.PipInputVerificationMismatchRecoveryExpectedNonExistence,
-            EventGenerators = EventGenerators.LocalOnly,
-            Message = "[{pipDescription}] Pip input '{filePath}' found locally, but does NOT exist on the master. File will be deleted.",
-            EventLevel = Level.Verbose,
-            EventTask = (ushort)Tasks.Distribution,
-            Keywords = (int)Keywords.UserMessage)]
-        public abstract void PipInputVerificationMismatchRecoveryExpectedNonExistence(LoggingContext context, long pipSemiStableHash, string pipDescription, string filePath);
 
         [GeneratedEvent(
             (ushort)LogEventId.DistributionExecutePipRequest,
@@ -741,22 +732,22 @@ namespace BuildXL.Scheduler.Tracing
         public abstract void DistributionFinishedPipRequest(LoggingContext context, string pipSemiStableHash, string workerName, string step);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionMasterWorkerProcessOutputContent,
+            (ushort)LogEventId.DistributionOrchestratorWorkerProcessOutputContent,
             EventGenerators = EventGenerators.LocalOnly,
             Message = "[{formattedSemiStableHash}] Pip output '{filePath}' with hash '{hash} reported from worker '{workerName}'. {reparsePointInfo}.",
             EventLevel = Level.Verbose,
             EventTask = (ushort)Tasks.Distribution,
             Keywords = (int)(Keywords.UserMessage | Keywords.Diagnostics))]
-        public abstract void DistributionMasterWorkerProcessOutputContent(LoggingContext context, string formattedSemiStableHash, string filePath, string hash, string reparsePointInfo, string workerName);
+        public abstract void DistributionOrchestratorWorkerProcessOutputContent(LoggingContext context, string formattedSemiStableHash, string filePath, string hash, string reparsePointInfo, string workerName);
 
         [GeneratedEvent(
             (ushort)LogEventId.InitiateWorkerRelease,
             EventGenerators = EventGenerators.LocalOnly,
-            Message = "{workerName} will be released because {numProcessPipsWaiting} (numProcessPipsWaiting) < {totalSlots} (totalSlots). Worker's Acquired Slots: {cachelookup} (cachelookup), {execute} (execute), {ipc} (ipc).",
+            Message = "{workerName} will be released because {numProcessPipsWaiting} (numProcessPipsWaiting) < {totalSlots} (totalSlots). Worker's Acquired Slots: {cachelookup} (cachelookup), {execute} (execute), {light} (light).",
             EventLevel = Level.Verbose,
             EventTask = (ushort)Tasks.Distribution,
             Keywords = (int)Keywords.UserMessage)]
-        public abstract void InitiateWorkerRelease(LoggingContext context, string workerName, long numProcessPipsWaiting, int totalSlots, int cachelookup, int execute, int ipc);
+        public abstract void InitiateWorkerRelease(LoggingContext context, string workerName, long numProcessPipsWaiting, int totalSlots, int cachelookup, int execute, int light);
 
         [GeneratedEvent(
             (ushort)LogEventId.WorkerReleasedEarly,
@@ -1340,8 +1331,8 @@ namespace BuildXL.Scheduler.Tracing
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.PipExecutor,
-            Message = "Resuming process execution because available RAM is above required limit.")]
-        internal abstract void ResumingProcessExecutionAfterSufficientResources(LoggingContext loggingContext);
+            Message = "Will try to resume process execution because effective available RAM is above required limit. [effective available RAM MB: {effectiveAvailableRam} > {minimumAvailableRam}] or [effective used RAM percentage: {effectiveRamUtilization} < {maximumRamUtilization})]. Actual RAM availability: {availableRam} MB ({ramUtilization}% used)")]
+        internal abstract void ResumingProcessExecutionAfterSufficientResources(LoggingContext loggingContext, int effectiveAvailableRam, int availableRam, int minimumAvailableRam, int ramUtilization, int effectiveRamUtilization, int maximumRamUtilization);
 
         [GeneratedEvent(
             (ushort)LogEventId.ProcessStatus,
@@ -1368,6 +1359,15 @@ namespace BuildXL.Scheduler.Tracing
             EventTask = (ushort)Tasks.Scheduler,
             Message = "[{pipDescription}] The execution schedule is being terminated due to the failure of a pip.")]
         internal abstract void ScheduleTerminatingDueToPipFailure(LoggingContext loggingContext, string pipDescription);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.SkippingDownstreamPipsDueToPipSuccess,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Informational,
+            Keywords = (int)(Keywords.UserMessage),
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "[{pipDescription}] This pip exited with a succeed fast exit code for this pip.  Not scheduling downstream pipstream pips.")]
+        internal abstract void SkipDownstreamPipsDueToPipSuccess(LoggingContext loggingContext, string pipDescription);
 
         [GeneratedEvent(
             (ushort)LogEventId.PipSemaphoreQueued,
@@ -2304,7 +2304,7 @@ namespace BuildXL.Scheduler.Tracing
             Keywords = (int)Keywords.Diagnostics,
             EventTask = (int)Tasks.CriticalPaths,
             Message = "[Pip{0:X16}] Historic perf data updated: {1}ms from {2}ms, relative deviation {3}%")]
-        public abstract void HistoricPerfDataUpdated(LoggingContext context, long semiStableHash, uint milliseconds, uint oldMilliseconds, int relativeDeviation);
+        public abstract void HistoricPerfDataUpdated(LoggingContext context, long semiStableHash, uint milliseconds, uint oldMilliseconds, long relativeDeviation);
 
         [GeneratedEvent(
             (int)LogEventId.HistoricPerfDataStats,
@@ -2321,8 +2321,8 @@ namespace BuildXL.Scheduler.Tracing
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
-            Message = "Initialized PipQueue with concurrencies: IO:{0}, ChooseWorkerCacheLookup:{1}, CacheLookup:{2}, ChooseWorkerCpu:{3}, CPU:{4}, Materialize:{5}, Light:{6}, MasterCacheLookupMultiplier: {7}, MasterCpuMultiplier: {8}")]
-        public abstract void PipQueueConcurrency(LoggingContext context, int io, int chooseWorkerCacheLookup, int cacheLookup, int chooseWorkerCpu, int cpu, int materialize, int light, string masterCacheLookupMultiplier, string masterCpuMultiplier);
+            Message = "Initialized PipQueue with concurrencies: IO:{0}, ChooseWorkerCacheLookup:{1}, CacheLookup:{2}, ChooseWorkerCpu:{3}, CPU:{4}, Materialize:{5}, Light:{6}, OrchestratorCacheLookupMultiplier: {7}, OrchestratorCpuMultiplier: {8}")]
+        public abstract void PipQueueConcurrency(LoggingContext context, int io, int chooseWorkerCacheLookup, int cacheLookup, int chooseWorkerCpu, int cpu, int materialize, int light, string orchestratorCacheLookupMultiplier, string orchestratorCpuMultiplier);
 
         [GeneratedEvent(
             (int)LogEventId.UnableToCreateExecutionLogFile,
@@ -3279,8 +3279,17 @@ namespace BuildXL.Scheduler.Tracing
             EventLevel = Level.Error,
             EventTask = (ushort)Tasks.Scheduler,
             Keywords = (int)(Keywords.UserMessage | Keywords.InfrastructureError),
-            Message = "Minimum workers not satisfied. # Minimum workers: {0}, # Connected workers: {1}")]
+            Message = "Minimum workers not satisfied. # Minimum workers: {minimumWorkers}, # Succesfully attached workers: {connectedWorkers}")]
         public abstract void MinimumWorkersNotSatisfied(LoggingContext context, int minimumWorkers, int connectedWorkers);
+
+        [GeneratedEvent(
+            (int)LogEventId.WorkerCountBelowWarningThreshold,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            EventTask = (ushort)Tasks.Scheduler,
+            Keywords = (int)(Keywords.UserMessage),
+            Message = "The attached workers for this build are below the warning threshold ({threshold}), # Succesfully attached workers: {connectedWorkers}")]
+        public abstract void WorkerCountBelowWarningThreshold(LoggingContext context, int threshold, int connectedWorkers);
 
         [GeneratedEvent(
             (int)LogEventId.BuildSetCalculatorProcessStats,
@@ -3508,6 +3517,20 @@ namespace BuildXL.Scheduler.Tracing
             string deletedPaths);
 
         [GeneratedEvent(
+            (int)LogEventId.FailedToSealDirectory,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
+            EventTask = (int)Tasks.Scheduler,
+            Message =
+            "[{pipDescription}] Failed to seal directory '{directoryPath}': {exceptionMessage}")]
+        public abstract void FailedToSealDirectory(
+            LoggingContext context,
+            string directoryPath,
+            string pipDescription,
+            string exceptionMessage);
+
+        [GeneratedEvent(
             (ushort)LogEventId.DebugFragment,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
@@ -3723,7 +3746,7 @@ namespace BuildXL.Scheduler.Tracing
         [GeneratedEvent(
            (ushort)LogEventId.FileContentManagerTryMaterializeFileAsyncFileArtifactAvailableLater,
            EventGenerators = EventGenerators.LocalOnly,
-           EventLevel = Level.Error,
+           EventLevel = Level.Warning,
            Keywords = (int)Keywords.UserMessage,
            EventTask = (ushort)Tasks.Scheduler,
            Message = "FileArtifacts for the following path(s) (count={count}) were not available at the time of file materialization request was received but they were available at the end of a build:{paths}")]
@@ -3739,13 +3762,112 @@ namespace BuildXL.Scheduler.Tracing
         internal abstract void ApiServerStoreBuildManifestHashToCacheFailed(LoggingContext loggingContext, string hash, string buildManifestHash, string reason);
 
         [GeneratedEvent(
-            (ushort)LogEventId.ErrorApiServerGetBuildManifestHashFromCacheFailed,
+            (ushort)LogEventId.ErrorApiServerGetBuildManifestHashFromLocalFileFailed,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Scheduler,
-            Message = "[{ShortProductName} API Server] Operation Get BuildManifest Hash from cache for Hash: '{hash}' failed. Reason: {reason}.")]
-        internal abstract void ErrorApiServerGetBuildManifestHashFromCacheFailed(LoggingContext loggingContext, string hash, string reason);
+            Message = "[{ShortProductName} API Server] Operation Get BuildManifest Hash from local file for Hash: '{hash}' failed. Reason: {reason}.")]
+        internal abstract void ErrorApiServerGetBuildManifestHashFromLocalFileFailed(LoggingContext loggingContext, string hash, string reason);
+        
+        [GeneratedEvent(
+            (ushort)LogEventId.DumpPipLiteUnableToCreateLogDirectory,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "Runtime Dump Pip Lite Analyzer failed to create log folder {directory}, and has been disabled for this build. Reason: {exceptionMessage}.")]
+        internal abstract void DumpPipLiteUnableToCreateLogDirectory(LoggingContext loggingContext, string directory, string exceptionMessage);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.DumpPipLiteUnableToSerializePip,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "Runtime Dump Pip Lite Analyzer failed to serialize pip '{pipHash}' at '{path}' due to a generic error, and has been disabled for the remainder of this build. Reason: {exceptionMessage}.")]
+        internal abstract void DumpPipLiteUnableToSerializePip(LoggingContext loggingContext, string pipHash, string path, string exceptionMessage);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.DumpPipLiteUnableToSerializePipDueToBadArgument,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "Dump pip lite analysis utilities unable to serialize pip '{pipHash}' at '{path}' due to a bad argument to the JSON serializer or file writer, and has been disabled for the remainder of this build. Reason: {exceptionMessage}.")]
+        internal abstract void DumpPipLiteUnableToSerializePipDueToBadArgument(LoggingContext loggingContext, string pipHash, string path, string exceptionMessage);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.DumpPipLiteUnableToSerializePipDueToBadPath,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "Dump pip lite analysis utilities unable to serialize pip '{pipHash}' at log path '{logPath}' due to a bad output path provided to the file writer, and has been disabled for the remainder of this build. Reason: {exceptionMessage}.")]
+        internal abstract void DumpPipLiteUnableToSerializePipDueToBadPath(LoggingContext loggingContext, string pipHash, string logPath, string exceptionMessage);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.RuntimeDumpPipLiteLogLimitReached,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "Runtime dump pip lite analyzer has hit the maximum amount of files that can be logged ({maxFiles}) and will not log additional failures for this build.")]
+        internal abstract void RuntimeDumpPipLiteLogLimitReached(LoggingContext loggingContext, int maxFiles);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.DumpPipLiteSettingsMismatch,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "DumpFailedPipsWithDynamicData flag is set for the dump pip lite analyzer, but the LogObservedFileAccesses and/or LogProcesses flags were not set. Therefore, dump pip lite will not record observed file accesses.")]
+        internal abstract void DumpPipLiteSettingsMismatch(LoggingContext loggingContext);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.RecordFileForBuildManifestAfterGenerateBuildManifestFileList,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "RecordFileForBuildManifest received an event after GenerateBuildManifestFileList invocation [ DropName: '{dropName}', RelativePath: '{relativePath}', AzureArtifactsHash: '{azureArtifactsHash}', BuildManifestHash: '{buildManifestHash}' ].")]
+        internal abstract void RecordFileForBuildManifestAfterGenerateBuildManifestFileList(LoggingContext loggingContext, string dropName, string relativePath, string azureArtifactsHash, string buildManifestHash);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.GenerateBuildManifestFileListFoundDuplicateHashes,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "Operation Register BuildManifest Hash for Drop '{dropName}' failed due to {duplicateEntryCount} files with mismatching hashes being registered at respective RelativePaths. Check BuildXL.wrn for more details.")]
+        internal abstract void GenerateBuildManifestFileListFoundDuplicateHashes(LoggingContext loggingContext, string dropName, int duplicateEntryCount);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.BuildManifestGeneratorFoundDuplicateHash,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "BuildManifestGenerator received a file path with multiple hash registration attempts: [ DropName: '{dropName}', RelativePath: '{relativePath}', RecordedHash: '{recordedHash}', RejectedHash: '{rejectedHash}' ].")]
+        internal abstract void BuildManifestGeneratorFoundDuplicateHash(LoggingContext loggingContext, string dropName, string relativePath, string recordedHash, string rejectedHash);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.GenerateBuildManifestFileListResult,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "GenerateBuildManifestFileList successfully generated a list of {fileListCount} files for Drop: '{dropName}'.")]
+        internal abstract void GenerateBuildManifestFileListResult(LoggingContext loggingContext, string dropName, int fileListCount);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.LogCachedPipOutput,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Scheduler,
+            Message = "[{pipSemistableHash}] Cached pip output '{filePath}', hash '{hash}'.")]
+        internal abstract void LogCachedPipOutput(LoggingContext loggingContext, string pipSemistableHash, string filePath, string hash);
     }
 }
 #pragma warning restore CA1823 // Unused field

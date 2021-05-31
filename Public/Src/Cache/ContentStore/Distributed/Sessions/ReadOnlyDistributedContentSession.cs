@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
@@ -31,6 +32,7 @@ using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
+using ContentStore.Grpc;
 using PlaceBulkResult = System.Collections.Generic.IEnumerable<System.Threading.Tasks.Task<BuildXL.Cache.ContentStore.Interfaces.Results.Indexed<BuildXL.Cache.ContentStore.Interfaces.Results.PlaceFileResult>>>;
 
 #nullable enable
@@ -50,7 +52,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             StartCopyForPinWhenUnverifiedCountSatisfied,
             ProactiveCopiesSkipped,
             ProactiveCopy_OutsideRingFromPreferredLocations,
+            ProactiveCopy_OutsideRingCopies,
             ProactiveCopyRetries,
+            ProactiveCopyInsideRingRetries,
+            ProactiveCopyOutsideRingRetries,
             ProactiveCopy_InsideRingCopies,
             ProactiveCopy_InsideRingFullyReplicated,
         }
@@ -256,13 +261,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
 
                     var hashInfo = getBulkResult.ContentHashesInfo.Single();
 
-                    var checkBulkResult = CheckBulkResult(operationContext, hashInfo, log: getBulkResult.Origin == GetBulkOrigin.Global);
-                    if (!checkBulkResult.Succeeded)
+                    if (!CanCopyContentHash(operationContext, hashInfo, isGlobal: getBulkResult.Origin == GetBulkOrigin.Global, out var useInRingLocations, out var errorMessage))
                     {
-                        return new BoolResult(checkBulkResult);
+                        return new BoolResult(errorMessage);
                     }
 
-                    var copyResult = await TryCopyAndPutAsync(operationContext, hashInfo, urgencyHint, CopyReason.OpenStream, trace: false);
+                    // Using in-ring machines if configured
+                    var copyResult = await TryCopyAndPutAsync(operationContext, hashInfo, urgencyHint, CopyReason.OpenStream, trace: false, useInRingLocations);
                     if (!copyResult)
                     {
                         return new BoolResult(copyResult);
@@ -360,7 +365,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             if (pinOperationConfiguration.ReturnGlobalExistenceFast)
             {
                 // Fire off the default pin action, but do not await the result.
-                operationContext.PerformNonResultOperationAsync(
+                //
+                // Creating a new OperationContext instance without existing 'CancellationToken',
+                // because the operation we triggerred that stored in 'pinTask' can outlive the lifetime of the current instance.
+                // And we don't want the PerformNonResultOperationAsync to fail because the current instance is shut down (or disposed).
+                new OperationContext(operationContext.TracingContext).PerformNonResultOperationAsync(
                     Tracer,
                     () => pinTask,
                     extraEndMessage: results =>
@@ -424,7 +433,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 // Local pins and distributed pins which are copied locally allow proactive copy
                 if (pinResult.Succeeded && (!(pinResult is DistributedPinResult distributedPinResult) || distributedPinResult.CopyLocally))
                 {
-                    var proactiveCopyResult = await ProactiveCopyIfNeededAsync(opContext, contentHashes[indexedPinResult.Index], tryBuildRing: true, CopyReason.Pin);
+                    var proactiveCopyResult = await ProactiveCopyIfNeededAsync(opContext, contentHashes[indexedPinResult.Index], tryBuildRing: true, CopyReason.ProactiveCopyOnPin);
 
                     // Only fail if all copies failed.
                     if (!proactiveCopyResult.Succeeded)
@@ -490,7 +499,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 ));
 
             // We are trying tracing here we did not want to change the signature for PlaceFileCoreAsync, which is implemented in multiple locations
-            operationContext.TraceDebug($"PlaceFileBulk, Gate.OccupiedCount={resultWithData.Metadata.GateOccupiedCount} Gate.Wait={resultWithData.Metadata.GateWaitTime.TotalMilliseconds}ms");
+            operationContext.TracingContext.Debug($"PlaceFileBulk, Gate.OccupiedCount={resultWithData.Metadata.GateOccupiedCount} Gate.Wait={resultWithData.Metadata.GateWaitTime.TotalMilliseconds}ms",
+                component: nameof(ReadOnlyDistributedContentSession),
+                operation: "PlaceFileBulk");
 
             return resultWithData.Result;
         }
@@ -642,53 +653,37 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                         {
                             var contentHashWithSizeAndLocations = indexed.Item;
                             PlaceFileResult result;
-                            if (contentHashWithSizeAndLocations.Locations == null)
+
+                            if (!CanCopyContentHash(context, contentHashWithSizeAndLocations, isGlobal: !isLocal, out var useInRingMachineLocations, out var errorMessage))
                             {
-                                var message = $"No replicas ever registered for hash {contentHashWithSizeAndLocations.ContentHash.ToShortString()}";
-
-                                if (isLocal)
-                                {
-                                    // Trace only for locations obtained from the local store.
-                                    Tracer.Warning(context, message);
-                                }
-
-                                result = new PlaceFileResult(PlaceFileResult.ResultCode.NotPlacedContentNotFound, message);
-                            }
-                            else if (contentHashWithSizeAndLocations.Locations.Count == 0)
-                            {
-                                var message = $"No replicas exist currently in content tracker for hash {contentHashWithSizeAndLocations.ContentHash.ToShortString()}";
-
-                                if (isLocal)
-                                {
-                                    // Trace only for locations obtained from the local store.
-                                    Tracer.Warning(context, message);
-                                }
-
-                                result = new PlaceFileResult(PlaceFileResult.ResultCode.NotPlacedContentNotFound, message);
+                                result = new PlaceFileResult(PlaceFileResult.ResultCode.NotPlacedContentNotFound, errorMessage);
                             }
                             else
                             {
-                                var putResult = await TryCopyAndPutAsync(
+                                var copyResult = await TryCopyAndPutAsync(
                                     context,
                                     contentHashWithSizeAndLocations,
                                     urgencyHint,
                                     reason,
                                     // We just traced all the hashes as a result of GetBulk call, no need to trace each individual hash.
-                                    trace: false);
-                                if (!putResult)
+                                    trace: false,
+                                    // Using in-ring locations as well if the feature is on.
+                                    useInRingMachineLocationos: useInRingMachineLocations);
+
+                                if (!copyResult)
                                 {
-                                    result = new PlaceFileResult(putResult);
+                                    result = new PlaceFileResult(copyResult);
                                 }
                                 else
                                 {
-                                    result = new PlaceFileResult(PlaceFileResult.ResultCode.PlacedWithMove, putResult.ContentSize);
+                                    result = new PlaceFileResult(PlaceFileResult.ResultCode.PlacedWithMove, copyResult.ContentSize);
                                 }
-
                             }
 
                             return result.WithIndex(indexed.Index);
+
                         },
-                        new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = Settings.ParallelCopyFilesLimit, });
+                        new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = Settings.ParallelCopyFilesLimit });
 
                 // TODO: Better way ? (bug 1365340)
                 copyFilesLocallyBlock.PostAll(getBulkResult.ContentHashesInfo.AsIndexed());
@@ -715,33 +710,51 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             }
         }
 
-        private BoolResult CheckBulkResult(Context context, ContentHashWithSizeAndLocations result, bool log = true)
+        private bool CanCopyContentHash(Context context, ContentHashWithSizeAndLocations result, bool isGlobal, out bool useInRingMachineLocations, [NotNullWhen(false)]out string? message)
         {
-            // Null represents no replicas were ever registered, where as empty list implies content is missing from all replicas
-            if (result.Locations == null)
+            useInRingMachineLocations = isGlobal && Settings.UseInRingMachinesForCopies;
+            if (!isLocationsAvailable(out message))
             {
-                if (log)
+                if (useInRingMachineLocations && _buildRingMachines.Length != 0)
                 {
-                    Tracer.Warning(context, $"No replicas found in content tracker for hash {result.ContentHash.ToShortString()}");
+                    string useInRingLocationsMessage = $", but {nameof(Settings.UseInRingMachinesForCopies)} is true. Trying to copy the content from in-ring machines.";
+                    Tracer.Debug(context, message + useInRingLocationsMessage);
+                    // Still trying copying the content from in-ring machines, even though the location information is lacking.
+                    return true;
                 }
 
-                return new BoolResult($"No replicas registered for hash");
-            }
-
-            if (!result.Locations.Any())
-            {
-                if (log)
+                // Tracing only for global locations because they come last.
+                if (isGlobal)
                 {
-                    Tracer.Warning(context, $"No replicas currently exist in content tracker for hash {result.ContentHash.ToShortString()}");
+                    Tracer.Warning(context, message);
                 }
 
-                return new BoolResult($"Content for hash is missing from all replicas");
+                return false;
             }
 
-            return BoolResult.Success;
+            return true;
+
+            bool isLocationsAvailable([NotNullWhen(false)] out string? errorMessage)
+            {
+                errorMessage = null;
+                // Null represents no replicas were ever registered, where as empty list implies content is missing from all replicas
+                if (result.Locations == null)
+                {
+                    errorMessage = $"No replicas registered for hash {result.ContentHash.ToShortString()}";
+                    return false;
+                }
+
+                if (!result.Locations.Any())
+                {
+                    errorMessage = $"No replicas currently exist in content tracker for hash {result.ContentHash.ToShortString()}";
+                    return false;
+                }
+
+                return true;
+            }
         }
 
-        private async Task<PutResult> TryCopyAndPutAsync(OperationContext operationContext, ContentHashWithSizeAndLocations hashInfo, UrgencyHint urgencyHint, CopyReason reason, bool trace)
+        private async Task<PutResult> TryCopyAndPutAsync(OperationContext operationContext, ContentHashWithSizeAndLocations hashInfo, UrgencyHint urgencyHint, CopyReason reason, bool trace, bool useInRingMachineLocationos = false)
         {
             Context context = operationContext;
             CancellationToken cts = operationContext.Token;
@@ -760,34 +773,39 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                     using (var stream = new MemoryStream(smallFileResult.Blob))
                     {
                         return await Inner.PutStreamAsync(context, hashInfo.ContentHash, stream, cts, urgencyHint);
-
                     }
                 }
             }
 
             byte[]? bytes = null;
 
-            var putResult = await DistributedCopier.TryCopyAndPutAsync(
-                operationContext,
+            var copyCompression = CopyCompression.None;
+            var copyCompressionThreshold = Settings.GrpcCopyCompressionSizeThreshold ?? 0;
+            if (copyCompressionThreshold > 0 && hashInfo.Size > copyCompressionThreshold)
+            {
+                copyCompression = Settings.GrpcCopyCompressionAlgorithm;
+            }
+            
+            var copyRequest = new DistributedContentCopier.CopyRequest(
                 _copierHost,
                 hashInfo,
                 reason,
-                handleCopyAsync: async args =>
+                HandleCopyAsync: async args =>
                 {
-                    (CopyFileResult copyFileResult, AbsolutePath tempLocation, int attemptCount) = args;
+                    (CopyFileResult copyFileResult, AbsolutePath tempLocation, _) = args;
 
                     PutResult innerPutResult;
                     long actualSize = copyFileResult.Size ?? hashInfo.Size;
                     if (Settings.UseTrustedHash(actualSize) && Inner is ITrustedContentSession trustedInner)
                     {
                         // The file has already been hashed, so we can trust the hash of the file.
-                         innerPutResult = await trustedInner.PutTrustedFileAsync(
-                             context,
-                             new ContentHashWithSize(hashInfo.ContentHash, actualSize),
-                             tempLocation,
-                             FileRealizationMode.Move,
-                             cts,
-                             urgencyHint);
+                        innerPutResult = await trustedInner.PutTrustedFileAsync(
+                            context,
+                            new ContentHashWithSize(hashInfo.ContentHash, actualSize),
+                            tempLocation,
+                            FileRealizationMode.Move,
+                            cts,
+                            urgencyHint);
 
                         // BytesFromTrustedCopy will only be non-null when the trusted copy exposes the bytes it copied because AreBlobsSupported evaluated to true
                         //  and the file size is smaller than BlobMaxSize.
@@ -825,27 +843,33 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                         }
                         else
                         {
-                             innerPutResult = await Inner.PutFileAsync(
-                                 context,
-                                 hashInfo.ContentHash.HashType,
-                                 tempLocation,
-                                 FileRealizationMode.Move,
-                                 cts,
-                                 urgencyHint);
+                            innerPutResult = await Inner.PutFileAsync(
+                                context,
+                                hashInfo.ContentHash.HashType,
+                                tempLocation,
+                                FileRealizationMode.Move,
+                                cts,
+                                urgencyHint);
                         }
                     }
 
                     return innerPutResult;
+                },
+                copyCompression);
 
-                });
-
-                if (bytes != null && putResult.Succeeded)
-                {
-                    await PutBlobAsync(operationContext, putResult.ContentHash, bytes);
-                }
-
-                return putResult;
+            if (useInRingMachineLocationos)
+            {
+                copyRequest = copyRequest with { InRingMachines = _buildRingMachines };
             }
+
+            var putResult = await DistributedCopier.TryCopyAndPutAsync(operationContext, copyRequest);
+            if (bytes != null && putResult.Succeeded)
+            {
+                await PutBlobAsync(operationContext, putResult.ContentHash, bytes);
+            }
+
+            return putResult;
+        }
 
         /// <summary>
         /// Puts a given blob into redis (either inline or not depending on the settings).
@@ -1004,7 +1028,16 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
         {
             public ContentHashWithSizeAndLocations Record { get; }
 
-            public PinResult? Result { get; set; }
+            private PinResult? _result;
+            public PinResult? Result
+            {
+                get => _result;
+                set
+                {
+                    value!.ContentSize = Record.Size;
+                    _result = value;
+                }
+            }
 
             public RemotePinning(ContentHashWithSizeAndLocations record)
                 => Record = record;
@@ -1018,8 +1051,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             bool updateContentTracker = true,
             bool succeedWithOneLocation = false)
         {
-            PinResult result = await PinRemoteAsync(context, pinning.Record, isLocal, updateContentTracker, succeedWithOneLocation: succeedWithOneLocation);
-            pinning.Result = result;
+            pinning.Result = await PinRemoteAsync(context, pinning.Record, isLocal, updateContentTracker, succeedWithOneLocation: succeedWithOneLocation);
         }
 
         // This method processes a single content location record set for pinning.
@@ -1068,7 +1100,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                     // but for asynchronous copy we always need to update the tracker with a new location.
                     var task = WithStoreCancellationAsync(
                         operationContext.TracingContext,
-                        opContext => TryCopyAndPutAndUpdateContentTrackerAsync(opContext, remote, updateContentTracker: true, CopyReason.AsyncPin));
+                        opContext => TryCopyAndPutAndUpdateContentTrackerAsync(opContext, remote, updateContentTracker: true, CopyReason.AsyncCopyOnPin));
                     if (Settings.InlineOperationsForTests)
                     {
                         (await task).TraceIfFailure(operationContext);
@@ -1214,9 +1246,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
         }
 
         internal Task<ProactiveCopyResult> ProactiveCopyIfNeededAsync(
-            OperationContext context, 
-            ContentHashWithSizeAndLocations info, 
-            bool tryBuildRing, 
+            OperationContext context,
+            ContentHashWithSizeAndLocations info,
+            bool tryBuildRing,
             CopyReason reason)
         {
             var hash = info.ContentHash;
@@ -1227,7 +1259,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             }
 
             // Don't trace this case since it would add too much log traffic.
-            var replicatedLocations = info.Locations ?? CollectionUtilities.EmptyArray<MachineLocation>();
+            var replicatedLocations = (info.Locations ?? CollectionUtilities.EmptyArray<MachineLocation>()).ToList();
             if (replicatedLocations.Count >= Settings.ProactiveCopyLocationsThreshold)
             {
                 SessionCounters[Counters.ProactiveCopiesSkipped].Increment();
@@ -1241,9 +1273,16 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 {
                     try
                     {
-                        var insideRingCopyTask = ProactiveCopyInsideBuildRingAsync(context, hash, tryBuildRing, replicatedLocations, reason, attempt: 0);
+                        var (candidate, insideRingCopyTask) = ProactiveCopyInsideBuildRing(context, info, tryBuildRing, replicatedLocations, reason, attempt: 0);
 
-                        var outsideRingCopyTask = ProactiveCopyOutsideBuildRingAsync(context, hash, replicatedLocations, reason, attempt: 0);
+                        // To avoid the situation when outside ring copy will pick the same machine,
+                        // changing replicated locations list by adding a candidate we got for inside ring copy.
+                        if (candidate != null)
+                        {
+                            replicatedLocations.Add(candidate.Value);
+                        }
+
+                        var outsideRingCopyTask = ProactiveCopyOutsideBuildRingAsync(context, info, replicatedLocations, reason, attempt: 0);
 
                         await Task.WhenAll(insideRingCopyTask, outsideRingCopyTask);
 
@@ -1253,11 +1292,33 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                         var retries = 0;
                         if (!insideRingResult.Succeeded)
                         {
-                            while (outsideRingResult.Status.QualifiesForRetry() && retries < Settings.ProactiveCopyMaxRetries)
+                            // Make sure to re-enable the initial candidate as a future candidate, since the copy failed.
+                            if (candidate != null)
                             {
-                                SessionCounters[Counters.ProactiveCopyRetries].Increment();
-                                retries++;
-                                outsideRingResult = await ProactiveCopyOutsideBuildRingAsync(context, hash, replicatedLocations, reason, retries);
+                                replicatedLocations.Remove(candidate.Value);
+                            }
+
+                            // Retry inside-ring copy only if the outside-ring copy cannot be retried, to avoid overwhelming machines which
+                            // may be under heavy use.
+                            if (!outsideRingResult.Succeeded && !outsideRingResult.Status.QualifiesForRetry())
+                            {
+                                while (insideRingResult.Status.QualifiesForRetry() && retries < Settings.ProactiveCopyMaxRetries)
+                                {
+                                    SessionCounters[Counters.ProactiveCopyRetries].Increment();
+                                    SessionCounters[Counters.ProactiveCopyInsideRingRetries].Increment();
+                                    retries++;
+                                    insideRingResult = await ProactiveCopyInsideBuildRing(context, info, tryBuildRing, replicatedLocations, reason, retries).pushFileTask;
+                                }
+                            }
+                            else
+                            {
+                                while (outsideRingResult.Status.QualifiesForRetry() && retries < Settings.ProactiveCopyMaxRetries)
+                                {
+                                    SessionCounters[Counters.ProactiveCopyRetries].Increment();
+                                    SessionCounters[Counters.ProactiveCopyOutsideRingRetries].Increment();
+                                    retries++;
+                                    outsideRingResult = await ProactiveCopyOutsideBuildRingAsync(context, info, replicatedLocations, reason, retries);
+                                }
                             }
                         }
 
@@ -1273,7 +1334,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
 
         private Task<PushFileResult> ProactiveCopyOutsideBuildRingAsync(
             OperationContext context,
-            ContentHash hash,
+            ContentHashWithSize hash,
             IReadOnlyList<MachineLocation> replicatedLocations,
             CopyReason reason,
             int attempt)
@@ -1289,7 +1350,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                     var designatedLocationsResult = ContentLocationStore.GetDesignatedLocations(hash);
                     if (designatedLocationsResult)
                     {
-                        var candidates = designatedLocationsResult.Value
+                        // A machine in the build may be a designated location for the hash,
+                        // but we won't pushing to the same machine twice, because 'replicatedLocations' argument
+                        // has a local machine that we're about to push for inside the ring copy.
+                        var candidates = designatedLocationsResult.Value!
                             .Except(replicatedLocations).ToArray();
 
                         if (candidates.Length > 0)
@@ -1313,6 +1377,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 if (getLocationResult.Succeeded)
                 {
                     var candidate = getLocationResult.Value;
+                    SessionCounters[Counters.ProactiveCopy_OutsideRingCopies].Increment();
                     return PushContentAsync(context, hash, candidate, isInsideRing: false, reason, source, attempt);
                 }
                 else
@@ -1326,9 +1391,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
             }
         }
 
-        private Task<PushFileResult> ProactiveCopyInsideBuildRingAsync(
+        private (MachineLocation? candidate, Task<PushFileResult> pushFileTask) ProactiveCopyInsideBuildRing(
             OperationContext context,
-            ContentHash hash,
+            ContentHashWithSize hash,
             bool tryBuildRing,
             IReadOnlyList<MachineLocation> replicatedLocations,
             CopyReason reason,
@@ -1351,39 +1416,43 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                         if (candidates.Length > 0)
                         {
                             var candidate = candidates[ThreadSafeRandom.Generator.Next(0, candidates.Length)];
-                            return PushContentAsync(context, hash, candidate, isInsideRing: true, reason, ProactiveCopyLocationSource.Random, attempt);
+                            return (candidate, PushContentAsync(context, hash, candidate, isInsideRing: true, reason, ProactiveCopyLocationSource.Random, attempt));
                         }
                         else
                         {
                             SessionCounters[Counters.ProactiveCopy_InsideRingFullyReplicated].Increment();
-                            return Task.FromResult(new PushFileResult($"All candidates in the build ring for build {_buildId} already have the content."));
+                            return (candidate: null, Task.FromResult(new PushFileResult($"All candidates in the build ring for build {_buildId} already have the content.")));
                         }
                     }
                     else
                     {
-                        return Task.FromResult(new PushFileResult($"Could not find any machines belonging to the build ring for build {_buildId}."));
+                        return (candidate: null, Task.FromResult(new PushFileResult($"Could not find any machines belonging to the build ring for build {_buildId}.")));
                     }
                 }
                 else
                 {
-                    return Task.FromResult(new PushFileResult("BuildId was not specified, so machines in the build ring cannot be found."));
+                    return (candidate: null, Task.FromResult(new PushFileResult("BuildId was not specified, so machines in the build ring cannot be found.")));
                 }
             }
             else
             {
-                return Task.FromResult(PushFileResult.Disabled());
+                return (candidate: null, Task.FromResult(PushFileResult.Disabled()));
             }
         }
 
         private async Task<PushFileResult> PushContentAsync(
             OperationContext context,
-            ContentHash hash,
+            ContentHashWithSize hash,
             MachineLocation target,
             bool isInsideRing,
             CopyReason reason,
             ProactiveCopyLocationSource source,
             int attempt)
         {
+            // This is here to avoid hanging ProactiveCopyIfNeededAsync on inside/outside ring copies before starting
+            // the other one.
+            await Task.Yield();
+
             if (Settings.PushProactiveCopies)
             {
                 // It is possible that this method is used during proactive replication

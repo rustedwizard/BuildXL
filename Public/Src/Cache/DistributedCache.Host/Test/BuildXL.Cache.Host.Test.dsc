@@ -2,11 +2,14 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 namespace Test {
+    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNet472;
+
     @@public
     export const dll = BuildXLSdk.cacheTest({
         assemblyName: "BuildXL.Cache.Host.Test",
         sources: globR(d`.`,"*.cs"),
         skipTestRun: BuildXLSdk.restrictTestRunToSomeQualifiers,
+        assemblyBindingRedirects: BuildXLSdk.cacheBindingRedirects(),
         references: [
             ...addIfLazy(BuildXLSdk.isFullFramework, () => [
                 NetFx.System.Runtime.Serialization.dll,
@@ -16,6 +19,7 @@ namespace Test {
             ...importFrom("BuildXL.Cache.ContentStore").getSerializationPackages(true),
             Configuration.dll,
             Service.dll,
+            importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
             importFrom("BuildXL.Cache.ContentStore").Distributed.dll,
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
@@ -27,9 +31,9 @@ namespace Test {
 
             // Used by Launcher integration test
             importFrom("BuildXL.Utilities").dll,
+            importFrom("BuildXL.Utilities").Collections.dll,
             importFrom("BuildXL.Cache.ContentStore").App.exe,
-            ...addIf(!BuildXLSdk.isFullFramework,
-                LauncherServer.withQualifier({targetFramework: "netcoreapp3.1"}).exe
+            ...addIfLazy(!BuildXLSdk.isFullFramework, () => [LauncherServer.exe]
             )
         ],
         tools: {

@@ -12,15 +12,18 @@ using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.Stores;
 using BuildXL.Cache.ContentStore.Extensions;
 using BuildXL.Cache.ContentStore.Hashing;
+using BuildXL.Cache.ContentStore.Interfaces.Extensions;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Sessions;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Service.Grpc;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Utilities.Collections;
+using ContentStore.Grpc;
 #nullable enable
 namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 {
@@ -32,7 +35,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         private const string StorageIdSeparator = "||DCS||";
         private readonly DistributedCentralStoreConfiguration _configuration;
         private readonly ILocationStore _locationStore;
-        private readonly IDistributedContentCopier _copier;
+        private readonly DistributedContentCopier _copier;
         private const string CacheSubFolderName = "dcs";
         private const string CacheSubFolderNameWithTrailingSlash = CacheSubFolderName + @"\";
 
@@ -63,7 +66,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         public DistributedCentralStorage(
             DistributedCentralStoreConfiguration configuration,
             ILocationStore locationStore,
-            IDistributedContentCopier copier,
+            DistributedContentCopier copier,
             CentralStorage fallbackStorage)
         {
             _configuration = configuration;
@@ -71,7 +74,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             _fallbackStorage = fallbackStorage;
             _locationStore = locationStore;
 
-            var maxRetentionMb = configuration.MaxRetentionGb * 1024;
+            var maxRetentionMb = (int)Math.Ceiling(configuration.MaxRetentionGb * 1024);
             var softRetentionMb = (int)(maxRetentionMb * 0.8);
 
             var cacheFolder = configuration.CacheRoot / CacheSubFolderName;
@@ -156,17 +159,63 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         protected override async Task<Result<string>> UploadFileCoreAsync(OperationContext context, AbsolutePath file, string blobName, bool garbageCollect = false)
         {
             // Add the file to CAS and register with global content location store.
-            var hashTask = PutAndRegisterFileAsync(context, file, hash: null);
+            var putResult = await PutAndRegisterFileAsync(context, file, hash: null);
 
-            // Upload to fallback storage so file is available if needed from there
-            var innerStorageIdTask = _fallbackStorage.UploadFileAsync(context, file, blobName, garbageCollect).ThrowIfFailureAsync();
+            if (putResult.Succeeded && _configuration.ProactiveCopyCheckpointFiles)
+            {
+                var hashWithSize = new ContentHashWithSize(putResult.ContentHash, putResult.ContentSize);
+                var pushResult = await PushCheckpointFileAsync(context, hashWithSize)
+                    .FireAndForgetOrInlineAsync(context, _configuration.InlineCheckpointProactiveCopies);
 
-            await Task.WhenAll(hashTask, innerStorageIdTask);
+                if (!pushResult.Succeeded)
+                {
+                    return new Result<string>(pushResult);
+                }
+            }
 
-            var hash = await hashTask;
-            var innerStorageId = await innerStorageIdTask;
+            string fallbackStorageId = await _fallbackStorage.UploadFileAsync(
+                context,
+                file,
+                name: $"{blobName}.{putResult.ContentHash.Serialize(delimiter: '.')}",
+                garbageCollect).ThrowIfFailureAsync();
 
-            return CreateCompositeStorageId(hash, innerStorageId);
+            return CreateCompositeStorageId(putResult.ContentHash, fallbackStorageId);
+        }
+
+        /// <summary>
+        /// TODO: try to refactor this to use the same logic as ReadOnlyDistributedContentSession.
+        /// </summary>
+        private Task<PushFileResult> PushCheckpointFileAsync(OperationContext context, ContentHashWithSize hashWithSize)
+        {
+            return context.PerformOperationAsync(Tracer, async () =>
+            {
+                var destinationMachineResult = _locationStore.ClusterState.GetRandomMachineLocation(Array.Empty<MachineLocation>());
+                if (!destinationMachineResult.Succeeded)
+                {
+                    return new PushFileResult(destinationMachineResult, "Failed to get a location to proactively copy the checkpoint file.");
+                }
+
+                var destionationMachine = destinationMachineResult.Value;
+
+                var streamResult = await _privateCas.OpenStreamAsync(context, hashWithSize.Hash, pinRequest: null);
+                if (!streamResult.Succeeded)
+                {
+                    return new PushFileResult(streamResult, "Should have been able to open the stream from the local CAS");
+                }
+
+                using var stream = streamResult.Stream!;
+                return await _copier.PushFileAsync(
+                    context,
+                    hashWithSize,
+                    destionationMachine,
+                    stream,
+                    isInsideRing: false,
+                    CopyReason.ProactiveCheckpointCopy,
+                    ProactiveCopyLocationSource.Random,
+                    attempt: 0);
+            },
+            extraStartMessage: $"Hash=[{hashWithSize.Hash.ToShortString()}]",
+            extraEndMessage: _ => $"Hash=[{hashWithSize.Hash.ToShortString()}]");
         }
 
         private async Task<Result<ContentHashWithSize>> TryGetAndPutFileAsync(OperationContext context, string storageId, AbsolutePath targetFilePath, bool isImmutable)
@@ -174,8 +223,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             var (hash, fallbackStorageId) = ParseCompositeStorageId(storageId);
             if (hash != null)
             {
-                var fileAccessMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileAccessMode.ReadOnly : FileAccessMode.Write;
-                var fileRealizationMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileRealizationMode.Any : FileRealizationMode.Copy;
+                var fileAccessMode = isImmutable ? FileAccessMode.ReadOnly : FileAccessMode.Write;
+                var fileRealizationMode = isImmutable ? FileRealizationMode.Any : FileRealizationMode.Copy;
 
                 // First attempt to place file from content store
                 var placeResult = await _privateCas.PlaceFileAsync(context, hash.Value, targetFilePath, fileAccessMode, FileReplacementMode.ReplaceExisting, fileRealizationMode, pinRequest: null);
@@ -196,7 +245,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 }
                 else
                 {
-                    Tracer.OperationDebug(context, $"Falling back to blob storage. Error={putResult}");
+                    Tracer.Debug(context, $"Falling back to blob storage. Error={putResult}");
                 }
             }
 
@@ -253,19 +302,22 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         // OR the number replicas exceeds the number of required replicas computed based on the machine index
                         bool shouldCopy = pendingCopyCount < _configuration.MaxSimultaneousCopies || actualReplicas >= requiredReplicas;
 
-                        Tracer.OperationDebug(context, $"{i} (ShouldCopy={shouldCopy}): Id={machineId}" +
+                        Tracer.Debug(context, $"{i} (ShouldCopy={shouldCopy}): Hash={hash.ToShortString()}, Id={machineId}" +
                             $", Replicas={actualReplicas}, RequiredReplicas={requiredReplicas}, Pending={pendingCopyCount}, Max={_configuration.MaxSimultaneousCopies}");
 
                         if (shouldCopy)
                         {
-                            var putResult = await _copier.TryCopyAndPutAsync(
+                            return await _copier.TryCopyAndPutAsync(
                                 context,
-                                this,
-                                hashInfo,
-                                CopyReason.CentralStorage,
-                                args => _privateCas.PutFileAsync(context, args.tempLocation, FileRealizationMode.Move, hash, pinRequest: null));
-
-                            return putResult;
+                                new DistributedContentCopier.CopyRequest(
+                                    this,
+                                    hashInfo,
+                                    CopyReason.CentralStorage,
+                                    args => _privateCas.PutFileAsync(context, args.tempLocation, FileRealizationMode.Move, hash, pinRequest: null),
+                                    // Most of these transfers are large files (sst files), but they are also already
+                                    // compressed, so compressing over it would only waste cycles.
+                                    CopyCompression.None
+                                    ));
                         }
 
                         // Wait for content to propagate to more machines
@@ -287,15 +339,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             // In the success case the content will be put at targetFilePath
             await _fallbackStorage.TryGetFileAsync(context, fallbackStorageId, targetFilePath, isImmutable).ThrowIfFailure();
 
-            var placementFileRealizationMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileRealizationMode.Any : FileRealizationMode.Copy;
+            var placementFileRealizationMode = isImmutable ? FileRealizationMode.Any : FileRealizationMode.Copy;
             var putResult = await _privateCas.PutFileAsync(context, targetFilePath, placementFileRealizationMode, _hashType, pinRequest: null).ThrowIfFailure();
 
             return new ContentHashWithSize(putResult.ContentHash, putResult.ContentSize);
         }
 
-        private async Task<ContentHash> PutAndRegisterFileAsync(OperationContext context, AbsolutePath file, ContentHash? hash, bool isImmutable = false)
+        private async Task<PutResult> PutAndRegisterFileAsync(OperationContext context, AbsolutePath file, ContentHash? hash, bool isImmutable = false)
         {
-            var putFileRealizationMode = isImmutable && _configuration.ImmutabilityOptimizations ? FileRealizationMode.Any : FileRealizationMode.Copy;
+            var putFileRealizationMode = isImmutable ? FileRealizationMode.Any : FileRealizationMode.Copy;
 
             PutResult putResult;
             if (hash != null)
@@ -310,7 +362,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             var contentInfo = new ContentHashWithSize(putResult.ContentHash, putResult.ContentSize);
             await RegisterContent(context, contentInfo);
 
-            return putResult.ContentHash;
+            return putResult;
         }
 
         private async Task<(ContentHashWithSizeAndLocations info, int pendingCopies)> GetFileLocationsAsync(OperationContext context, ContentHash hash, ContentHash startedCopyHash)
@@ -321,11 +373,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             var result = await _locationStore.GetBulkAsync(context, new[] { hash, startedCopyHash }).ThrowIfFailure();
             var info = result.ContentHashesInfo[0];
 
-            var startedCopyLocations = result.ContentHashesInfo[1].Locations;
-            var finishedCopyLocations = info.Locations;
+            var startedCopyLocations = result.ContentHashesInfo[1].Locations!;
+            var finishedCopyLocations = info.Locations!;
             var pendingCopies = startedCopyLocations.Except(finishedCopyLocations).Count();
 
-            return (new ContentHashWithSizeAndLocations(info.ContentHash, info.Size, TranslateLocations(info.Locations!)), pendingCopies);
+            var locations = TranslateLocations(info.Locations!);
+
+            return (new ContentHashWithSizeAndLocations(info.ContentHash, info.Size, locations), pendingCopies);
         }
 
         private ContentHash ComputeStartedCopyHash(ContentHash hash)
@@ -344,7 +398,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             return _locationStore.RegisterLocalLocationAsync(context, contentInfo).ThrowIfFailure();
         }
 
-        private IReadOnlyList<MachineLocation> TranslateLocations(IReadOnlyList<MachineLocation> locations)
+        internal IReadOnlyList<MachineLocation> TranslateLocations(IReadOnlyList<MachineLocation> locations)
         {
             // Choose a 'random' offset to ensure that locations are random
             // Locations are normally randomly sorted except machine reputation can override this
@@ -352,7 +406,20 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             // important not to overload a machine which may end up consistent at the top of the list because of
             // having a good reputation
             var offset = Interlocked.Increment(ref _translateLocationsOffset);
-            return locations.SelectList((item, index) => TranslateLocation(locations[(offset + index) % locations.Count]));
+
+            return locations.SelectList((item, index) => TranslateLocation(locations[getOffsetIndex(index, offset, locations.Count)]));
+
+            static int getOffsetIndex(int index, int offset, int totalCount)
+            {
+                if (index == totalCount - 1)
+                {
+                    // It's important that the last entry remains at the end of the list, because most times that corresponds
+                    // to the master, which we want to avoid copying from at all costs.
+                    return index;
+                }
+
+                return (offset + index) % (totalCount - 1);
+            }
         }
 
         private MachineLocation TranslateLocation(MachineLocation other)

@@ -5,7 +5,7 @@ import * as BuildXLSdk from "Sdk.BuildXL";
 import * as Deployment from "Sdk.Deployment";
 import * as MemoizationStore from "BuildXL.Cache.MemoizationStore";
 
-export declare const qualifier : BuildXLSdk.DefaultQualifierWithNetStandard20;
+export declare const qualifier : BuildXLSdk.AllSupportedQualifiers;
 
 export {BuildXLSdk};
 
@@ -13,7 +13,7 @@ export const NetFx = BuildXLSdk.NetFx;
 
 @@public
 export const redisPackages = [
-    importFrom("StackExchange.Redis").pkg,
+    BuildXLSdk.Flags.isMicrosoftInternal ? importFrom("Microsoft.Caching.Redis").pkg : importFrom("StackExchange.Redis").pkg,
     ...(BuildXLSdk.isFullFramework 
         ? [ 
             // Needed because net472 -> netstandard2.0 translation is not yet supported by the NuGet resolver.
@@ -25,7 +25,8 @@ export const redisPackages = [
         : [
             importFrom("System.IO.Pipelines").pkg,
             importFrom("System.Threading.Channels").pkg,
-            importFrom("System.Runtime.CompilerServices.Unsafe").pkg,
+            // Don't need to add Unsafe for netcoreapp3.1 or net5.0
+            ...(BuildXLSdk.isDotNetCoreApp ? [] : [importFrom("System.Runtime.CompilerServices.Unsafe").pkg]),
             importFrom("Pipelines.Sockets.Unofficial").pkg,
           ]),
     ...BuildXLSdk.bclAsyncPackages,
@@ -54,14 +55,27 @@ export const kustoPackages = [
 @@public
 export function getSerializationPackages(includeNetStandard: boolean) {
     return [
+        ... (getSystemTextJson(includeNetStandard)),
+        ...(BuildXLSdk.isFullFramework ? [
+            importFrom("System.Runtime.CompilerServices.Unsafe").withQualifier({ targetFramework: "netstandard2.0" }).pkg,
+        ] : []),
+        ...(BuildXLSdk.isFullFramework || qualifier.targetFramework === "netstandard2.0" ? [
+            importFrom("System.Memory").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+        ] : []),
+        importFrom("System.Text.Encodings.Web").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+        importFrom("System.Numerics.Vectors").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+    ];
+}
+
+@@public
+export function getSystemTextJson(includeNetStandard: boolean) {
+    return [
         ...(includeNetStandard && BuildXLSdk.isFullFramework ? [
             BuildXLSdk.withQualifier({targetFramework: "net472"}).NetFx.Netstandard.dll,
         ] : [
         ]),
-        importFrom("System.Text.Json").withQualifier({targetFramework: "netstandard2.0"}).pkg,
-        importFrom("System.Memory").withQualifier({targetFramework: "netstandard2.0"}).pkg,
-        importFrom("System.Text.Encodings.Web").withQualifier({targetFramework: "netstandard2.0"}).pkg,
-        importFrom("System.Numerics.Vectors").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+
+        ...(qualifier.targetFramework === "net5.0" ? [] : [importFrom("System.Text.Json").withQualifier({targetFramework: "netstandard2.0"}).pkg]),
     ];
 }
 
@@ -209,7 +223,5 @@ export const deploymentForBuildXL: Deployment.Definition = {
         ...addIf(qualifier.targetRuntime === "osx-x64",
             importFrom("Grpc.Core").Contents.all.getFile("runtimes/osx/native/libgrpc_csharp_ext.x64.dylib"),
             importFrom("Grpc.Core").Contents.all.getFile("runtimes/osx/native/libgrpc_csharp_ext.x86.dylib")),
-
-        importFrom("TransientFaultHandling.Core").Contents.all.getFile("lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll"),
     ]
 };

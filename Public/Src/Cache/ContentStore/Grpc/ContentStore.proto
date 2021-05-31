@@ -14,7 +14,7 @@ service ContentServer {
     rpc Hello(HelloRequest) returns (HelloResponse) {}
 
     rpc GetStats(GetStatsRequest) returns (GetStatsResponse) {}
-
+    
     rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse) {}
 
     rpc Pin(PinRequest) returns (PinResponse) {}
@@ -91,6 +91,8 @@ message CreateSessionRequest {
     string SessionName = 3;
     int32 ImplicitPin = 4;
     int32 Capabilities = 5;
+    string SerializedConfig = 6;
+    string Pat = 7;
 }
 
 message CreateSessionResponse {
@@ -108,6 +110,11 @@ message PinRequest {
 
 message PinResponse {
      ResponseHeader Header = 1;
+     PinResponseInfo Info = 2;
+}
+
+message PinResponseInfo {
+    int64 ContentSize = 1;
 }
 
 // PinBulk
@@ -118,6 +125,7 @@ message PinBulkRequest {
 
 message PinBulkResponse {
     map<int32, ResponseHeader> Header = 1;
+    repeated PinResponseInfo Info = 2;
 }
 
 // PlaceFile
@@ -186,6 +194,7 @@ message CopyFileRequest {
     bytes contentHash = 3;
     int64 offset = 4;
     CopyCompression compression = 5;
+    bool failFastIfBusy = 6;
 }
 
 message CopyFileResponse {

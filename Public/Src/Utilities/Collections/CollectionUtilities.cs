@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Linq;
 
@@ -321,6 +322,7 @@ namespace BuildXL.Utilities.Collections
         /// <param name="key">the key of the value to find</param>
         /// <param name="defaultValue">the default value if the key is not present</param>
         /// <returns>the value matching the key in the read-only dictionary, or the default value for TValue if no key is found</returns>
+        [return:MaybeNull]
         public static TValue GetOrDefault<TKey, TValue>(this IReadOnlyDictionary<TKey, TValue> dictionary, TKey key, TValue defaultValue = default(TValue)) where TKey : notnull
         {
             Contract.RequiresNotNull(dictionary);
@@ -351,6 +353,16 @@ namespace BuildXL.Utilities.Collections
             Contract.RequiresNotNull(list);
 
             return new SelectList<T, TResult>(list, selector);
+        }
+        
+        /// <summary>
+        /// Creates a projection list over the list using <paramref name="selector"/>
+        /// </summary>
+        public static IReadOnlyList<TResult> SelectList<T, TResult, TState>(this IReadOnlyList<T> list, Func<T, int, TState, TResult> selector, TState state)
+        {
+            Contract.RequiresNotNull(list);
+
+            return new SelectList<T, TResult, TState>(list, selector, state);
         }
 
         /// <summary>
@@ -457,6 +469,7 @@ namespace BuildXL.Utilities.Collections
 
             bool result = dictionary.TryGetValue(key, out resultingValue);
             Contract.Assert(result);
+            Contract.Assert(resultingValue != null); // Not needed for .net5, but required for .netcore3.1
 
             return resultingValue;
         }

@@ -63,11 +63,11 @@ namespace ContentStoreTest.Grpc
             using (var directory = new DisposableDirectory(FileSystem))
             {
                 var storeConfig = CreateStoreConfiguration();
-                await storeConfig.Write(FileSystem, directory.Path).ConfigureAwait(false);
+                storeConfig.Write(FileSystem, directory.Path);
                 
                 var serviceConfig = CreateServiceConfiguration(directory.Path, PortExtensions.GetNextAvailablePort(), Guid.NewGuid().ToString());
 
-                using (var server = new ServiceProcess(serviceConfig, LocalContentServerConfiguration, Scenario, WaitForServerReadyTimeoutMs, WaitForExitTimeoutMs))
+                using (var server = new ServiceProcess(serviceConfig, Scenario, WaitForServerReadyTimeoutMs, WaitForExitTimeoutMs))
                 {
                     BoolResult r = await server.StartupAsync(context).ConfigureAwait(false);
                     r.ShouldBeSuccess();

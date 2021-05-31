@@ -111,7 +111,6 @@ namespace BuildXL.Engine.Cache.Artifacts
             AbsolutePath path,
             ContentHash contentHash,
             PathAtom fileName = default,
-            AbsolutePath reparsePointTarget = default,
             ReparsePointInfo? reparsePointInfo = null,
             bool trackPath = true,
             bool recordPathInFileContentTable = true)
@@ -120,29 +119,9 @@ namespace BuildXL.Engine.Cache.Artifacts
             {
                 ExpandedAbsolutePath expandedPath = Expand(path);
 
-                var reparsePointType = ReparsePointType.None;
-                if (reparsePointInfo == null && reparsePointTarget.IsValid)
-                {
-                    if (OperatingSystemHelper.IsUnixOS)
-                    {
-                        reparsePointType = ReparsePointType.UnixSymlink;
-                    }
-                    else
-                    {
-                        var reparsePointTypeCheck = FileUtilities.TryGetReparsePointType(expandedPath.ExpandedPath);
-                        if (!reparsePointTypeCheck.Succeeded)
-                        {
-                            return reparsePointTypeCheck.Failure;
-                        }
-
-                        reparsePointType = reparsePointTypeCheck.Result;
-                    }
-                    
-                    reparsePointInfo = ReparsePointInfo.Create(reparsePointType, reparsePointTarget.ToString(m_pathTable));
-                }
-
                 // Note we have to establish existence or TryGetKnownContentHashAsync would throw.
-                if (FileUtilities.FileExistsNoFollow(expandedPath.ExpandedPath))
+                var maybeExistence = FileUtilities.TryProbePathExistence(expandedPath.ExpandedPath, followSymlink: false, out var existsAsReparsePoint);
+                if (maybeExistence.Succeeded && maybeExistence.Result == PathExistence.ExistsAsFile)
                 {
                     var openFlags = FileFlagsAndAttributes.FileFlagOverlapped | FileFlagsAndAttributes.FileFlagOpenReparsePoint;
 
@@ -235,10 +214,10 @@ namespace BuildXL.Engine.Cache.Artifacts
                 }
                 else
                 {
-                    possibleMaterialization = CreateReparsePointIfNotExistsOrTargetMismatch(expandedPath.Path, reparsePointInfo.Value.GetReparsePointTarget(), reparsePointInfo.Value.ReparsePointType);
+                    possibleMaterialization = CreateReparsePointIfNotExistsOrTargetMismatch(expandedPath.Path, existsAsReparsePoint, reparsePointInfo.Value.GetReparsePointTarget(), reparsePointInfo.Value.ReparsePointType);
                 }
 
-                bool isReparsePoint = reparsePointTarget.IsValid || (reparsePointInfo != null && reparsePointInfo.Value.IsActionableReparsePoint);
+                bool isReparsePoint = reparsePointInfo != null && reparsePointInfo.Value.IsActionableReparsePoint;
 
                 Possible<TrackedFileContentInfo, Failure> possibleTrackedFile = await possibleMaterialization
                     .ThenAsync(p => TryOpenAndTrackPathAsync(
@@ -259,14 +238,24 @@ namespace BuildXL.Engine.Cache.Artifacts
         /// <summary>
         /// Creates a reparse point. Reparse point targets must be a non-empty string.
         /// </summary>
-        private Possible<Unit> CreateReparsePointIfNotExistsOrTargetMismatch(AbsolutePath reparsePoint, string reparsePointTarget, ReparsePointType type)
+        private Possible<Unit> CreateReparsePointIfNotExistsOrTargetMismatch(AbsolutePath path, bool existsAsReparsePoint, string reparsePointTarget, ReparsePointType type)
         {
             Contract.Requires(!string.IsNullOrEmpty(reparsePointTarget));
 
-            var source = Expand(reparsePoint);
-            bool created;
+            var source = Expand(path);
 
-            var maybeReparsePoint = FileUtilities.TryCreateReparsePointIfNotExistsOrTargetsDoNotMatch(source.ExpandedPath, reparsePointTarget, type, out created);
+            Possible<Unit> maybeReparsePoint;
+            if (existsAsReparsePoint)
+            {
+                maybeReparsePoint = FileUtilities.TryCreateReparsePointIfTargetsDoNotMatch(source.ExpandedPath, reparsePointTarget, type);
+            }
+            else
+            {
+                maybeReparsePoint = 
+                    FileUtilities.TryDeletePathIfExists(source.ExpandedPath)
+                        .Then<Unit>(_ => FileUtilities.TryCreateReparsePoint(source.ExpandedPath, reparsePointTarget, type));
+            }
+
             if (!maybeReparsePoint.Succeeded)
             {
                 return new Failure<string>($"Failed to create reparse point (type {type}) from '{source}' to '{reparsePointTarget}'", maybeReparsePoint.Failure);

@@ -68,12 +68,14 @@ namespace BuildXL.Native.IO
         /// <param name="deleteRootDirectory">whether to also delete the root directory</param>
         /// <param name="shouldDelete">a function which returns true if file should be deleted and false otherwise.</param>
         /// <param name="tempDirectoryCleaner">provides and cleans a temp directory for move-deleting files</param>
+        /// <param name="bestEffort">if true, avoid retry logic while deleting</param>
         /// <param name="cancellationToken">provides cancelation capability.</param>
         void DeleteDirectoryContents(
             string path, 
             bool deleteRootDirectory, 
             Func<string, bool> shouldDelete, 
-            ITempCleaner tempDirectoryCleaner = null, 
+            ITempCleaner tempDirectoryCleaner = null,
+            bool bestEffort = false,
             CancellationToken? cancellationToken = default);
 
         /// <summary>
@@ -140,11 +142,20 @@ namespace BuildXL.Native.IO
         /// <summary>
         /// Creates a copy on write clone of files if supported by the underlying OS.
         /// </summary>
-        /// <param name="source"></param>
-        /// <param name="destination"></param>
-        /// <param name="followSymlink"></param>
+        /// <remarks>
+        /// This method must be implemented if <see cref="IFileSystem.IsCopyOnWriteSupportedByEnlistmentVolume"/> returns true.
+        /// </remarks>
         /// <exception cref="NativeWin32Exception">Throw native exception upon failure.</exception>
         void CloneFile(string source, string destination, bool followSymlink);
+
+        /// <summary>
+        /// Copy a file using in-kernel file descriptors to avoid user mode read/write buffer overheads.
+        /// </summary>
+        /// <remarks>
+        /// This method must be implemented if <see cref="IFileSystem.IsInKernelCopyingSupportedByHostSystem"/> returns true.
+        /// </remarks>
+        /// <exception cref="NativeWin32Exception">Throw native exception upon failure.</exception>
+        void InKernelFileCopy(string source, string destination, bool followSymlink);
 
         /// <summary>
         /// Returns a new <see cref="FileStream" /> with the share mode. The target path is always deleted (if present) and re-created.
@@ -182,7 +193,7 @@ namespace BuildXL.Native.IO
         /// <exception cref="BuildXLException">
         /// Thrown if the file deletion fails in a recoverable manner (e.g. access denied).
         /// </exception>
-        void DeleteFile(string path, bool waitUntilDeletionFinished, ITempCleaner tempDirectoryCleaner = null);
+        void DeleteFile(string path, bool retryOnFailure, ITempCleaner tempDirectoryCleaner = null);
 
         /// <summary>
         /// Controls the applicability of POSIX delete.
@@ -192,7 +203,7 @@ namespace BuildXL.Native.IO
         /// <summary>
         /// Variant of <see cref="DeleteFile"/> returning a <see cref="Possible{TResult,TOtherwise}"/> rather than throwing.
         /// </summary>
-        Possible<string, DeletionFailure> TryDeleteFile(string path, bool waitUntilDeletionFinished, ITempCleaner tempDirectoryCleaner = null);
+        Possible<string, DeletionFailure> TryDeleteFile(string path, bool retryOnFailure, ITempCleaner tempDirectoryCleaner = null);
 
         /// <summary>
         /// Attempts to move file to a temporary directory that will be garbage collected in the future.

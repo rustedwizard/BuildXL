@@ -3,9 +3,12 @@
 
 using System;
 using System.Diagnostics.ContractsLight;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
 using BuildXL.Cache.ContentStore.UtilitiesCore;
+
+#pragma warning disable CS3008 // CLS
 
 namespace BuildXL.Cache.ContentStore.Hashing
 {
@@ -98,8 +101,6 @@ namespace BuildXL.Cache.ContentStore.Hashing
             _bytes = new ReadOnlyFixedBytes(buffer, hashBytesLength, offset);
         }
 
-#if NET_COREAPP
-
         /// <summary>
         ///     Initializes a new instance of the <see cref="ContentHash" /> struct from byte array
         /// </summary>
@@ -116,8 +117,6 @@ namespace BuildXL.Cache.ContentStore.Hashing
             _hashType = hashType;
             _bytes = new ReadOnlyFixedBytes(buffer, hashBytesLength, offset);
         }
-
-#endif
 
         /// <summary>
         ///     Initializes a new instance of the <see cref="ContentHash" /> struct from byte array
@@ -204,13 +203,13 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// <summary>
         ///     Gets the value packed in a FixedBytes.
         /// </summary>
-        public FixedBytes ToFixedBytes()
+        public ReadOnlyFixedBytes ToFixedBytes()
         {
-            return new FixedBytes(_bytes);
+            return _bytes;
         }
 
         /// <inheritdoc />
-        public bool Equals(ContentHash other)
+        public bool Equals([AllowNull]ContentHash other)
         {
             return _bytes.Equals(other._bytes) && ((int)_hashType).Equals((int)other._hashType);
         }
@@ -225,11 +224,11 @@ namespace BuildXL.Cache.ContentStore.Hashing
         public override int GetHashCode()
         {
             // ReSharper disable once NonReadonlyMemberInGetHashCode
-            return ((int)_hashType) ^ _bytes.GetHashCode();
+            return ((int)_hashType, _bytes.GetHashCode()).GetHashCode();
         }
 
         /// <inheritdoc />
-        public int CompareTo(ContentHash other)
+        public int CompareTo([MaybeNull]ContentHash other)
         {
             var compare = _bytes.CompareTo(other._bytes);
             return compare != 0 ? compare : ((int)_hashType).CompareTo((int)other._hashType);
@@ -246,8 +245,11 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// </summary>
         public string ToShortString()
         {
-            return new ShortHash(this).ToString();
+            return AsShortHash().ToString();
         }
+
+        /// <nodoc />
+        public ShortHash AsShortHash() => new ShortHash(this);
 
         /// <summary>
         ///     Give the hash bytes as a hex string.
@@ -260,17 +262,17 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// <summary>
         ///     Serialize to a string.
         /// </summary>
-        public string Serialize()
+        public string Serialize(char delimiter = SerializedDelimiter)
         {
-            return $"{HashType.Serialize()}{SerializedDelimiter.ToString()}{ToHex()}";
+            return HashType.Serialize() + delimiter + ToHex();
         }
 
         /// <summary>
         ///     Serialize to a string.
         /// </summary>
-        public string SerializeReverse()
+        public string SerializeReverse(char delimiter = SerializedDelimiter)
         {
-            return $"{ToHex()}{SerializedDelimiter.ToString()}{HashType.Serialize()}";
+            return ToHex() + delimiter + HashType.Serialize();
         }
 
         /// <summary>
@@ -288,7 +290,30 @@ namespace BuildXL.Cache.ContentStore.Hashing
         }
 
         /// <summary>
+        ///     Serialize to a span.
+        /// </summary>
+        public void Serialize(Span<byte> buffer, int offset = 0, SerializeHashBytesMethod serializeMethod = SerializeHashBytesMethod.Trimmed)
+        {
+            var length = serializeMethod == SerializeHashBytesMethod.Trimmed ? ByteLength : MaxHashByteLength;
+            Serialize(buffer, offset, length);
+        }
+
+        /// <summary>
+        ///     Serialize to a span.
+        /// </summary>
+        public void Serialize(Span<byte> buffer, int offset, int length)
+        {
+            unchecked
+            {
+                buffer[offset++] = (byte)_hashType;
+            }
+
+            _bytes.Serialize(buffer.Slice(offset), length);
+        }
+
+        /// <summary>
         ///     Serialize hash type and hash to buffer.
+        ///     Consider using ContentHashExtensions.ToPooledByteArray instead to avoid extra allocations.
         /// </summary>
         public byte[] ToByteArray(SerializeHashBytesMethod serializeMethod = SerializeHashBytesMethod.Trimmed)
         {
@@ -313,16 +338,32 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// </summary>
         public void Serialize(BinaryWriter writer)
         {
+            using var handle = ContentHashExtensions.ContentHashBytesArrayPool.Get();
             writer.Write((byte)_hashType);
-            _bytes.Serialize(writer);
+            // For some weird reason this method always writes 33 bytes
+            // when SerializeHashBytes writes ByteLength that can be less then 33 bytes.
+            // This behavior is important and can't be broken because of binary compatibility.
+            _bytes.Serialize(writer, handle.Value);
         }
 
         /// <summary>
         ///     Serialize only the hash bytes to a binary writer.
         /// </summary>
-        public void SerializeHashBytes(BinaryWriter writer)
+        /// <remarks>
+        ///     Unlike <see cref="Serialize(BinaryWriter)"/> method that writes <see cref="SerializedLength"/> number of bytes,
+        ///     this method only writes <see cref="ByteLength"/> number of bytes that can be smaller for some hash types.
+        /// </remarks>
+        public void SerializeHashBytes(BinaryWriter writer, byte[]? buffer = null)
         {
-            _bytes.Serialize(writer, ByteLength);
+            if (buffer is null)
+            {
+                using var handle = ContentHashExtensions.ContentHashBytesArrayPool.Get();
+                _bytes.Serialize(writer, handle.Value, 0, ByteLength);
+            }
+            else
+            {
+                _bytes.Serialize(writer, buffer, 0, ByteLength);
+            }
         }
 
         /// <nodoc />

@@ -629,7 +629,7 @@ namespace Test.BuildXL.Scheduler.Utils
 
         public ITempCleaner TempCleaner => new TestMoveDeleteCleaner(Path.Combine(Environment.GetEnvironmentVariable("TEMP"), "moveDeletionTemp"));
 
-        public SymlinkedAccessResolver SymlinkedAccessResolver => null;
+        public ReparsePointResolver ReparsePointAccessResolver => null;
 
         public PluginManager PluginManager { get; }
 
@@ -743,6 +743,8 @@ namespace Test.BuildXL.Scheduler.Utils
         {
             throw new NotImplementedException();
         }
+
+        public Task<Optional<IEnumerable<AbsolutePath>>> GetReadPathsAsync(OperationContext context, Pip pip) => throw new NotImplementedException();
     }
 
     internal sealed class DummyServiceManager : ServiceManager

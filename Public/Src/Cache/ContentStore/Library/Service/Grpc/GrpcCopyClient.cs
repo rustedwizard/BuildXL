@@ -131,43 +131,6 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
         }
 
         /// <summary>
-        /// Checks if file exists on remote machine.
-        /// </summary>
-        public async Task<FileExistenceResult> CheckFileExistsAsync(Context context, ContentHash hash)
-        {
-            try
-            {
-                var request = new ExistenceRequest()
-                {
-                    TraceId = context.Id.ToString(),
-                    HashType = (int)hash.HashType,
-                    ContentHash = hash.ToByteString()
-                };
-
-                ExistenceResponse response = await _client.CheckFileExistsAsync(request);
-                if (response.Header.Succeeded)
-                {
-                    return new FileExistenceResult();
-                }
-                else
-                {
-                    return new FileExistenceResult(FileExistenceResult.ResultCode.FileNotFound, response.Header.ErrorMessage);
-                }
-            }
-            catch (RpcException r)
-            {
-                if (r.StatusCode == StatusCode.Unavailable)
-                {
-                    return new FileExistenceResult(FileExistenceResult.ResultCode.SourceError, r);
-                }
-                else
-                {
-                    return new FileExistenceResult(FileExistenceResult.ResultCode.Error, r);
-                }
-            }
-        }
-
-        /// <summary>
         /// Copies content from the server to the given local path.
         /// </summary>
         public Task<CopyFileResult> CopyFileAsync(OperationContext context, ContentHash hash, AbsolutePath destinationPath, CopyOptions options)
@@ -249,11 +212,12 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             {
                 CopyFileRequest request = new CopyFileRequest()
                                           {
-                                              TraceId = context.TracingContext.Id.ToString(),
+                                              TraceId = context.TracingContext.TraceId.ToString(),
                                               HashType = (int)hash.HashType,
                                               ContentHash = hash.ToByteString(),
                                               Offset = 0,
-                                              Compression = _configuration.UseGzipCompression ? CopyCompression.Gzip : CopyCompression.None
+                                              Compression = options.CompressionHint,
+                                              FailFastIfBusy = options.BandwidthConfiguration?.FailFastIfServerIsBusy ?? false,
                                           };
 
                 using AsyncServerStreamingCall<CopyFileResponse> response = _client.CopyFile(request, options: GetDefaultGrpcOptions(token));
@@ -291,7 +255,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 CopyCompression compression = CopyCompression.None;
                 foreach (Metadata.Entry header in headers)
                 {
-                    switch (header.Key)
+                    switch (header.Key.ToLowerInvariant())
                     {
                         case "exception":
                             exception = header.Value;
@@ -300,7 +264,13 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                             message = header.Value;
                             break;
                         case "compression":
-                            Enum.TryParse(header.Value, out compression);
+                            if (!Enum.TryParse(header.Value, out compression))
+                            {
+                                return new CopyFileResult(
+                                    CopyResultCode.Unknown,
+                                    $"Unable to parse the server's intended compression '{header.Value}'. Requested compression is '{request.Compression}'");
+                            }
+
                             break;
                     }
                 }
@@ -375,16 +345,14 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                             await StreamContentWithCompressionAsync(response.ResponseStream, targetStream, options, token);
                             break;
                         default:
-                            throw new NotSupportedException($"CopyCompression {compression} is not supported.");
+                            throw new NotSupportedException($"Server is compressing stream with algorithm '{compression}', which is not supported client-side");
                     }
                 }
                 finally
                 {
                     if (closeStream)
                     {
-#pragma warning disable AsyncFixer02 // A disposable object used in a fire & forget async call
                         targetStream.Dispose();
-#pragma warning restore AsyncFixer02 // A disposable object used in a fire & forget async call
                     }
                 }
 
@@ -422,7 +390,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             {
                 var request = new RequestCopyFileRequest
                 {
-                    TraceId = context.TracingContext.Id.ToString(),
+                    TraceId = context.TracingContext.TraceId.ToString(),
                     ContentHash = hash.ToByteString(),
                     HashType = (int)hash.HashType
                 };
@@ -453,7 +421,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             {
                 var startingPosition = stream.Position;
 
-                var pushRequest = new PushRequest(hash, traceId: context.TracingContext.Id);
+                var pushRequest = new PushRequest(hash, traceId: context.TracingContext.TraceId);
                 var headers = pushRequest.GetMetadata();
 
                 using var call = _client.PushFile(options: GetDefaultGrpcOptions(headers, token));

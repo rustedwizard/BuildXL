@@ -16,13 +16,12 @@ using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Utilities.ParallelAlgorithms;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
 using Microsoft.Azure.EventHubs;
-using Microsoft.Practices.TransientFaultHandling;
 using static BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming.ContentLocationEventStoreCounters;
-using RetryPolicy = Microsoft.Practices.TransientFaultHandling.RetryPolicy;
 
 #nullable enable
 
@@ -43,7 +42,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
         private const string OperationIdEventKey = "OperationId";
 
         private readonly IEventHubClient _eventHubClient;
-        private readonly RetryPolicy _extraEventHubClientRetryPolicy;
+        private readonly IRetryPolicy _extraEventHubClientRetryPolicy;
 
         private Processor? _currentEventProcessor;
         private readonly ActionBlock<ProcessEventsInput>[]? _eventProcessingBlocks;
@@ -169,7 +168,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                 eventDatas = SerializeEventData(context, events);
             }
 
-            var operationId = context.TracingContext.Id;
+            var operationId = context.TracingContext.TraceId;
 
             for (var eventNumber = 0; eventNumber < eventDatas.Count; eventNumber++)
             {
@@ -212,7 +211,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
                         throw;
                     }
-                });
+                }, CancellationToken.None);
             }
 
             return BoolResult.Success;
@@ -320,6 +319,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
             var context = input.State.Context;
             var counters = input.State.EventStoreCounters;
+            var updatedHashesVisitor = input.State.UpdatedHashesVisitor;
 
             try
             {
@@ -338,6 +338,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
                             var eventTimeUtc = message.SystemProperties.EnqueuedTimeUtc;
                             var eventProcessingDelay = DateTime.UtcNow - eventTimeUtc;
+                            EventQueueDelays[input.EventQueueDelayIndex] = eventProcessingDelay; // Need to check if index is valid and has entry in list
 
                             // Creating nested context with operationId as a guid. This helps to correlate operations on a worker and a master machines.
                             context = CreateNestedContext(context, operationId?.ToString());
@@ -366,14 +367,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                             }
 
                             counters[ReceivedEventsCount].Add(eventDatas.Count);
-
+                            
                             // Dispatching deserialized events data
                             using (counters[DispatchEvents].Start())
                             {
                                 foreach (var eventData in eventDatas)
                                 {
                                     // An event processor may fail to process the event, but we will save the sequence point anyway.
-                                    await DispatchAsync(context, eventData, counters);
+                                    await DispatchAsync(context, eventData, counters, updatedHashesVisitor);
                                 }
                             }
                         }
@@ -395,12 +396,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
         private static OperationContext CreateNestedContext(OperationContext context, string? operationId, [CallerMemberName]string? caller = null)
         {
-            if (!Guid.TryParse(operationId, out var guid))
-            {
-                guid = Guid.NewGuid();
-            }
-
-            return context.CreateNested(guid, nameof(EventHubContentLocationEventStore), caller);
+            operationId ??= Guid.NewGuid().ToString();
+            
+            return context.CreateNested(operationId, nameof(EventHubContentLocationEventStore), caller);
         }
 
         /// <inheritdoc />
@@ -465,12 +463,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
             return BoolResult.Success;
         }
 
-        private RetryPolicy CreateEventHubClientRetryPolicy()
-        {
-            return new RetryPolicy(
-                new TransientEventHubErrorDetectionStrategy(),
-                RetryStrategy.DefaultExponential);
-        }
+        private IRetryPolicy CreateEventHubClientRetryPolicy() => RetryPolicyFactory.GetExponentialPolicy(TransientEventHubErrorDetectionStrategy.IsRetryable);
 
         private class Processor : IPartitionReceiveHandler
         {
@@ -525,6 +518,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
             public CounterCollection<ContentLocationEventStoreCounters> EventStoreCounters => _counters.Value;
 
             /// <nodoc />
+            public UpdatedHashesVisitor UpdatedHashesVisitor { get; } = new UpdatedHashesVisitor();
+
+            /// <nodoc />
             public bool IsComplete => _remainingMessageCount == 0;
 
             /// <nodoc />
@@ -547,7 +543,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
                 {
                     int duration = (int)_stopwatch.Elapsed.TotalMilliseconds;
                     Store.UpdatingPendingEventProcessingStates();
-                    Context.LogProcessEventsOverview(EventStoreCounters, duration);
+                    Context.LogProcessEventsOverview(EventStoreCounters, duration, UpdatedHashesVisitor);
 
                     Store.Counters.Append(EventStoreCounters);
                 }
@@ -570,6 +566,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
 
             /// <nodoc />
             public int ActionBlockIndex { get; }
+
+            /// <nodoc />
+            public int EventQueueDelayIndex => ActionBlockIndex == -1 ? 0 : ActionBlockIndex;
 
             /// <nodoc />
             public ActionBlock<ProcessEventsInput>? EventProcessingBlock =>
@@ -597,14 +596,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming
             }
         }
 
-        private class TransientEventHubErrorDetectionStrategy : ITransientErrorDetectionStrategy
+        private static class TransientEventHubErrorDetectionStrategy
         {
-            /// <inheritdoc />
-            public bool IsTransient(Exception ex)
-            {
-                return IsRetryable(ex);
-            }
-
             public static bool IsRetryable(Exception exception)
             {
                 if (exception is AggregateException ae)

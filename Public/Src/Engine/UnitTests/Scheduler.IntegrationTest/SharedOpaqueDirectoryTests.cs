@@ -1303,6 +1303,88 @@ namespace IntegrationTest.BuildXL.Scheduler
             AssertVerboseEventLogged(LogEventId.DependencyViolationDoubleWrite);
         }
 
+        [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
+        public void CacheConvergenceCanTriggerAdditionalWriteInUndeclaredFileViolations()
+        {
+            // Make cache look-ups always result in cache misses. This allows us to store outputs in the cache but get cache misses for the same pip next time.
+            // This enables us to recreate cache convergence
+            Configuration.Cache.ArtificialCacheMissOptions = new ArtificialCacheMissConfig()
+            {
+                Rate = ushort.MaxValue,
+                Seed = 0,
+                IsInverted = false
+            };
+
+            Configuration.Engine.AllowDuplicateTemporaryDirectory = true;
+
+            // Shared opaque to produce outputs
+            string sharedOpaqueDir = Path.Combine(ObjectRoot, "sharedopaquedir");
+            AbsolutePath sharedOpaqueDirPath = AbsolutePath.Create(Context.PathTable, sharedOpaqueDir);
+
+            // First we will generate a safe different-content write over this file
+            string originalContent = "content";
+            var output = CreateOutputFileArtifact(sharedOpaqueDirPath);
+            var outputAsSource = FileArtifact.CreateSourceFile(output.Path);
+
+            Directory.CreateDirectory(sharedOpaqueDir);
+            File.WriteAllText(outputAsSource.Path.ToString(Context.PathTable), originalContent);
+
+            // Read the source file in its original form before the write, so same-content rewrite can actually kick in on the second build without making the writer be a miss
+            var builderA = CreatePipBuilder(new Operation[] { 
+                Operation.ReadFile(outputAsSource, doNotInfer: true),
+                Operation.WriteFile(CreateOutputFileArtifact(ObjectRoot))});
+            builderA.RewritePolicy = RewritePolicy.SafeSourceRewritesAreAllowed;
+            builderA.Options |= Process.Options.AllowUndeclaredSourceReads;
+            var processA = SchedulePipBuilder(builderA);
+
+            Environment.SetEnvironmentVariable("FILE_CONTENT", "different content");
+            // This pip writes to the output file the content specified in FILE_CONTENT, which for this first build is a different content one. 
+            // However processA is reading the file in an ordered way, so this should be allowed
+            var builderB = CreatePipBuilder(new Operation[] {
+                Operation.DeleteFile(output), // delete it first since the write operation always appends
+                Operation.WriteEnvVariableToFile(output, "FILE_CONTENT", doNotInfer: true)}) ;
+            builderB.AddOutputDirectory(sharedOpaqueDirPath, SealDirectoryKind.SharedOpaque);
+            builderB.RewritePolicy = RewritePolicy.SafeSourceRewritesAreAllowed;
+            builderB.Options |= Process.Options.AllowUndeclaredSourceReads;
+            builderB.AddInputFile(processA.ProcessOutputs.GetOutputFiles().Single());
+            // Set the variable as passthrough so we can later change it without affecting caching
+            builderB.SetPassthroughEnvironmentVariable(StringId.Create(Context.StringTable, "FILE_CONTENT"));
+            var processB = SchedulePipBuilder(builderB);
+
+            RunScheduler(runNameOrDescription: "First build").AssertSuccess();
+
+            // We should see the allowed rewrite
+            AssertVerboseEventLogged(LogEventId.AllowedRewriteOnUndeclaredFile);
+
+            // Change the content of the environment variable. This will make the writer pip change the output it generates to match the content of the original file
+            Environment.SetEnvironmentVariable("FILE_CONTENT", originalContent);
+            // Restore the file to its original form, so process A will also be a hit
+            File.WriteAllText(outputAsSource.Path.ToString(Context.PathTable), originalContent);
+
+            ResetPipGraphBuilder();
+
+            SchedulePipBuilder(builderA);
+            SchedulePipBuilder(builderB);
+
+            // For the second build, add a racy reader, so the write being same or different content actually matters.
+            var builderC = CreatePipBuilder(new Operation[] { Operation.ReadFile(outputAsSource, doNotInfer: true) });
+            builderC.AddOutputDirectory(sharedOpaqueDirPath, SealDirectoryKind.SharedOpaque);
+            builderC.RewritePolicy = RewritePolicy.SafeSourceRewritesAreAllowed;
+            builderC.Options |= Process.Options.AllowUndeclaredSourceReads;
+            var processC = SchedulePipBuilder(builderC);
+
+            // Run pips now making sure they run in order (C can hit a write lock from B). Check convergence actually happened
+            var result = RunScheduler(runNameOrDescription: "Second build", constraintExecutionOrder: new (Pip, Pip)[] { (processC.Process, processB.Process) }).AssertFailure();
+            result.AssertPipExecutorStatCounted(PipExecutorCounter.ProcessPipTwoPhaseCacheEntriesConverged, 2);
+
+            // Pre-convergence we should see an allowed rewrite (even though there is a racy reader, the produced content is the same)
+            AssertVerboseEventLogged(LogEventId.AllowedRewriteOnUndeclaredFile);
+
+            // However, on cache convergence the converged content is different
+            // So we should see a file monitoring error
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
+        }
+
         private void FirstDoubleWriteWinsMakesPipUnCacheableRunner(
             IEnumerable<Operation> writeOperations,
             AbsolutePath sharedOpaqueDirPath,
@@ -2092,6 +2174,87 @@ namespace IntegrationTest.BuildXL.Scheduler
             RunScheduler().AssertSuccess();
         }
 
+        [Fact]
+        public void UntrackedPathsAsSharedOpaqueInputsAreHonored()
+        {
+            // First create a pip that produces a couple outputs under a shared opaque
+            string sharedOpaqueDir = Path.Combine(ObjectRoot, "partialDir");
+            AbsolutePath sharedOpaqueDirPath = AbsolutePath.Create(Context.PathTable, sharedOpaqueDir);
+            FileArtifact outputInSharedOpaque = CreateOutputFileArtifact(sharedOpaqueDir);
+
+            var sharedOpaqueSubDir = Path.Combine(sharedOpaqueDir, "subDir1");
+            var sharedOpaqueSubDirPath = AbsolutePath.Create(Context.PathTable, sharedOpaqueSubDir);
+            var sharedOpaqueSubDirArtifact = DirectoryArtifact.CreateWithZeroPartialSealId(sharedOpaqueSubDirPath);
+
+            FileArtifact outputInSharedOpaqueSubDir = CreateOutputFileArtifact(sharedOpaqueSubDirPath);
+            FileArtifact dummyOutput = FileArtifact.CreateOutputFile(sharedOpaqueDirPath.Combine(Context.PathTable, "dummy.txt"));
+
+            var builderA = CreatePipBuilder(new Operation[]
+            {
+                Operation.WriteFile(outputInSharedOpaque, "content", doNotInfer:true),
+                Operation.CreateDir(sharedOpaqueSubDirArtifact, doNotInfer: true),
+                Operation.WriteFile(outputInSharedOpaqueSubDir, "content", doNotInfer: true)
+            });
+
+            builderA.AddOutputDirectory(sharedOpaqueDirPath, SealDirectoryKind.SharedOpaque);
+
+            var pipA = SchedulePipBuilder(builderA);
+
+            // Then create a pip that depends on pipA shared opaque, but untracks the consumed files
+            // (as files and as cones)
+            var builderB = CreatePipBuilder(new Operation[]
+            {
+                Operation.ReadFile(outputInSharedOpaque, doNotInfer:true),
+                Operation.ReadFile(outputInSharedOpaqueSubDir, doNotInfer:true),
+                Operation.WriteFile(dummyOutput, "dummy output")
+            });
+
+            builderB.AddInputDirectory(pipA.ProcessOutputs.GetOpaqueDirectory(sharedOpaqueDirPath));
+            builderB.AddUntrackedFile(outputInSharedOpaque.Path);
+            builderB.AddUntrackedDirectoryScope(sharedOpaqueSubDirPath);
+
+            var pipB = SchedulePipBuilder(builderB);
+
+            // Run once
+            RunScheduler().AssertSuccess();
+
+            // Simulate scrubbing
+            File.Delete(outputInSharedOpaque.Path.ToString(Context.PathTable));
+            FileUtilities.DeleteDirectoryContents(sharedOpaqueDirPath.ToString(Context.PathTable), deleteRootDirectory: true);
+
+            // Reset and re-add pips, but now A producing files with different content
+            ResetPipGraphBuilder();
+
+            builderA = CreatePipBuilder(new Operation[]
+            {
+                Operation.WriteFile(outputInSharedOpaque, "new content", doNotInfer:true),
+                Operation.CreateDir(sharedOpaqueSubDirArtifact, doNotInfer: true),
+                Operation.WriteFile(outputInSharedOpaqueSubDir, "new content", doNotInfer: true)
+            });
+
+            builderA.AddOutputDirectory(sharedOpaqueDirPath, SealDirectoryKind.SharedOpaque);
+
+            pipA = SchedulePipBuilder(builderA);
+
+            builderB = CreatePipBuilder(new Operation[]
+            {
+                Operation.ReadFile(outputInSharedOpaque, doNotInfer:true),
+                Operation.ReadFile(outputInSharedOpaqueSubDir, doNotInfer:true),
+                Operation.WriteFile(dummyOutput, "dummy output")
+            });
+
+            builderB.AddInputDirectory(pipA.ProcessOutputs.GetOpaqueDirectory(sharedOpaqueDirPath));
+            builderB.AddUntrackedFile(outputInSharedOpaque.Path);
+            builderB.AddUntrackedDirectoryScope(sharedOpaqueSubDirPath);
+
+            pipB = SchedulePipBuilder(builderB);
+
+            // Pip A should be a miss, but pip B should still be a hit because the output files that changed were untracked
+            RunScheduler()
+                .AssertCacheMiss(pipA.Process.PipId)
+                .AssertCacheHit(pipB.Process.PipId);
+        }
+
         [Theory]
         [MemberData(nameof(TruthTable.GetTable), 2, MemberType = typeof(TruthTable))]
         public void MultiplePipsProduceTheSameTemporaryFile(bool dependencyBetweenPips, bool secondPipDeletesFile)
@@ -2237,13 +2400,10 @@ namespace IntegrationTest.BuildXL.Scheduler
             AssertErrorEventLogged(LogEventId.FileMonitoringError, count: 1);
         }
 
-        [TheoryIfSupported(requiresAdmin: true, requiresWindowsBasedOperatingSystem: true)]
-        [InlineData(true)]
-        [InlineData(false)]
-        public void DirectoryJunctionIsInterpretedAsIsWhenResolutionIsOn(bool managedReparsePointProcessing)
+        [FactIfSupported(requiresAdmin: true, requiresWindowsBasedOperatingSystem: true)]
+        public void DirectoryJunctionIsInterpretedAsIsWhenResolutionIsOn()
         {
-            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = managedReparsePointProcessing;
-            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.ProcessSymlinkedAccesses = managedReparsePointProcessing;
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
 
             string sharedOpaqueDir = Path.Combine(ObjectRoot, "sod");
             string targetDirString = Path.Combine(ObjectRoot, "target");
@@ -2359,6 +2519,88 @@ namespace IntegrationTest.BuildXL.Scheduler
             XAssert.IsFalse(Exists(fileUnderSubdirUnderSod));
             // File is neither under sod nor exclusion root, so it should be present.
             XAssert.IsTrue(Exists(fileOutsideSod));
+        }
+
+        [TheoryIfSupported(requiresSymlinkPermission: true)]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void UnresolvedAbsentAccessesContainingReparsePointsAreProperlyHandled(bool doProbe)
+        {
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
+
+            string sharedOpaqueDir = Path.Combine(ObjectRoot, "sod");
+            AbsolutePath sharedOpaqueDirPath = AbsolutePath.Create(Context.PathTable, sharedOpaqueDir);
+            AbsolutePath symlinkTarget = sharedOpaqueDirPath.Combine(Context.PathTable, "target");
+            AbsolutePath symlink = sharedOpaqueDirPath.Combine(Context.PathTable, "symlink");
+            AbsolutePath fileViaSymlink = symlink.Combine(Context.PathTable, "file");
+            AbsolutePath fileViaTarget = symlinkTarget.Combine(Context.PathTable, "file");
+
+            // Create sod/target/file
+            Directory.CreateDirectory(symlinkTarget.ToString(Context.PathTable));
+            File.WriteAllText(fileViaTarget.ToString(Context.PathTable), "content");
+
+            var builder = CreatePipBuilder(new Operation[]
+            {
+                // Probe or read the file via the symlink. This is an absent access, the symlink is not there yet
+                doProbe
+                ? Operation.Probe(FileArtifact.CreateSourceFile(fileViaSymlink), doNotInfer: true)
+                : Operation.ReadFile(FileArtifact.CreateSourceFile(fileViaSymlink), doNotInfer: true),
+                // Create the dir symlink. That makes the path that was probed above become a present one.
+                Operation.CreateSymlink(DirectoryArtifact.CreateWithZeroPartialSealId(symlink), DirectoryArtifact.CreateWithZeroPartialSealId(symlinkTarget), Operation.SymbolicLinkFlag.DIRECTORY, doNotInfer: true),
+            });
+
+            builder.AddOutputDirectory(sharedOpaqueDirPath, SealDirectoryKind.SharedOpaque);
+            builder.Options |= Process.Options.AllowUndeclaredSourceReads;
+
+            var pip = SchedulePipBuilder(builder);
+
+            RunScheduler().AssertSuccess();
+
+            // Delete the created symlink to simulate a fresh build
+            Directory.Delete(symlink.ToString(Context.PathTable));
+            
+            // We should get a cache hit.
+            RunScheduler().AssertSuccess().AssertCacheHit(pip.Process.PipId);
+        }
+
+        [FactIfSupported(requiresSymlinkPermission: true)]
+        public void UnresolvedAbsentProbesContainingReparsePointsIsNotReportedIfIsAlsoOutput()
+        {
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
+
+            string sharedOpaqueDir = Path.Combine(ObjectRoot, "sod");
+            AbsolutePath sharedOpaqueDirPath = AbsolutePath.Create(Context.PathTable, sharedOpaqueDir);
+            AbsolutePath symlinkTarget = sharedOpaqueDirPath.Combine(Context.PathTable, "target");
+            AbsolutePath symlink = sharedOpaqueDirPath.Combine(Context.PathTable, "symlink");
+            AbsolutePath fileViaSymlink = symlink.Combine(Context.PathTable, "file");
+            AbsolutePath fileViaTarget = symlinkTarget.Combine(Context.PathTable, "file");
+
+            // Create sod/target/file
+            Directory.CreateDirectory(symlinkTarget.ToString(Context.PathTable));
+
+            var builder = CreatePipBuilder(new Operation[]
+            {
+                // Probe the file via the symlink. This is an absent probe, the symlink is not there yet
+                Operation.Probe(FileArtifact.CreateSourceFile(fileViaSymlink), doNotInfer: true),
+                // Create the dir symlink. 
+                Operation.CreateSymlink(DirectoryArtifact.CreateWithZeroPartialSealId(symlink), DirectoryArtifact.CreateWithZeroPartialSealId(symlinkTarget), Operation.SymbolicLinkFlag.DIRECTORY, doNotInfer: true),
+                // Create the file via the real path. That makes the path that was probed above become a present one.
+                Operation.WriteFile(FileArtifact.CreateSourceFile(fileViaTarget), doNotInfer: true)
+            });
+
+            builder.AddOutputDirectory(sharedOpaqueDirPath, SealDirectoryKind.SharedOpaque);
+            builder.Options |= Process.Options.AllowUndeclaredSourceReads;
+
+            var pip = SchedulePipBuilder(builder);
+
+            RunScheduler().AssertSuccess();
+
+            // Delete the created symlink and file to simulate a fresh build
+            File.Delete(fileViaTarget.ToString(Context.PathTable));
+            Directory.Delete(symlink.ToString(Context.PathTable));
+
+            // We should get a cache hit. Without compensating for the absent probe this would be a miss.
+            RunScheduler().AssertSuccess().AssertCacheHit(pip.Process.PipId);
         }
 
         private string ToString(AbsolutePath path) => path.ToString(Context.PathTable);

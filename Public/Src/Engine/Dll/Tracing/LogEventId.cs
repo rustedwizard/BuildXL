@@ -115,6 +115,8 @@ namespace BuildXL.Engine.Tracing
         ConfigUnsafeAllowDuplicateTemporaryDirectory = 941,
         ConfigIgnoreFullReparsePointResolving = 942,
         ConfigUnsafeSkipFlaggingSharedOpaqueOutputs = 943,
+        ConfigUnsafeIgnorePreserveOutputsPrivatization = 944,
+        ConfigIncompatibleOptionIgnorePreserveOutputsPrivatization = 945,
 
         StartInitializingCache = 1502,
         EndInitializingCache = 1503,
@@ -304,20 +306,20 @@ namespace BuildXL.Engine.Tracing
         DistributionConnectedToWorker = 7000,
         DistributionWorkerChangedState = 7001,
         // Deprecated = 7002,
-        DistributionFailedToCallMaster = 7003,
-        DistributionInactiveMaster = 7004,
+        DistributionFailedToCallOrchestrator = 7003,
+        DistributionInactiveOrchestrator = 7004,
         DistributionStatistics = 7005,
         DistributionExecutePipFailedNetworkFailure = 7006,
         DistributionWorkerExitFailure = 7007,
         DistributionSuccessfulRetryCallToWorker = 7008,
-        DistributionSuccessfulRetryCallToMaster = 7009,
+        DistributionSuccessfulRetryCallToOrchestrator = 7009,
         DistributionWorkerAttachTooSlow = 7010,
         DistributionAttachReceived = 7011,
         DistributionExitReceived = 7012,
         DistributionTryMaterializeInputsFailedRetry = 7013,
         DistributionTryMaterializeInputsSuccessfulRetry = 7014,
 
-        DistributionWorkerUnexpectedFailureAfterMasterExits = 7017,
+        DistributionWorkerUnexpectedFailureAfterOrchestratorExits = 7017,
         DistributionWorkerFinish = 7018,
         DistributionWorkerExecutePipRequest = 7019,
         DistributionWorkerFinishedPipRequest = 7020,
@@ -329,12 +331,12 @@ namespace BuildXL.Engine.Tracing
         GrpcTrace = 7029,
         DistributionFailedToStoreValidationContentToWorkerCacheWithException = 7030,
         DistributionDisableServiceProxyInactive = 7031,
-        DistributionWaitingForMasterAttached = 7032,
+        DistributionWaitingForOrchestratorAttached = 7032,
         DistributionCallWorkerCodeException = 7033,
-        DistributionCallMasterCodeException = 7034,
+        DistributionCallOrchestratorCodeException = 7034,
         //DistributionPipRemoteResultReceived = 7035,
         DistributionHostLog = 7036,
-        DistributionMasterStatus = 7037,
+        DistributionOrchestratorStatus = 7037,
         DistributionWorkerStatus = 7038,
 
         DistributionExecutePipFailedNetworkFailureWarning = 7039,
@@ -346,6 +348,9 @@ namespace BuildXL.Engine.Tracing
         WorkerTotalRamMb = 7044,
 
         RemoteWorkerProcessedExecutionBlob = 7045,
+        // 7046 in use by SharedLogEventId
+
+        DistributionConnectionTimeout = 7047,
 
         // Scheduling
         ForceSkipDependenciesOrDistributedBuildOverrideIncrementalScheduling = 7051,
@@ -393,6 +398,10 @@ namespace BuildXL.Engine.Tracing
         InitializingVm = 7125,
 
         ChosenABTesting = 7126,
+
+        ExitOnNewGraph = 7128,
+
+        EngineLoadedFileContentTable = 7150,
 
         LogAndRemoveEngineStateOnBuildFailure = 10011,
         CacheIsStillBeingInitialized = 13200,

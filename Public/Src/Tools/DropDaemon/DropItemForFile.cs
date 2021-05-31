@@ -6,6 +6,7 @@ using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Storage;
 using Microsoft.VisualStudio.Services.BlobStore.Common;
 using Tool.ServicePipDaemon;
@@ -19,6 +20,8 @@ namespace Tool.DropDaemon
     public class DropItemForFile : IDropItem
     {
         private const int UnknownFileLength = 0;
+        private const int MaxNonLongFileNameLength = 260;
+        private const string LongFileNamePrefix = @"\\?\";
 
         /// <summary>
         ///     Constructor.
@@ -37,6 +40,12 @@ namespace Tool.DropDaemon
             Contract.Requires(fileFullPath != null);
 
             FullFilePath = Path.GetFullPath(fileFullPath);
+            if (FullFilePath.Length >= MaxNonLongFileNameLength && !FullFilePath.StartsWith(LongFileNamePrefix))
+            {
+                // this file has a long file name, need to add a prefix to it
+                FullFilePath = $"{LongFileNamePrefix}{FullFilePath}";
+            }
+
             RelativeDropPath = relativeDropPath ?? Path.GetFileName(FullFilePath);
             if (fileContentInfo != null)
             {
@@ -145,7 +154,7 @@ namespace Tool.DropDaemon
                 case BuildXL.Cache.ContentStore.Hashing.HashType.DedupSingleChunk:
                     return new ChunkDedupIdentifier(contentHash.ToHashByteArray()).ToBlobIdentifier();
                 case BuildXL.Cache.ContentStore.Hashing.HashType.DedupNode:
-                    return new NodeDedupIdentifier(contentHash.ToHashByteArray()).ToBlobIdentifier();
+                    return new NodeDedupIdentifier(contentHash.ToHashByteArray(), NodeAlgorithmId.Node64K).ToBlobIdentifier();
                 default:
                     throw new ArgumentException($"ContentHash has unsupported type when converting to BlobIdentifier: {contentHash.HashType}");
             }

@@ -17,7 +17,6 @@ using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Utilities.Tracing;
 using Microsoft.VisualStudio.Services.BlobStore.Common;
 using Microsoft.VisualStudio.Services.BlobStore.WebApi;
-using VstsDedupIdentifier = Microsoft.VisualStudio.Services.BlobStore.Common.DedupIdentifier;
 using VstsFileSystem = Microsoft.VisualStudio.Services.Content.Common.FileSystem;
 
 namespace BuildXL.Cache.ContentStore.Vsts
@@ -251,24 +250,24 @@ namespace BuildXL.Cache.ContentStore.Vsts
             }
         }
 
-        private async Task PutNodeAsync(OperationContext context, DedupNode dedupNode, AbsolutePath path)
+        private Task PutNodeAsync(OperationContext context, DedupNode dedupNode, AbsolutePath path)
         {
-            var dedupIdentifier = dedupNode.GetDedupId();
+            var dedupIdentifier = dedupNode.GetDedupIdentifier(HashType.Dedup64K);
 
-            await TryGatedArtifactOperationAsync<object>(
+            return TryGatedArtifactOperationAsync<object>(
                 context,
                 dedupIdentifier.ValueString,
                 "DedupUploadSession.UploadAsync",
                 async innerCts =>
                 {
-                    await _uploadSession.UploadAsync(dedupNode, new Dictionary<VstsDedupIdentifier, string> { { dedupIdentifier, path.Path } }, innerCts);
+                    await _uploadSession.UploadAsync(dedupNode, new Dictionary<DedupIdentifier, string> { { dedupIdentifier, path.Path } }, innerCts);
                     return null;
                 });
         }
 
         private Task PutChunkAsync(OperationContext context, DedupNode dedupNode, AbsolutePath path)
         {
-            var dedupIdentifier = dedupNode.GetDedupId();
+            var dedupIdentifier = dedupNode.GetDedupIdentifier(HashType.Dedup64K);
             return TryGatedArtifactOperationAsync(
                 context,
                 dedupIdentifier.ValueString,
@@ -283,7 +282,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
         /// <nodoc />
         internal static async Task<DedupNode> GetDedupNodeFromFileAsync(HashType hashType, string path)
         {
-            var contentHasher = (DedupContentHasher<DedupNodeOrChunkHashAlgorithm>)ContentHashers.Get(hashType);
+            var contentHasher = (DedupContentHasher<DedupNodeOrChunkHashAlgorithm>)HashInfoLookup.GetContentHasher(hashType);
             using (var stream = FileStreamUtility.OpenFileStreamForAsync(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
             {
                 return await contentHasher.HashContentAndGetDedupNodeAsync(stream);

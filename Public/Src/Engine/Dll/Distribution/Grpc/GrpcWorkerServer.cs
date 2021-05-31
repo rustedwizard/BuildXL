@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System;
+using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using BuildXL.Distribution.Grpc;
+using BuildXL.Utilities;
 using BuildXL.Utilities.Instrumentation.Common;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
@@ -15,16 +18,23 @@ namespace BuildXL.Engine.Distribution.Grpc
     /// </summary>
     public class GrpcWorkerServer : Worker.WorkerBase, IServer
     {
-        private readonly WorkerService m_workerService;
+        private readonly IWorkerService m_workerService;
         private readonly LoggingContext m_loggingContext;
-        private readonly string m_buildId;
+        private readonly DistributedBuildId m_buildId;
 
         private Server m_server;
+
+        // Expose the port to unit tests
+        internal int? Port => m_server?.Ports.FirstOrDefault()?.BoundPort;
 
         /// <summary>
         /// Class constructor
         /// </summary>
-        public GrpcWorkerServer(WorkerService workerService, LoggingContext loggingContext, string buildId)
+        public GrpcWorkerServer(WorkerService workerService, LoggingContext loggingContext, DistributedBuildId buildId) : this((IWorkerService)workerService, loggingContext, buildId)
+        {
+        }
+
+        internal GrpcWorkerServer(IWorkerService workerService, LoggingContext loggingContext, DistributedBuildId buildId)
         {
             m_workerService = workerService;
             m_loggingContext = loggingContext;
@@ -43,22 +53,38 @@ namespace BuildXL.Engine.Distribution.Grpc
             m_server.Start();
         }
 
-        /// <nodoc/>
-        public void Dispose()
+        /// <inheritdoc />
+        public void Dispose() => DisposeAsync().GetAwaiter().GetResult();
+
+        /// <inheritdoc />
+        public Task DisposeAsync() => ShutdownAsync();
+
+        /// <nodoc />
+        public async Task ShutdownAsync()
         {
-            m_server?.ShutdownAsync().GetAwaiter().GetResult();
+            if (m_server != null)
+            {
+                try
+                {
+                    await m_server.ShutdownAsync();
+                }
+                catch (InvalidOperationException)
+                {
+                    // Shutdown was already requested
+                }
+            }
         }
 
         #region Service Methods
-
+        /// Note: The logic of service methods should be replicated in Test.BuildXL.Distribution.WorkerServerMock
         /// <inheritdoc/>
         public override Task<RpcResponse> Attach(BuildStartData message, ServerCallContext context)
         {
             var bondMessage = message.ToOpenBond();
 
-            GrpcSettings.ParseHeader(context.RequestHeaders, out string sender, out string _, out string _);
+            GrpcSettings.ParseHeader(context.RequestHeaders, out string sender, out var _, out var _);
             
-            m_workerService.AttachCore(bondMessage, sender);
+            m_workerService.Attach(bondMessage, sender);
 
             return Task.FromResult(new RpcResponse());
         }
@@ -68,16 +94,15 @@ namespace BuildXL.Engine.Distribution.Grpc
         {
             var bondMessage = message.ToOpenBond();
 
-            m_workerService.ExecutePipsCore(bondMessage);
+            m_workerService.ExecutePips(bondMessage);
             return Task.FromResult(new RpcResponse());
         }
 
         /// <inheritdoc/>
         public override Task<RpcResponse> Exit(BuildEndData message, ServerCallContext context)
         {
-            m_workerService.ExitCallReceivedFromMaster();
-            m_workerService.Exit(failure: message.Failure);
-
+            var failure = string.IsNullOrEmpty(message.Failure) ? Optional<string>.Empty : message.Failure;
+            m_workerService.ExitRequested(failure);
             return Task.FromResult(new RpcResponse());
         }
 

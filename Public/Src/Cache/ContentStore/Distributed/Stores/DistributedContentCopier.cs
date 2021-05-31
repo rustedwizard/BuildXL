@@ -8,17 +8,17 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using BuildXL.Cache.ContentStore.Distributed.NuCache;
+using BuildXL.Cache.ContentStore.Distributed.NuCache.CopyScheduling;
 using BuildXL.Cache.ContentStore.Distributed.Sessions;
-using BuildXL.Cache.ContentStore.Distributed.Utilities;
 using BuildXL.Cache.ContentStore.FileSystem;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
+using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
-using BuildXL.Cache.ContentStore.Interfaces.Utils;
+using BuildXL.Cache.ContentStore.Interfaces.Extensions; // Don't remove. Needed for lower framework version because of ToHashSet.
 using BuildXL.Cache.ContentStore.Service.Grpc;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
@@ -27,36 +27,40 @@ using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
+using ContentStore.Grpc;
 using static BuildXL.Cache.ContentStore.Distributed.Stores.DistributedContentStoreSettings;
+using static BuildXL.Utilities.ConfigurationHelper;
+
 #nullable enable
 namespace BuildXL.Cache.ContentStore.Distributed.Stores
 {
     /// <summary>
     /// Handles copies from remote locations to a local store
     /// </summary>
-    public class DistributedContentCopier : IDistributedContentCopier
+    public class DistributedContentCopier : StartupShutdownSlimBase
     {
-        // Gate to control the maximum number of simultaneously active IO operations.
-        private readonly OrderedSemaphore _ioGate;
-
-        // Gate to control the maximum number of simultaneously active proactive copies.
-        private readonly OrderedSemaphore _proactiveCopyIoGate;
-
         private readonly IReadOnlyList<TimeSpan> _retryIntervals;
-        private readonly TimeSpan _ioGateTimeoutForProactiveCopies;
         private readonly int _maxRetryCount;
         private readonly IRemoteFileCopier _remoteFileCopier;
-        private readonly IContentCommunicationManager _copyRequester;
+        public IContentCommunicationManager CommunicationManager { get; }
+
         private readonly IClock _clock;
 
         private readonly DistributedContentStoreSettings _settings;
 
-        /// <inheritdoc />
+        private readonly ICopyScheduler _copyScheduler;
+
+        /// <nodoc />
         public IAbsFileSystem FileSystem { get; }
 
         private readonly CounterCollection<DistributedContentCopierCounters> _counters = new CounterCollection<DistributedContentCopierCounters>();
 
-        private Tracer Tracer { get; } = new Tracer(nameof(DistributedContentCopier));
+        protected override Tracer Tracer { get; } = new Tracer(nameof(DistributedContentCopier));
+
+        /// <summary>
+        /// Unfortunately, tests do not use this component very cleanly, so it may be started-up and shutdown multiple times
+        /// </summary>
+        public override bool AllowMultipleStartupAndShutdowns { get; } = true;
 
         /// <nodoc />
         public DistributedContentCopier(
@@ -67,47 +71,109 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             IClock clock,
             ILogger logger)
         {
-            Contract.Requires(settings != null);
             Contract.Requires(settings.ParallelHashingFileSizeBoundary >= -1);
 
             _settings = settings;
             _remoteFileCopier = fileCopier;
-            _copyRequester = copyRequester;
+            CommunicationManager = copyRequester;
             FileSystem = fileSystem;
             _clock = clock;
 
-            _ioGate = new OrderedSemaphore(_settings.MaxConcurrentCopyOperations, _settings.OrderForCopies, new Context(logger));
-            _proactiveCopyIoGate = new OrderedSemaphore(_settings.MaxConcurrentProactiveCopyOperations, _settings.OrderForProactiveCopies, new Context(logger));
+            var context = new Context(logger);
+            _copyScheduler = settings.CopyScheduler.Create(context);
+
             _retryIntervals = settings.RetryIntervalForCopies;
             _maxRetryCount = settings.MaxRetryCount;
-            _ioGateTimeoutForProactiveCopies = settings.ProactiveCopyIOGateTimeout;
         }
 
-        /// <inheritdoc />
-        public async Task<PutResult> TryCopyAndPutAsync(
-            OperationContext operationContext,
-            IDistributedContentCopierHost host,
-            ContentHashWithSizeAndLocations hashInfo,
-            CopyReason reason,
-            Func<(CopyFileResult copyResult, AbsolutePath tempLocation, int attemptCount), Task<PutResult>> handleCopyAsync)
+        protected override async Task<BoolResult> StartupCoreAsync(OperationContext context)
         {
-            Contract.Requires(hashInfo.Locations != null);
-            var cts = operationContext.Token;
+            if (_copyScheduler is IStartupShutdownSlim slimBase)
+            {
+                await slimBase.StartupAsync(context).ThrowIfFailure();
+            }
+
+            return BoolResult.Success;
+        }
+
+        protected override async Task<BoolResult> ShutdownCoreAsync(OperationContext context)
+        {
+            if (_copyScheduler is IStartupShutdownSlim slimBase)
+            {
+                await slimBase.ShutdownAsync(context).ThrowIfFailure();
+            }
+
+            return BoolResult.Success;
+        }
+
+        public record CopyRequest(
+            IDistributedContentCopierHost Host,
+            ContentHashWithSizeAndLocations HashInfo,
+            CopyReason Reason,
+            Func<(CopyFileResult copyResult, AbsolutePath tempLocation, int attemptCount), Task<PutResult>> HandleCopyAsync,
+            CopyCompression CopyCompression,
+            // Optional list of machines in the build ring that can be also used to copy data from.
+            IReadOnlyList<MachineLocation>? InRingMachines = null)
+        {
+            /// <summary>
+            /// Gets all the locations of the content including in-ring machines.
+            /// </summary>
+            public IReadOnlyList<MachineLocation> GetAllLocationCandidates()
+            {
+                if (HashInfo.Locations == null)
+                {
+                    return InRingMachines ?? Array.Empty<MachineLocation>();
+                }
+
+                if (InRingMachines == null || InRingMachines.Count == 0)
+                {
+                    return HashInfo.Locations;
+                }
+                
+                var hs = HashInfo.Locations.ToHashSet();
+                var uniqueInRingMachines = InRingMachines.Where(l => !hs.Contains(l)).ToList();
+
+                if (uniqueInRingMachines.Count == 0)
+                {
+                    return HashInfo.Locations;
+                }
+
+                // Not using the hash set to keep the original order and move the in-ring machine locations at the end of the resulting list.
+                return HashInfo.Locations.ToList().Concat(uniqueInRingMachines).ToList();
+            }
+
+            /// <summary>
+            /// Return true, if the location index belong to an in-ring machine.
+            /// </summary>
+            public bool IsExtraMachineLocationIndex(int locationIndex)
+            {
+                return locationIndex >= (HashInfo.Locations?.Count ?? 0);
+            }
+        }
+
+        /// <nodoc />
+        public async Task<PutResult> TryCopyAndPutAsync(
+            OperationContext context,
+            CopyRequest request)
+        {
+            var hashInfo = request.HashInfo;
+            var cts = context.Token;
 
             try
             {
-
                 PutResult? putResult = null;
                 var badContentLocations = new HashSet<MachineLocation>();
                 var missingContentLocations = new HashSet<MachineLocation>();
-                var lastFailureTimes = new DateTime[hashInfo.Locations.Count];
+
+                var locations = request.GetAllLocationCandidates();
+                var lastFailureTimes = new DateTime[locations.Count];
                 int attemptCount = 0;
                 int totalRetries = 0;
                 TimeSpan waitDelay = TimeSpan.Zero;
 
-                //DateTime defaults to 01/01/0001 when we initialize the array.
-                //This forloop initializes each element to the current time relative to the passed clock instance
-                //We use the time from a clock instance in case future tests try to simulate the progression of time.
+                // DateTime defaults to 01/01/0001 when we initialize the array.
+                // This for loop initializes each element to the current time relative to the passed clock instance
+                // We use the time from a clock instance in case future tests try to simulate the progression of time.
                 for (int index = 0; index < lastFailureTimes.Length; index++)
                 {
                     lastFailureTimes[index] = _clock.UtcNow;
@@ -123,21 +189,18 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     var maxReplicaCount = attemptCount < _settings.CopyAttemptsWithRestrictedReplicas
                         ? _settings.RestrictedCopyReplicaCount
                         : int.MaxValue;
-                    maxReplicaCount = Math.Min(maxReplicaCount, hashInfo.Locations.Count);
+                    maxReplicaCount = Math.Min(maxReplicaCount, locations.Count);
 
                     (putResult, retry) = await WalkLocationsAndCopyAndPutAsync(
-                        operationContext,
-                        host,
-                        hashInfo,
+                        context,
+                        request,
                         badContentLocations,
                         missingContentLocations,
                         lastFailureTimes,
                         attemptCount,
                         waitDelay,
                         maxReplicaCount,
-                        totalRetries,
-                        reason,
-                        handleCopyAsync);
+                        totalRetries);
 
                     totalRetries += maxReplicaCount;
                     if (putResult || cts.IsCancellationRequested)
@@ -145,16 +208,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                         break;
                     }
 
-                    Contract.AssertNotNull(hashInfo.Locations);
-                    if (missingContentLocations.Count == hashInfo.Locations.Count)
+                    if (missingContentLocations.Count == locations.Count)
                     {
-                        Tracer.Warning(operationContext, $"{AttemptTracePrefix(attemptCount)} All replicas {hashInfo.Locations.Count} are reported missing. Not retrying for hash {hashInfo.ContentHash.ToShortString()}.");
+                        Tracer.Warning(context, $"{AttemptTracePrefix(attemptCount)} All replicas {locations.Count} are reported missing (registered locations {hashInfo.Locations?.Count}, extra In-ring locations {locations.Count - hashInfo.Locations?.Count}). Not retrying for hash {hashInfo.ContentHash.ToShortString()}.");
                         break;
                     }
 
                     if (!retry)
                     {
-                        Tracer.Warning(operationContext, $"{AttemptTracePrefix(attemptCount)} Cannot place {hashInfo.ContentHash.ToShortString()} due to error: {putResult.ErrorMessage}. Not retrying for hash {hashInfo.ContentHash.ToShortString()}.");
+                        Tracer.Warning(context, $"{AttemptTracePrefix(attemptCount)} Cannot place {hashInfo.ContentHash.ToShortString()} due to error: {putResult.ErrorMessage}. Not retrying for hash {hashInfo.ContentHash.ToShortString()}.");
                         break;
                     }
 
@@ -171,7 +233,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                         // Log with the original attempt count
                         // Trace time remaining under trying to copy the first location of the next attempt.
                         TimeSpan waitedTime = _clock.UtcNow - lastFailureTimes[0];
-                        Tracer.Warning(operationContext, $"{AttemptTracePrefix(attemptCount - 1)} All replicas {hashInfo.Locations.Count} failed. Retrying for hash {hashInfo.ContentHash.ToShortString()} in { (waitedTime < waitDelay ? (waitDelay - waitedTime).TotalMilliseconds : 0)}ms...");
+                        Tracer.Warning(context, $"{AttemptTracePrefix(attemptCount - 1)} All replicas {locations.Count} failed. Retrying for hash {hashInfo.ContentHash.ToShortString()} in { (waitedTime < waitDelay ? (waitDelay - waitedTime).TotalMilliseconds : 0)}ms...");
                     }
                     else
                     {
@@ -186,11 +248,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
                 if (!putResult.Succeeded)
                 {
-                    traceCopyFailed(operationContext);
+                    traceCopyFailed(context);
                 }
                 else
                 {
-                    Tracer.TrackMetric(operationContext, "RemoteBytesCount", putResult.ContentSize);
+                    Tracer.TrackMetric(context, "RemoteBytesCount", putResult.ContentSize);
                     _counters[DistributedContentCopierCounters.RemoteBytes].Add(putResult.ContentSize);
                     _counters[DistributedContentCopierCounters.RemoteFilesCopied].Increment();
 
@@ -201,7 +263,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             }
             catch (Exception ex)
             {
-                traceCopyFailed(operationContext);
+                traceCopyFailed(context);
 
                 if (cts.IsCancellationRequested)
                 {
@@ -221,12 +283,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <summary>
         /// Requests another machine to copy from the current machine.
         /// </summary>
-        public Task<BoolResult> RequestCopyFileAsync(OperationContext context, ContentHash hash, MachineLocation targetLocation, bool isInsideRing, int attempt)
+        public Task<BoolResult> RequestCopyFileAsync(OperationContext context, ContentHashWithSize hash, MachineLocation targetLocation, bool isInsideRing, int attempt)
         {
             var options = GetCopyOptions(attempt);
             return PerformProactiveCopyAsync(
                 context,
-                innerContext => _copyRequester.RequestCopyFileAsync(innerContext, hash, targetLocation),
+                innerContext => CommunicationManager.RequestCopyFileAsync(innerContext, hash, targetLocation),
                 hash,
                 targetLocation,
                 isInsideRing,
@@ -236,10 +298,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 result => CopyResultCode.Unknown);
         }
 
-        private async Task<TResult> PerformProactiveCopyAsync<TResult>(
+        private Task<TResult> PerformProactiveCopyAsync<TResult>(
             OperationContext context,
             Func<OperationContext, Task<TResult>> func,
-            ContentHash hash,
+            ContentHashWithSize hash,
             MachineLocation targetLocation,
             bool isInsideRing,
             CopyReason reason,
@@ -247,36 +309,59 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             int attempt,
             Func<TResult, CopyResultCode> statusFunc) where TResult : ResultBase
         {
-            TimeSpan ioGateWaitTime = default;
-            int ioGateCurrentCount = default;
-            var ioGateTimedOut = true;
+            CopySchedulingSummary? copySchedulingSummary = null;
+            var ioGateTimedOut = false;
 
-            return await context.PerformOperationAsync(
+            return context.PerformOperationAsync(
                 Tracer,
-                operation: () => _proactiveCopyIoGate.GatedOperationAsync(pair =>
+                operation: async () =>
+                {
+                    var schedulerResult = await _copyScheduler.ScheduleOutboundPushAsync(new OutboundPushCopy<TResult>(
+                        Context: context,
+                        Reason: reason,
+                        Attempt: attempt,
+                        LocationSource: source,
+                        PerformOperationAsync: async (arguments) =>
+                        {
+                            copySchedulingSummary = arguments.Summary;
+                            return await func(arguments.Context);
+                        }));
+
+                    if (!schedulerResult.Succeeded)
                     {
-                        var (timeWaiting, currentCount) = pair;
-                        ioGateTimedOut = false;
-                        ioGateWaitTime = timeWaiting;
-                        ioGateCurrentCount = currentCount;
-                        return func(context);
-                    },
-                    context.Token,
-                    _ioGateTimeoutForProactiveCopies),
+                        if (schedulerResult.Reason == SchedulerFailureCode.Timeout)
+                        {
+                            ioGateTimedOut = true;
+                        }
+
+                        // NOTE: this is here to avoid making the code flow analysis mad
+                        throw new ResultPropagationException(schedulerResult);
+                    }
+                    else
+                    {
+                        return schedulerResult.Value!;
+                    }
+                },
                 traceOperationStarted: false,
                 extraEndMessage: result =>
-                    $"Code={statusFunc(result)} " +
-                    $"ContentHash={hash.ToShortString()} " +
-                    $"TargetLocation=[{targetLocation}] " +
-                    $"InsideRing={isInsideRing} " +
-                    $"CopyReason={reason} " +
-                    $"LocationSource={source} " +
-                    $"IOGate.OccupiedCount={_settings.MaxConcurrentProactiveCopyOperations - ioGateCurrentCount} " +
-                    $"IOGate.Wait={ioGateWaitTime.TotalMilliseconds}ms. " +
-                    $"IOGate.TimedOut={ioGateTimedOut} " +
-                    $"Attempt={attempt} " +
-                    (result is PushFileResult pushResult && pushResult.HeaderResponseTime.HasValue ? $"HeaderResponseTime={pushResult.HeaderResponseTime} " : string.Empty) +
-                    (result is ICopyResult copyResult && copyResult.MinimumSpeedInMbPerSec.HasValue ? $"minBandwidthSpeed={copyResult.MinimumSpeedInMbPerSec.Value}MiB/s " : string.Empty));
+                {
+                    var sizeString = $"Size=[{hash.Size}] ";
+                    var headerResponseTimeString = result is PushFileResult pushResult && pushResult.HeaderResponseTime.HasValue ? $"HeaderResponseTime={pushResult.HeaderResponseTime} " : string.Empty;
+                    var minBandwidthSpeedString = result is ICopyResult copyResult && copyResult.MinimumSpeedInMbPerSec.HasValue ? $"minBandwidthSpeed={copyResult.MinimumSpeedInMbPerSec.Value}MiB/s " : string.Empty;
+                    return
+                        $"Code={statusFunc(result)} " +
+                        $"ContentHash={hash.Hash.ToShortString()} " +
+                        $"TargetLocation=[{targetLocation}] " +
+                        $"InsideRing={isInsideRing} " +
+                        $"CopyReason={reason} " +
+                        $"Attempt={attempt} " +
+                        $"LocationSource={source} " +
+                        (copySchedulingSummary is null ? string.Empty : $"{copySchedulingSummary} ") +
+                        $"Scheduler.TimedOut={ioGateTimedOut} " +
+                        sizeString +
+                        headerResponseTimeString +
+                        minBandwidthSpeedString;
+                });
         }
 
         /// <summary>
@@ -284,7 +369,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// </summary>
         public Task<PushFileResult> PushFileAsync(
             OperationContext context,
-            ContentHash hash,
+            ContentHashWithSize hashWithSize,
             MachineLocation targetLocation,
             Stream stream,
             bool isInsideRing,
@@ -295,8 +380,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             var options = GetCopyOptions(attempt);
             return PerformProactiveCopyAsync(
                 context,
-                innerContext => _copyRequester.PushFileAsync(innerContext, hash, stream, targetLocation, options),
-                hash,
+                innerContext => CommunicationManager.PushFileAsync(innerContext, hashWithSize, stream, targetLocation, options),
+                hashWithSize,
                 targetLocation,
                 isInsideRing,
                 reason,
@@ -305,10 +390,26 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 result => result.Status);
         }
 
-        private CopyOptions GetCopyOptions(int attempt)
+        private CopyOptions GetCopyOptions(int attempt, int currentRetryNumber = 0, CopyRequest? request = null)
         {
+            // Using more optimal bandwidth configuration only for the first half of the attempts.
+            // This is needed for the cases when the hash is popular and we never reach the second attempt.
+            // In this case, we'll be using a more aggressive configuration for the first 16 (by default) locations.
+            if (currentRetryNumber > (_maxRetryCount / 2) - 1)
+            {
+                // if the index is negative, ElementAtOrDefault returns the default value.
+                attempt = -1;
+            }
+
             var bandwidthConfig = _settings.BandwidthConfigurations?.ElementAtOrDefault(attempt);
-            return new CopyOptions(bandwidthConfig);
+
+            var copyOptions = new CopyOptions(bandwidthConfig);
+            if (request != null)
+            {
+                copyOptions.CompressionHint = request.CopyCompression;
+            }
+
+            return copyOptions;
         }
 
         private PutResult CreateCanceledPutResult() => new ErrorResult("The operation was canceled").AsResult<PutResult>();
@@ -317,20 +418,18 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <nodoc />
         private async Task<(PutResult result, bool retry)> WalkLocationsAndCopyAndPutAsync(
             OperationContext context,
-            IDistributedContentCopierHost host,
-            ContentHashWithSizeAndLocations hashInfo,
+            CopyRequest request,
             HashSet<MachineLocation> badContentLocations,
             HashSet<MachineLocation> missingContentLocations,
             DateTime[] lastFailureTimes,
             int attemptCount,
             TimeSpan waitDelay,
             int maxReplicaCount,
-            int totalRetries,
-            CopyReason reason,
-            Func<(CopyFileResult copyResult, AbsolutePath tempLocation, int attemptCount), Task<PutResult>> handleCopyAsync)
+            int totalRetries)
         {
-            Contract.Requires(hashInfo.Locations != null);
-            var workingFolder = host.WorkingFolder;
+            var workingFolder = request.Host.WorkingFolder;
+            var hashInfo = request.HashInfo;
+            var locations = request.GetAllLocationCandidates();
 
             var cts = context.Token;
 
@@ -339,11 +438,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             badContentLocations.Clear();
             string? lastErrorMessage = null;
 
+            Contract.Assert(maxReplicaCount <= locations.Count);
+            
             for (int replicaIndex = 0; replicaIndex < maxReplicaCount; replicaIndex++)
             {
-                var location = hashInfo.Locations[replicaIndex];
+                var location = locations[replicaIndex];
 
-                // Currently every time we increment attemptCount's value, we go through every location in hashInfo and try to copy.
+                // Currently every time we increment attemptCount's value, we go through every location in request.HashInfo and try to copy.
                 // We add one because replicaIndex is indexed from zero.
                 // If we reach over maximum retries, return an put result stating so, and no longer retry
                 var totalRetryCount = totalRetries + replicaIndex;
@@ -371,7 +472,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     }
                 }
 
-                var sourcePath = new ContentLocation(location, hashInfo.ContentHash);
+                var sourcePath = new ContentLocation(location, hashInfo.ContentHash, hashInfo.NullableSize, fromRing: request.IsExtraMachineLocationIndex(replicaIndex));
 
                 var tempLocation = AbsolutePath.CreateRandomFileName(workingFolder);
 
@@ -394,48 +495,64 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     CopyFileResult? copyFileResult = null;
                     try
                     {
-                        double ioGateWait = 0;
-                        int ioGateCurrentCount = 0;
-                        var options = GetCopyOptions(attemptCount);
-
+                        var options = GetCopyOptions(attemptCount, totalRetryCount, request);
+                        CopySchedulingSummary? copySchedulingSummary = null;
                         copyFileResult = await context.PerformOperationAsync(
                             Tracer,
-                            async () => await _ioGate.GatedOperationAsync(async pair =>
+                            async () =>
                             {
-                                var (timeWaiting, currentCount) = pair;
-                                ioGateWait = timeWaiting.TotalMilliseconds;
-                                    ioGateCurrentCount = currentCount;
+                                var schedulerResult = await _copyScheduler.ScheduleOutboundPullAsync(new OutboundPullCopy(
+                                    Reason: request.Reason,
+                                    Context: context.WithCancellationToken(cts),
+                                    Attempt: attemptCount,
+                                    PerformOperationAsync: async (arguments) =>
+                                    {
+                                        var result = await TaskUtilities.AwaitWithProgressReportingAsync(
+                                                    task: CopyFileAsync(arguments.Context, sourcePath, tempLocation, hashInfo, arguments.Context.Token, options),
+                                                    period: _settings.PeriodicCopyTracingInterval,
+                                                    action: timeSpan => Tracer.Debug(context, $"{Tracer.Name}.RemoteCopyFile from[{location}]) via stream in progress {(int)timeSpan.TotalSeconds}s, TotalBytesCopied=[{options.TotalBytesCopied}]."),
+                                                    reportImmediately: false,
+                                                    reportAtEnd: false);
 
-                                    return await TaskUtilities.AwaitWithProgressReporting(
-                                        task: CopyFileAsync(context, sourcePath, tempLocation, hashInfo, cts, options),
-                                        period: _settings.PeriodicCopyTracingInterval,
-                                        action: timeSpan => Tracer.Debug(context, $"{Tracer.Name}.RemoteCopyFile from[{location}]) via stream in progress {(int)timeSpan.TotalSeconds}s, TotalBytesCopied=[{options.TotalBytesCopied}]."),
-                                        reportImmediately: false,
-                                        reportAtEnd: false);
-                                }, cts),
+                                        copySchedulingSummary = arguments.Summary;
+                                        return result;
+                                    })
+                                {
+                                    ContentHash = hashInfo.ContentHash,
+                                });
+
+                                // The scheduler may have failed, in which case the error is thrown here. If the copy
+                                // fails, we'll pass this success check and return the error below.
+                                if (!schedulerResult.Succeeded)
+                                {
+                                    throw new ResultPropagationException(schedulerResult);
+                                }
+                                else
+                                {
+                                    return schedulerResult.Value!;
+                                }
+                            },
                             traceOperationStarted: false,
                             traceOperationFinished: true,
                             extraEndMessage: (result) =>
                                 $"contentHash=[{hashInfo.ContentHash.ToShortString()}] " +
                                 $"from=[{sourcePath.Machine}] " +
                                 $"size=[{result.Size ?? hashInfo.Size}] " +
-                                $"reason={reason} " +
+                                $"fromRing=[{sourcePath.FromRing}] " +
+                                $"reason={request.Reason} " +
                                 $"trusted={_settings.UseTrustedHash(result.Size ?? hashInfo.Size)} " +
                                 $"attempt={attemptCount} replica={replicaIndex} " +
                                 (result.TimeSpentHashing.HasValue ? $"timeSpentHashing={result.TimeSpentHashing.Value.TotalMilliseconds}ms " : string.Empty) +
                                 (result.TimeSpentWritingToDisk.HasValue ? $"writeTime={result.TimeSpentWritingToDisk.Value.TotalMilliseconds}ms " : string.Empty) +
-                                $"IOGate.OccupiedCount={_settings.MaxConcurrentCopyOperations - ioGateCurrentCount} " +
-                                $"IOGate.Wait={ioGateWait}ms " +
+                                (copySchedulingSummary is null ? string.Empty : $"{copySchedulingSummary} ") +
                                 $"BandwidthOptions=[{options.BandwidthConfiguration?.ToString() ?? "null"}] " +
+                                $"Compression=[{options.CompressionHint.ToString()}] " +
                                 (result.HeaderResponseTime.HasValue ? $"HeaderResponseTime={result.HeaderResponseTime} " : string.Empty) +
                                 (result.MinimumSpeedInMbPerSec.HasValue ? $"minBandwidthSpeed={result.MinimumSpeedInMbPerSec.Value}MiB/s " : string.Empty),
                             caller: "RemoteCopyFile",
                             counter: _counters[DistributedContentCopierCounters.RemoteCopyFile]);
 
-                        if (copyFileResult.TimeSpentHashing.HasValue)
-                        {
-                            Tracer.TrackMetric(context, "CopyHashingTimeMs", (long)copyFileResult.TimeSpentHashing.Value.TotalMilliseconds);
-                        }
+                        TrackCopyFileResultMetrics(context, copyFileResult, attemptCount, copySchedulingSummary);
                     }
                     catch (Exception e) when (e is OperationCanceledException)
                     {
@@ -453,27 +570,27 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                         switch (copyFileResult.Code)
                         {
                             case CopyResultCode.Success:
-                                host.ReportReputation(location, MachineReputation.Good);
+                                request.Host.ReportReputation(location, MachineReputation.Good);
                                 break;
                             case CopyResultCode.FileNotFoundError:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to path {tempLocation} due to an error with the sourcepath: {copyFileResult}";
                                 missingContentLocations.Add(location);
-                                host.ReportReputation(location, MachineReputation.Missing);
+                                request.Host.ReportReputation(location, MachineReputation.Missing);
                                 break;
                             case CopyResultCode.ServerUnavailable:
                             case CopyResultCode.UnknownServerError:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to path {tempLocation} due to an error with the sourcepath: {copyFileResult}";
-                                host.ReportReputation(location, MachineReputation.Bad);
+                                request.Host.ReportReputation(location, MachineReputation.Bad);
                                 badContentLocations.Add(location);
                                 break;
                             case CopyResultCode.ConnectionTimeoutError:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to path {tempLocation} due to a grpc connection timeout: {copyFileResult}";
-                                host.ReportReputation(location, MachineReputation.Timeout);
+                                request.Host.ReportReputation(location, MachineReputation.Timeout);
                                 badContentLocations.Add(location);
                                 break;
                             case CopyResultCode.TimeToFirstByteTimeoutError:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to path {tempLocation} due to timeout receiving the first bytes: {copyFileResult}";
-                                host.ReportReputation(location, MachineReputation.Timeout);
+                                request.Host.ReportReputation(location, MachineReputation.Timeout);
                                 badContentLocations.Add(location);
                                 break;
                             case CopyResultCode.DestinationPathError:
@@ -484,18 +601,18 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                                 return (result: new ErrorResult(copyFileResult).AsResult<PutResult>(), retry: true);
                             case CopyResultCode.CopyTimeoutError:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to path {tempLocation} due to copy timeout: {copyFileResult}";
-                                host.ReportReputation(location, MachineReputation.Timeout);
+                                request.Host.ReportReputation(location, MachineReputation.Timeout);
                                 break;
                             case CopyResultCode.CopyBandwidthTimeoutError:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to path {tempLocation} due to insufficient bandwidth timeout: {copyFileResult}";
-                                host.ReportReputation(location, MachineReputation.Timeout);
+                                request.Host.ReportReputation(location, MachineReputation.Timeout);
                                 break;
                             case CopyResultCode.InvalidHash:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to path {tempLocation} due to invalid hash: {copyFileResult}";
                                 break;
                             case CopyResultCode.Unknown:
                                 lastErrorMessage = $"Could not copy file with hash {hashInfo.ContentHash.ToShortString()} from path {sourcePath} to temp path {tempLocation} due to an internal error: {copyFileResult}";
-                                host.ReportReputation(location, MachineReputation.Bad);
+                                request.Host.ReportReputation(location, MachineReputation.Bad);
                                 break;
                             default:
                                 lastErrorMessage = $"File copier result code {copyFileResult.Code} is not recognized. Not trying another replica.";
@@ -517,7 +634,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                                 continue;
                             }
 
-                            PutResult putResult = await handleCopyAsync((copyFileResult, tempLocation, attemptCount));
+                            PutResult putResult = await request.HandleCopyAsync((copyFileResult, tempLocation, attemptCount));
 
                             if (putResult.Succeeded)
                             {
@@ -571,7 +688,23 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 lastErrorMessage = ". " + lastErrorMessage;
             }
 
-            return (new PutResult(hashInfo.ContentHash, $"Unable to copy file{lastErrorMessage}"), retry: true);
+            return (new PutResult(request.HashInfo.ContentHash, $"Unable to copy file{lastErrorMessage}"), retry: true);
+        }
+
+        private void TrackCopyFileResultMetrics(Context context, CopyFileResult result, int attemptCount, CopySchedulingSummary? summary)
+        {
+            Tracer.TrackMetric(context, "CopyFile_Duration", result.DurationMs);
+            Tracer.TrackMetric(context, "CopyFile_AttemptCount", attemptCount);
+
+            if (summary != null)
+            {
+                Tracer.TrackMetric(context, "CopyFile_IOGateWaitTimeMs", (long)summary.QueueWait.TotalMilliseconds);
+            }
+
+            ApplyIfNotNull(result.Size, v => Tracer.TrackMetric(context, "CopyFile_Size", v));
+            ApplyIfNotNull(result.TimeSpentHashing, v => Tracer.TrackMetric(context, "CopyFile_HashingTimeMs", (long)v.TotalMilliseconds));
+            ApplyIfNotNull(result.TimeSpentWritingToDisk, v => Tracer.TrackMetric(context, "CopyFile_WriteToDiskTimeMs", (long)v.TotalMilliseconds));
+            ApplyIfNotNull(result.HeaderResponseTime, v => Tracer.TrackMetric(context, "CopyFile_HeaderResponseTimeMs", (long)v.TotalMilliseconds));
         }
 
         private async Task<CopyFileResult> CopyFileAsync(
@@ -591,22 +724,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     // If we know that the file is large, then hash concurrently from the start
                     bool hashEntireFileConcurrently = _settings.ParallelHashingFileSizeBoundary >= 0 && hashInfo.Size > _settings.ParallelHashingFileSizeBoundary;
 
-                    int bufferSize = GetBufferSize(hashInfo);
-
                     // Since this is the only place where we hash the file during trusted copies, we attempt to get access to the bytes here,
                     //  to avoid an additional IO operation later. In case that the file is bigger than the ContentLocationStore permits or blobs
                     //  aren't supported, disposing the FileStream twice does not throw or cause issues.
-                    using (Stream fileStream = await FileSystem.OpenSafeAsync(tempDestinationPath, FileAccess.Write, FileMode.Create, FileShare.Read | FileShare.Delete, FileOptions.SequentialScan, bufferSize))
+                    using (Stream fileStream = FileSystem.OpenForWrite(tempDestinationPath, hashInfo.NullableSize, FileMode.Create, FileShare.Read | FileShare.Delete))
                     {
-                        if (hashInfo.Size >= 0)
-                        {
-                            // Setting file size makes the file system happy and is considered a best practice.
-                            fileStream.SetLength(hashInfo.Size);
-                        }
-
                         using (Stream possiblyRecordingStream = _settings.AreBlobsSupported && hashInfo.Size <= _settings.MaxBlobSize && hashInfo.Size >= 0 ? (Stream)RecordingStream.WriteRecordingStream(fileStream) : fileStream)
                         // Use hashInfo.Size since if it is -1 we will not have resized the stream and it will disable an optimization in dedup hashers which depends on file size.
-                        using (HashingStream hashingStream = ContentHashers.Get(hashInfo.ContentHash.HashType).CreateWriteHashingStream(hashInfo.Size, possiblyRecordingStream, hashEntireFileConcurrently ? 1 : _settings.ParallelHashingFileSizeBoundary))
+                        using (HashingStream hashingStream = HashInfoLookup.GetContentHasher(hashInfo.ContentHash.HashType).CreateWriteHashingStream(hashInfo.Size, possiblyRecordingStream, hashEntireFileConcurrently ? 1 : _settings.ParallelHashingFileSizeBoundary))
                         {
                             var copyFileResult = await _remoteFileCopier.CopyToAsync(
                                 new OperationContext(context, cts), location, hashingStream,
@@ -702,33 +827,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 FileSystem.CreateDirectory(directoryPath);
             }
 
-            using var stream = await FileSystem.OpenSafeAsync(destinationPath, FileAccess.Write, FileMode.Create, FileShare.None, FileOptions.SequentialScan, DefaultBufferSize);
+            
+            using var stream = FileSystem.OpenForWrite(destinationPath, sourcePath.Size, FileMode.Create, FileShare.None, FileOptions.SequentialScan, DefaultBufferSize);
             var result = await copier.CopyToAsync(context, sourcePath, stream, options);
 
             TrackTimeSpentWritingToDisk(result, stream);
 
             return result;
-        }
-
-        private static int GetBufferSize(ContentHashWithSizeAndLocations hashInfo)
-        {
-            // For "small" files we use "small buffer size"
-            // For files in [small, large) range we use file.Size
-            // For "large" files we use "large buffer size".
-
-            var size = hashInfo.Size;
-            if (size <= DefaultSmallBufferSize)
-            {
-                return DefaultSmallBufferSize;
-            }
-            else if (size >= DefaultLargeBufferSize)
-            {
-                return DefaultLargeBufferSize;
-            }
-            else
-            {
-                return (int)size;
-            }
         }
 
         private string AttemptTracePrefix(int attemptCount)
@@ -754,18 +859,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 Absent = absent;
                 Unknown = unknown;
             }
-        }
-
-        /// <summary>
-        /// This gated method attempts to limit the number of simultaneous off-machine file IO.
-        /// It's not clear whether this is really a good idea, since usually IO thread management is best left to the scheduler.
-        /// But if there is a truly enormous amount of external IO, it's not clear that they will all be scheduled in a way
-        /// that will minimize timeouts, so we will try this gate.
-        /// </summary>
-        private Task<FileExistenceResult> GatedCheckFileExistenceAsync(OperationContext context, ContentLocation location)
-        {
-            return _ioGate.GatedOperationAsync(
-                pair => _remoteFileCopier.CheckFileExistsAsync(context, location), context.Token, Timeout.InfiniteTimeSpan);
         }
 
         /// <nodoc />
@@ -797,7 +890,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// </summary>
         public async Task<DeleteResult> DeleteAsync(OperationContext context, ContentHash contentHash, long contentSize, IReadOnlyList<MachineLocation> machines, Dictionary<string, DeleteResult> deleteMapping)
         {
-            var tasks = machines.Select(m => _copyRequester.DeleteFileAsync(context, contentHash, m)).ToList();
+            var tasks = machines.Select(m => CommunicationManager.DeleteFileAsync(context, contentHash, m)).ToList();
             var deleteResults = await Task.WhenAll(tasks);
             var size = contentSize;
 

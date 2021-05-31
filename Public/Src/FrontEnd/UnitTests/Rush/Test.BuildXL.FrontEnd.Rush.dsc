@@ -4,27 +4,23 @@
 import * as Managed from "Sdk.Managed";
 import * as MSBuild from "Sdk.Selfhost.MSBuild";
 import * as Frameworks from "Sdk.Managed.Frameworks";
-import * as Node from "Sdk.NodeJs";
+import {Node} from "Sdk.NodeJs";
 import {Transformer} from "Sdk.Transformers";
 
 namespace Test.Rush {
     
     // Install Rush for tests
-    const rush = Node.Npm.install({
-        name: "@microsoft/rush", 
-        version: "5.22.0", 
-        destinationFolder: Context.getNewOutputDirectory(a`rush-test`)});
-    
-    const rushlib = Node.Npm.install({
-        name: "@microsoft/rush-lib", 
-        version: "5.22.0", 
-        destinationFolder: Context.getNewOutputDirectory(a`rushlib-test`)});
+    const rushTest = Context.getNewOutputDirectory(a`rush-test`);
+    const rush = Node.runNpmPackageInstall(rushTest, [], {name: "@microsoft/rush", version: "5.22.0"});
+
+    const rushLibTest = Context.getNewOutputDirectory(a`rushlib-test`);
+    const rushlib = Node.runNpmPackageInstall(rushLibTest, [], {name: "@microsoft/rush-lib", version: "5.22.0"});
 
     // TODO: to enable this, we should use an older version of NodeJs for Linux
     const isRunningOnSupportedSystem = Context.getCurrentHost().cpuArchitecture === "x64" && !BuildXLSdk.isHostOsLinux;
 
     @@public
-    export const dll = isRunningOnSupportedSystem && BuildXLSdk.test({
+    export const dll = Environment.getFlag("[Sdk.BuildXL]microsoftInternal") && isRunningOnSupportedSystem && BuildXLSdk.test({
         // QTest is not supporting opaque directories as part of the deployment
         testFramework: importFrom("Sdk.Managed.Testing.XUnit").framework,
         runTestArgs: {
@@ -36,10 +32,13 @@ namespace Test.Rush {
                  "BxlRushConfigurationTests",
                  "RushCustomCommandsTests",
                  "RushExecuteTests",
+                 "RushExecuteCommandGroupTests",
                  "RushExportsTests",
                  "RushIntegrationTests",
                  "RushLibLocationTests",
-                 "RushSchedulingTests"
+                 "RushSchedulingTests",
+                 "RushCustomSchedulingTests",
+                 "RushCustomScriptsTests"
             ]
         },
         assemblyName: "Test.BuildXL.FrontEnd.Rush",
@@ -75,40 +74,17 @@ namespace Test.Rush {
                 // rush-lib dependency in a nested location.
                 subfolder: r`rush/node_modules`,
                 contents: [
-                    rush.nodeModules,
+                    rush,
                     {
                         subfolder: r`@microsoft/rush/node_modules`,
-                        contents: [rushlib.nodeModules]
+                        contents: [rushlib]
                     }
                 ]
             },
             {
                 subfolder: a`node`,
-                contents: [getNodeExeForRushDirectory()]
+                contents: [Node.nodeExecutables]
             },
         ],
     });
-
-    const nodeWinDir = "node-v12.16.1-win-x64";
-    const nodeOsxDir = "node-v12.16.1-darwin-x64";
-
-    function getNodeExeForRushDirectory(): StaticDirectory {
-        Contract.assert(isRunningOnSupportedSystem, "Only 64bit versions of Win and OSX supported.");
-
-        let pkgContents : StaticDirectory = undefined;
-
-        const host = Context.getCurrentHost();
-        switch (host.os) {
-            case "win":
-                pkgContents = Transformer.reSealPartialDirectory(importFrom("NodeJs.ForRush.win-x64").extracted, r`${nodeWinDir}`);
-                break;
-            case "macOS": 
-                pkgContents = Transformer.reSealPartialDirectory(importFrom("NodeJs.ForRush.osx-x64").extracted, r`${nodeOsxDir}\bin`);
-                break;
-            default:
-                Contract.fail(`The current NodeJs package doesn't support the current OS: ${host.os}. Ensure you run on a supported OS -or- update the NodeJs package to have the version embdded.`);
-        }
-
-        return pkgContents;
-    }
 }

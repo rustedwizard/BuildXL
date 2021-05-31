@@ -10,8 +10,14 @@ using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Synchronization.Internal;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Tracing;
+#if MICROSOFT_INTERNAL
+using Microsoft.Caching.Redis;
+using Microsoft.Caching.Redis.KeyspaceIsolation;
+#else
 using StackExchange.Redis;
 using StackExchange.Redis.KeyspaceIsolation;
+#endif
 
 #nullable enable
 
@@ -22,6 +28,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
     /// </summary>
     public class RedisDatabaseFactory
     {
+        private static readonly Tracer Tracer = new Tracer(nameof(RedisDatabaseFactory));
+
         private readonly SemaphoreSlim _creationSemaphore = new SemaphoreSlim(1, 1);
 
         private readonly Func<Task<IConnectionMultiplexer>> _connectionMultiplexerFactory;
@@ -48,9 +56,20 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         /// <summary>
         /// Factory method for a database factory.
         /// </summary>
-        public static async Task<RedisDatabaseFactory> CreateAsync(Context context, IConnectionStringProvider provider, Severity logSeverity, bool usePreventThreadTheft)
+        public static Task<RedisDatabaseFactory> CreateAsync(Context context, IConnectionStringProvider provider, Severity logSeverity, bool usePreventThreadTheft)
         {
-            Func<Task<IConnectionMultiplexer>> connectionMultiplexerFactory = () => RedisConnectionMultiplexer.CreateAsync(context, provider, logSeverity, usePreventThreadTheft);
+            return CreateAsync(
+                context,
+                provider,
+                new RedisConnectionMultiplexerConfiguration(logSeverity, usePreventThreadTheft));
+        }
+
+        /// <summary>
+        /// Factory method for a database factory.
+        /// </summary>
+        public static async Task<RedisDatabaseFactory> CreateAsync(Context context, IConnectionStringProvider provider, RedisConnectionMultiplexerConfiguration configuration)
+        {
+            Func<Task<IConnectionMultiplexer>> connectionMultiplexerFactory = () => RedisConnectionMultiplexer.CreateAsync(context, provider, configuration);
 
             Func<IConnectionMultiplexer, Task> connectionMultiplexerShutdownFunc = async m =>
             {
@@ -108,11 +127,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
                 {
                     if (_resetConnectionMultiplexerCts.IsCancellationRequested)
                     {
-                        context.Debug("Shutting down current connection multiplexer.");
+                        Tracer.Debug(context, "Shutting down current connection multiplexer.");
 
                         await _connectionMultiplexerShutdownFunc(_connectionMultiplexer);
 
-                        context.Debug("Creating new multiplexer instance.");
+                        Tracer.Debug(context, "Creating new multiplexer instance.");
 
                         var newConnectionMultiplexer = await _connectionMultiplexerFactory();
 

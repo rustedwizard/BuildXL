@@ -9,6 +9,11 @@ namespace Test.DScript.Ast.Interpretation
 {
     public sealed class InterpretTypeOf : DsTest
     {
+        /// <summary>
+        /// Some of the expressions below use simplified type annotations that don't match with the actual Transformer SDK
+        /// </summary>
+        protected override bool DisableInBoxSDKResolver => true;
+
         public InterpretTypeOf(ITestOutputHelper output)
             : base(output)
         { }
@@ -34,6 +39,7 @@ namespace Test.DScript.Ast.Interpretation
         [InlineData("Transformer.sealSourceDirectory(d`.`, Transformer.SealSourceDirectoryOption.topDirectoryOnly)", "SourceTopDirectory")]
         [InlineData("Transformer.composeSharedOpaqueDirectories(d`.`, [], {kind:\"Include\", regex:\".*\"})", "SharedOpaqueDirectory")]
         [InlineData("Transformer.filterSharedOpaqueDirectory(d`.`, {kind:\"Include\", regex:\".*\"})", "SharedOpaqueDirectory")]
+		[InlineData("Transformer.getSharedOpaqueSubDirectory(Transformer.composeSharedOpaqueDirectories(d`.`, []), p`foo`, {kind:\"Include\", regex:\".*\"})", "SharedOpaqueDirectory")]
         [InlineData("Transformer.execute({tool: {exe: f`myExe`}, arguments:[], workingDirectory: d`.`, outputs: [{kind: 'exclusive', directory: d`Out`}]}).getOutputDirectory(d`Out`)", "ExclusiveOpaqueDirectory")]
         public void InterpretTypeOfTest(string expr, string typeName)
         {

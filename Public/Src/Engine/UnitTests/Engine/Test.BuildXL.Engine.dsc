@@ -24,7 +24,7 @@ namespace Engine {
     ];
 
     // Update the value of this variable if you change the version of Microsoft.Net.Compilers in config.dsc.
-    const microsoftNetCompilerSpec = f`${Context.getMount("FrontEnd").path}/Nuget/specs/Microsoft.Net.Compilers/3.5.0/module.config.bm`;
+    const microsoftNetCompilerSpec = f`${Context.getMount("FrontEnd").path}/Nuget/specs/Microsoft.Net.Compilers/3.8.0/module.config.bm`;
 
     @@public
     export const categoriesToRunInParallel = [
@@ -66,6 +66,7 @@ namespace Engine {
             importFrom("BuildXL.Cache.ContentStore").VfsTest.dll,
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
             importFrom("BuildXL.Cache.ContentStore").VfsLibrary.dll,
+            importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
             importFrom("BuildXL.Cache.MemoizationStore").Interfaces.dll,
             importFrom("BuildXL.Engine").Engine.dll,
             importFrom("BuildXL.Engine").Cache.dll,

@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Ipc.Interfaces;
 using Microsoft.VisualStudio.Services.BlobStore.Common;
 using Microsoft.VisualStudio.Services.BlobStore.WebApi;
@@ -177,11 +178,35 @@ namespace Tool.ServicePipDaemon
         #endregion
 
         /// <inheritdoc />
-        public Task<IEnumerable<DropItem>> ListAsync(string dropNamePrefix, PathOptions pathOptions, bool includeNonFinalizedDrops, CancellationToken cancellationToken, RetrievalOptions retrievalOptions, SizeOptions sizeOptions, ExpirationDateOptions expirationDateOptions, IDomainId domainId)
+        public Task<IEnumerable<DropItem>> ListAsync(
+            string dropNamePrefix, 
+            PathOptions pathOptions, 
+            bool includeNonFinalizedDrops, 
+            CancellationToken cancellationToken, 
+            RetrievalOptions retrievalOptions,
+            SizeOptions sizeOptions, 
+            ExpirationDateOptions expirationDateOptions, 
+            IDomainId domainId,
+            int pageSize = -1,
+            string continueFromDropName = null)
         {
             return RetryAsync(
                 nameof(IDropServiceClient.ListAsync),
-                (client, ct) => client.ListAsync(dropNamePrefix, pathOptions, includeNonFinalizedDrops, ct, retrievalOptions, sizeOptions, expirationDateOptions),
+                (client, ct) => client.ListAsync(dropNamePrefix, pathOptions, includeNonFinalizedDrops, ct, retrievalOptions, sizeOptions, expirationDateOptions, domainId, pageSize, continueFromDropName),
+                cancellationToken);
+        }
+
+        /// <inheritdoc />
+        public Task<IAsyncEnumerator<IEnumerable<DropItem>>> ListStreamedAsync(
+            string dropNamePrefix,
+            PathOptions pathOptions,
+            CancellationToken cancellationToken,
+            DropItemFilterOptions filterOptions,
+            DropItemPaginationOptions paginationOptions = null)
+        {
+            return RetryAsync(
+                nameof(IDropServiceClient.ListStreamedAsync),
+                (client, ct) => client.ListStreamedAsync(dropNamePrefix, pathOptions, ct, filterOptions, paginationOptions),
                 cancellationToken);
         }
 

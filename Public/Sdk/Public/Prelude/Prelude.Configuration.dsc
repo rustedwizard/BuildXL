@@ -41,8 +41,8 @@ interface FileAccessAllowlistEntry {
     /** Name of the allowlist exception rule. */
     name?: string;
 
-    /** Path to misbehaving tool allowed to have an exception.  Cannot be combined with Value. */
-    toolPath?: Path | File;
+    /** Path or executable name to misbehaving tool allowed to have an exception.  Cannot be combined with Value. */
+    toolPath?: Path | File | PathAtom;
 
     /** Value allowed to have an exception.  Cannot be combined with ToolPath. */
     value?: string;
@@ -283,6 +283,11 @@ interface FrontEndConfiguration {
      * If true the check that a member is obsolete is disabled during Ast Conversion.
      */
      disableIsObsoleteCheckDuringConversion?: boolean;
+
+     /**
+      * If true, ignore missing modules files by flagging them with a verbose message rather than an error.
+      */
+      allowMissingSpecs?: boolean;
 }
 
 interface EngineConfiguration {
@@ -327,10 +332,8 @@ interface UnsafeSandboxConfiguration {
     doubleWritePolicy?: DoubleWritePolicy;
 
     /**
-     * Makes sure any access that contains a directory symlink gets properly processed
-     * This is an experimental flag, and hopefully will eventually become the norm.
-     * This option is not actually unsafe, it is here to stress its experimental nature.
-     * Only has an effect on Windows-based OS. Mac sandbox already processes symlinks correctly.
+     * [Obsolete] This option has no effect and is left for back compat purposes. Please see 
+     * 'enableFullReparsePointResolving'
      */
     processSymlinkedAccesses? : boolean;
 
@@ -407,6 +410,20 @@ interface ResolverDefaults {
     nuget?: NuGetResolverDefaults;
 }
 
+interface LoggingConfiguration {
+    /**
+     * When set to true, the dump pip lite runtime analyzer will be enabled to dump information about failing pips.
+     * This option is enabled by default.
+     */
+    dumpFailedPips?: boolean;
+
+    /**
+     * When the dumpFailedPips option is enabled, this flag can be used to limit the number of logs to the specified value.
+     * The default value for this option is 50
+     */
+    dumpFailedPipsLogLimit?: number;
+}
+
 interface Configuration {
     qualifiers?: QualifierConfiguration;
 
@@ -433,6 +450,14 @@ interface Configuration {
 
     /** Disable default source resolver. */
     disableDefaultSourceResolver?: boolean;
+
+    /** 
+     * Disable the DScript resolver that loads the SDKs shipped in-box with BuildXL.
+     * This resolver owns any in-box SDK shipped with BuildXL under the SDK folder placed where BuildXL binaries are.
+     * When enabled, this resolver is implicitly added right after user defined resolvers.
+     * Defaults to false.
+     */
+    disableInBoxSdkSourceResolver?: boolean;
 
     /**
      * List of file accesses that are benign and allow the pip that caused them to be cached.
@@ -478,6 +503,9 @@ interface Configuration {
 
     /** Overrides for defaults by front-end resolver. */
     resolverDefaults?: ResolverDefaults;
+
+    /** BuildXL logging configuration */
+    logging?: LoggingConfiguration;
 }
 
 /** Configuration function that is used in config.ds for configuring a DScript source cone. */

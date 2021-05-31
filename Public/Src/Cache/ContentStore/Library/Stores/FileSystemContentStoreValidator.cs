@@ -16,6 +16,7 @@ using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Synchronization;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Utils;
+using BuildXL.Utilities.Tasks;
 using FileInfo = BuildXL.Cache.ContentStore.Interfaces.FileSystem.FileInfo;
 
 #nullable enable
@@ -63,7 +64,7 @@ namespace BuildXL.Cache.ContentStore.Stores
             int mismatchedParentDirectoryCount = 0;
             int mismatchedContentHashCount = 0;
             _tracer.Always(context, "Validating local CAS content hashes...");
-            await TaskSafetyHelpers.WhenAll(_enumerateBlobPathsFromDisk().Select(
+            await TaskUtilities.SafeWhenAll(_enumerateBlobPathsFromDisk().Select(
                 async blobPath =>
                 {
                     var contentFile = blobPath.FullPath;
@@ -77,7 +78,7 @@ namespace BuildXL.Cache.ContentStore.Stores
                             $" do not match the name of its parent directory {contentFile.GetParent().FileName}.");
                     }
 
-                    if (!FileSystemContentStoreInternal.TryGetHashFromPath(contentFile, out var hashFromPath))
+                    if (!FileSystemContentStoreInternal.TryGetHashFromPath(context, _tracer, contentFile, out var hashFromPath))
                     {
                         _tracer.Debug(
                             context,
@@ -85,9 +86,9 @@ namespace BuildXL.Cache.ContentStore.Stores
                         return;
                     }
 
-                    var hasher = ContentHashers.Get(hashFromPath.HashType);
+                    var hasher = HashInfoLookup.GetContentHasher(hashFromPath.HashType);
                     ContentHash hashFromContents;
-                    using (var contentStream = await _fileSystem.OpenSafeAsync(
+                    using (var contentStream = _fileSystem.Open(
                         contentFile, FileAccess.Read, FileMode.Open, FileShare.Read | FileShare.Delete, FileOptions.SequentialScan, HashingExtensions.HashStreamBufferSize))
                     {
                         hashFromContents = await hasher.GetContentHashAsync(contentStream);
@@ -163,7 +164,7 @@ namespace BuildXL.Cache.ContentStore.Stores
             int contentDirectoryMismatchCount = 0;
 
             var fileSystemContentDirectory = _enumerateBlobPathsFromDisk()
-                .Select(blobPath => FileSystemContentStoreInternal.TryGetHashFromPath(blobPath.FullPath, out var hash) ? (ContentHash?)hash : null)
+                .Select(blobPath => FileSystemContentStoreInternal.TryGetHashFromPath(context, _tracer, blobPath.FullPath, out var hash) ? (ContentHash?)hash : null)
                 .Where(hash => hash != null)
                 .GroupBy(hash => hash!.Value)
                 .ToDictionary(replicaGroup => replicaGroup.Key, replicaGroup => replicaGroup.Count());

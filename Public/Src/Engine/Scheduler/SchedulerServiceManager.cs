@@ -32,6 +32,7 @@ namespace BuildXL.Scheduler
 
         private readonly PipGraph m_pipGraph;
         private readonly PipExecutionContext m_context;
+        private readonly ServicePipTracker m_servicePipTracker;
         private LoggingContext m_executePhaseLoggingContext;
         private OperationTracker m_operationTracker;
         private int m_runningServicesCount;
@@ -54,10 +55,11 @@ namespace BuildXL.Scheduler
         public int TotalServiceShutdownPipsCompleted => m_totalServiceShutdownPipsCompleted;
 
         /// <nodoc />
-        public SchedulerServiceManager(PipGraph pipGraph, PipExecutionContext context)
+        public SchedulerServiceManager(PipGraph pipGraph, PipExecutionContext context, ServicePipTracker pipTracker)
         {
             m_pipGraph = pipGraph;
             m_context = context;
+            m_servicePipTracker = pipTracker;
         }
 
         internal void Start(LoggingContext loggingContext, OperationTracker operationTracker)
@@ -227,6 +229,12 @@ namespace BuildXL.Scheduler
                         serviceProcess.GetDescription(m_context));
 
                     Interlocked.Increment(ref m_runningServicesCount);
+
+                    // if a service has a trackable tag, add it to the tracker
+                    if (serviceProcess.ServiceInfo.TagToTrack.IsValid)
+                    {
+                        m_servicePipTracker.ReportServicePipStarted(serviceProcess.ServiceInfo);
+                    }
                 }
 
                 using (var operationContext = m_operationTracker.StartOperation(
@@ -238,13 +246,11 @@ namespace BuildXL.Scheduler
                     loggingContext))
                 {
                     var serviceStartTask = PipExecutor.ExecuteServiceStartOrShutdownAsync(
-#pragma warning disable AsyncFixer04 // A disposable object used in a fire & forget async call
                         // Bug #1155822: There is a race condition where service start/shutdown can
                         // cause crash in the operation tracker because the parent operation is already completed
                         // this is not fully understood, but the tracking of details of services operations is not
                         // important so this disables it
                         OperationContext.CreateUntracked(loggingContext),
-#pragma warning restore AsyncFixer04 // A disposable object used in a fire & forget async call
                         environment,
                         serviceProcess,
                         processId =>

@@ -3,8 +3,8 @@
 
 const isMicrosoftInternal = Environment.getFlag("[Sdk.BuildXL]microsoftInternal");
 
-const artifactNugetVersion = "18.174.30406-buildid12785353"; 
-const azureDevopsNugetVersion = "16.174.0-internal202008065";
+const artifactNugetVersion = "18.187.31304-buildid15127069";
+const azureDevopsNugetVersion = "16.187.0-internal202105042";
 
 // These packages are Microsoft internal packages.
 // These consist of internally repackaged products that we can't push to a public feed and have to rely on users installing locally.
@@ -18,7 +18,7 @@ export const pkgs = isMicrosoftInternal ? [
     { id: "Aria.Cpp.SDK.osx-x64", version: "8.5.6" },
     { id: "Aria.Cpp.SDK.win-x64", version: "8.5.6", osSkip: [ "macOS", "unix" ] },
 
-    { id: "CB.QTest", version: "20.10.9.160907", osSkip: [ "macOS", "unix" ] },
+    { id: "CB.QTest", version: "21.5.6.71544", osSkip: [ "macOS", "unix" ] },
 
     { id: "BuildXL.Tracing.AriaTenantToken", version: "1.0.0" },
 
@@ -26,26 +26,27 @@ export const pkgs = isMicrosoftInternal ? [
     { id: "WindowsSdk.Corext", version: "10.0.16299.1", alias: "Windows.Sdk", osSkip: [ "macOS", "unix" ] },
 
     // Artifact packages and dependencies
-    { id: "Microsoft.VisualStudio.Services.ArtifactServices.Shared", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "Microsoft.Azure.Cosmos.Table", "Microsoft.Azure.Storage.Blob"] },
-    { id: "Microsoft.VisualStudio.Services.BlobStore.Client", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces"] },
+    { id: "Microsoft.VisualStudio.Services.ArtifactServices.Shared", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "Microsoft.Azure.Cosmos.Table", "Microsoft.Azure.Storage.Blob", "BuildXL.Utilities", "DotNetFxRefAssemblies.Corext" ] },
+    { id: "Microsoft.VisualStudio.Services.BlobStore.Client", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "DotNetFxRefAssemblies.Corext"] },
     { id: "Microsoft.VisualStudio.Services.Client", version: azureDevopsNugetVersion, dependentPackageIdsToSkip: [ "Microsoft.Net.Http", "Microsoft.AspNet.WebApi.Client", "System.Security.Cryptography.OpenSsl", "System.Security.Principal.Windows" ] },
     { id: "Microsoft.VisualStudio.Services.InteractiveClient", version: azureDevopsNugetVersion, dependentPackageIdsToSkip: [ "Ben.Demystifier" ], dependentPackageIdsToIgnore: [ "Ben.Demystifier" ] },
-    { id: "Microsoft.Azure.Storage.Common", version:"11.1.0" },
+    { id: "Microsoft.Azure.Storage.Common", version:"11.2.2" },
 
     { id: "GVFS.Installers", version: "0.3.20147.1" },
 
     // DropDaemon Artifact dependencies.
     // Here, even though the packages depend on Cache bits other than Hashing, we make sure that the codepaths that actually depend on them are never activated. This is to ensure that there is no cyclic dependency between BXL and AzureDevOps.
     // This is further enforced by not including Cache bits in DropDaemon, other than BuildXL.Cache.Hashing.
-    { id: "ArtifactServices.App.Shared", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing"] },
-    { id: "ArtifactServices.App.Shared.Cache", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities"] },
-    { id: "Drop.App.Core", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities"] },
-    { id: "Drop.Client", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing"] },
-    { id: "ItemStore.Shared", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing"] },
-    { id: "Microsoft.VisualStudio.Services.BlobStore.Client.Cache", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities"] },
+    { id: "ArtifactServices.App.Shared", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "DotNetFxRefAssemblies.Corext"] },
+    { id: "ArtifactServices.App.Shared.Cache", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities", "DotNetFxRefAssemblies.Corext"] },
+    { id: "Drop.App.Core", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities", "DotNetFxRefAssemblies.Corext"] },
+    { id: "Drop.Client", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "DotNetFxRefAssemblies.Corext"] },
+    { id: "ItemStore.Shared", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "DotNetFxRefAssemblies.Corext"] },
+    { id: "Microsoft.VisualStudio.Services.BlobStore.Client.Cache", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities", "DotNetFxRefAssemblies.Corext"] },
     { id: "Microsoft.Windows.Debuggers.SymstoreInterop", version: "1.0.1" },
-    { id: "Symbol.App.Core", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities"] },
-    { id: "Symbol.Client", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"] },
+    { id: "Symbol.App.Core", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "BuildXL.Cache.Interfaces", "BuildXL.Cache.Libraries", "BuildXL.Utilities", "DotNetFxRefAssemblies.Corext"] },
+    { id: "Symbol.Client", version: artifactNugetVersion, dependentPackageIdsToSkip: ["*"], dependentPackageIdsToIgnore: ["BuildXL.Cache.Hashing", "DotNetFxRefAssemblies.Corext"] },
+    { id: "TransientFaultHandling.Core", version: "5.1.1209.1" },
 
     // CloudTest internal dependencies
     { id: "GvfsTestHelpersForBuildXL", version: "0.1.0"},
@@ -56,6 +57,13 @@ export const pkgs = isMicrosoftInternal ? [
     // Officially mantained CB package that contains Yarn. Used for Yarn tests.
     { id: "Npm.OnCloudBuild", version: "3.1.0" },
 
+    // IcM and dependencies
+    { id: "Microsoft.AzureAd.Icm.Types.amd64", version: "2.2.1363.11" },
+    { id: "Microsoft.AzureAd.Icm.WebService.Client.amd64", version: "2.2.1363.11" },
+
+    // Internal version of Redis
+    { id: "Microsoft.Caching.Redis", version: "3.0.57", 
+        dependentPackageIdsToSkip: [ "System.Runtime.CompilerServices.Unsafe", "System.IO.Pipelines", "System.Threading.Channels", "Pipelines.Sockets.Unofficial" ] },
 ] : [
 
     // Artifact packages and dependencies in OSS

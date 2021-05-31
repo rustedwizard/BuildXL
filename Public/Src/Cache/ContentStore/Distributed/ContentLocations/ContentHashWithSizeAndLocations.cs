@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Hashing;
@@ -32,6 +33,11 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// The size of the content hash's file.
         /// </summary>
         public long Size { get; }
+
+        /// <summary>
+        /// The size of the content hash's file.
+        /// </summary>
+        public long? NullableSize => Size == -1 ? null : Size;
 
         /// <summary>
         /// Optional underlying entry
@@ -72,7 +78,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
         }
 
         /// <inheritdoc />
-        public bool Equals(ContentHashWithSizeAndLocations other)
+        public bool Equals([AllowNull]ContentHashWithSizeAndLocations other)
         {
             if (other is null)
             {
@@ -84,7 +90,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
                 return true;
             }
 
-            return Locations.SequenceEqual(other.Locations) && ContentHash.Equals(other.ContentHash) && Size == other.Size;
+            return Locations!.SequenceEqual(other.Locations!) && ContentHash.Equals(other.ContentHash) && Size == other.Size;
         }
 
         /// <inheritdoc />
@@ -124,6 +130,18 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public static bool operator !=(ContentHashWithSizeAndLocations left, ContentHashWithSizeAndLocations right)
         {
             return !Equals(left, right);
+        }
+
+        /// <nodoc />
+        public static implicit operator ContentHashWithSize(ContentHashWithSizeAndLocations hashWithSizeAndLocations)
+        {
+            return new ContentHashWithSize(hashWithSizeAndLocations.ContentHash, hashWithSizeAndLocations.Size);
+        }
+
+        /// <nodoc />
+        public static implicit operator ContentHash(ContentHashWithSizeAndLocations hashWithSizeAndLocations)
+        {
+            return hashWithSizeAndLocations.ContentHash;
         }
     }
 }

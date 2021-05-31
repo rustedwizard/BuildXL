@@ -189,7 +189,7 @@ namespace BuildXL.Cache.MemoizationStore.Stores
                             // Match found.
                             // Replace if incoming has better determinism or some content for the existing entry is missing.
                             if (record.ContentHashListWithDeterminism.Determinism.ShouldBeReplacedWith(contentHashListWithDeterminism.Determinism) ||
-                                !(await contentSession.EnsureContentIsAvailableAsync(context, record.ContentHashListWithDeterminism.ContentHashList, cts)
+                                !(await contentSession.EnsureContentIsAvailableAsync(context, Tracer.Name, record.ContentHashListWithDeterminism.ContentHashList, cts)
                                     .ConfigureAwait(false)))
                             {
                                 _records.Remove(record);
@@ -220,7 +220,7 @@ namespace BuildXL.Cache.MemoizationStore.Stores
         }
 
         /// <inheritdoc/>
-        public System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
+        public IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
         {
             return _records.Select(record => new StructResult<StrongFingerprint>(record.StrongFingerprint)).ToAsyncEnumerable();
         }

@@ -2,9 +2,12 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Extensions;
@@ -17,7 +20,6 @@ using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Utilities.Tasks;
-using Microsoft.Practices.TransientFaultHandling;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using ExponentialRetry = Microsoft.WindowsAzure.Storage.RetryPolicies.ExponentialRetry;
@@ -30,14 +32,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
     /// <summary>
     /// An <see cref="CentralStorage"/> backed by Azure blob storage.
     /// </summary>
-    public class BlobCentralStorage : CentralStorage, ITransientErrorDetectionStrategy
+    public class BlobCentralStorage : CentralStorage
     {
         private readonly (CloudBlobContainer container, int shardId)[] _containers;
         private readonly bool[] _containersCreated;
 
         private readonly BlobCentralStoreConfiguration _configuration;
         private readonly PassThroughFileSystem _fileSystem = new PassThroughFileSystem();
-        private readonly RetryPolicy _blobStorageRetryStrategy;
+        private readonly IRetryPolicy _blobStorageRetryStrategy;
 
         private DateTime _gcLastRunTime = DateTime.MinValue;
         private readonly SemaphoreSlim _gcGate = TaskUtilities.CreateMutex();
@@ -72,7 +74,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             _containers.Shuffle();
 
             _containersCreated = new bool[_configuration.Credentials.Count];
-            _blobStorageRetryStrategy = new RetryPolicy(this, RetryStrategy.DefaultExponential);
+            _blobStorageRetryStrategy = RetryPolicyFactory.GetExponentialPolicy(IsTransient);
         }
 
         /// <inheritdoc />
@@ -121,7 +123,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             BoolResult? attemptResult = null;
             foreach (var (container, shardId) in _containers)
             {
-                using (var fileStream = await _fileSystem.OpenSafeAsync(targetCheckpointFile, FileAccess.Write, FileMode.Create, FileShare.Delete))
+                using (var fileStream = _fileSystem.OpenForWrite(targetCheckpointFile, expectingLength: null, FileMode.Create, FileShare.Delete))
                 {
                     try
                     {
@@ -174,7 +176,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
                 _fileSystem.CreateDirectory(targetCheckpointFile.GetParent());
 
-                nestedContext.TraceDebug($@"Downloading blob '{_configuration.ContainerName}\{blobName}' to {targetCheckpointFile} from shard #{shardId}.");
+                Tracer.Debug(
+                    nestedContext,
+                    $@"Downloading blob '{_configuration.ContainerName}\{blobName}' to {targetCheckpointFile} from shard #{shardId}.");
 
                 await blob.DownloadToStreamAsync(fileStream, null, DefaultBlobStorageRequestOptions, null, nestedContext.Token);
 
@@ -264,15 +268,24 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private Task<BoolResult> UploadShardFileAsync(OperationContext context, CloudBlobContainer container, int shardId, AbsolutePath file, string blobName, bool garbageCollect)
         {
+            long fileSize = -1;
             return context.PerformOperationWithTimeoutAsync(Tracer, async nestedContext =>
             {
-                var fileSize = new System.IO.FileInfo(file.ToString()).Length;
-
-                Tracer.Debug(nestedContext, $@"Uploading blob '{_configuration.ContainerName}\{blobName}' of size {fileSize} from {file} into shard #{shardId}.");
+                fileSize = new System.IO.FileInfo(file.ToString()).Length;
 
                 var blob = await GetBlockBlobReferenceAsync(container, shardId, blobName, nestedContext.Token);
 
-                await blob.UploadFromFileAsync(file.ToString(), null, DefaultBlobStorageRequestOptions, null, nestedContext.Token);
+                // WARNING: There is a TOCTOU issue here. If there are multiple concurrent writers to a single blob,
+                // there's no way to tell which upload will win the race. Moreover, it is possible for a blob to be
+                // overwritten.
+                // Since BlobCentralStorage is meant to upload files with unique names only, we don't care about this
+                // particular use-case: it should basically never happen, and when it does, it shouldn't matter because
+                // the file should be the same.
+                var exists = await blob.ExistsAsync(null, null, context.Token);
+                if (!exists)
+                {
+                    await blob.UploadFromFileAsync(file.ToString(), null, DefaultBlobStorageRequestOptions, null, nestedContext.Token);
+                }
 
                 if (garbageCollect && _configuration.EnableGarbageCollect)
                 {
@@ -286,6 +299,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 return BoolResult.Success;
             },
             counter: Counters[CentralStorageCounters.UploadShardFile],
+            traceOperationStarted: false,
+            extraEndMessage: _ => $"ShardId=[{shardId}] BlobName=[{_configuration.ContainerName}/{blobName}] FilePath=[{file}] FileSize=[{fileSize}]",
             timeout: _configuration.OperationTimeout);
         }
 
@@ -314,6 +329,71 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         _containersCreated[shardId] = true;
                     }
                 }
+            }
+        }
+
+        /// <nodoc />
+        public struct DerivedCheckpointInformation
+        {
+            /// <nodoc />
+            public string StorageId { get; }
+
+            /// <nodoc />
+            public DateTime? CreationTime { get; }
+
+            /// <nodoc />
+            public DateTime? LastAccessTime { get; }
+
+            /// <nodoc />
+            public DerivedCheckpointInformation(CloudBlockBlob blob)
+            {
+                StorageId = blob.Name;
+                CreationTime = blob.Properties.Created?.DateTime;
+                LastAccessTime = GetLastAccessedTime(blob);
+            }
+        }
+
+        /// <nodoc />
+        public async IAsyncEnumerable<DerivedCheckpointInformation> ListBlobsWithNameMatchingAsync(OperationContext context, Regex regex)
+        {
+            foreach (var (container, shardId) in _containers)
+            {
+                await foreach (var entry in listForContainer(container, shardId))
+                {
+                    yield return entry;
+                }
+            }
+
+            async IAsyncEnumerable<DerivedCheckpointInformation> listForContainer(CloudBlobContainer container, int shardId)
+            {
+                BlobContinuationToken? continuation = null;
+                while (!context.Token.IsCancellationRequested)
+                {
+                    var blobs = await container.ListBlobsSegmentedAsync(
+                        prefix: null,
+                        useFlatBlobListing: true,
+                        blobListingDetails: BlobListingDetails.Metadata,
+                        maxResults: null,
+                        currentToken: continuation,
+                        options: null,
+                        operationContext: null);
+                    continuation = blobs.ContinuationToken;
+
+                    foreach (CloudBlockBlob blob in blobs.Results.OfType<CloudBlockBlob>())
+                    {
+                        if (regex.IsMatch(blob.Name))
+                        {
+                            yield return new DerivedCheckpointInformation(blob);
+                        }
+                    }
+
+                    if (continuation == null)
+                    {
+                        break;
+                    }
+                }
+
+                yield break;
             }
         }
 

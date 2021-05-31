@@ -302,7 +302,9 @@ namespace BuildXL.Scheduler
                         // report accesses to symlink chain elements
                         symlinkChain,
                         ReadOnlyArray<AbsolutePath>.Empty,
-                        ReadOnlyArray<AbsolutePath>.Empty);
+                        ReadOnlyArray<AbsolutePath>.Empty,
+                        ReadOnlyArray<AbsolutePath>.Empty,
+                        0);
                 }
                 catch (BuildXLException ex)
                 {
@@ -508,7 +510,7 @@ namespace BuildXL.Scheduler
                 // TODO: It'd be nice if PipData could instead write encoded bytes to a stream, in which case we could
                 //       first compute the hash and then possibly do a second pass to actually write to a file (without allocating
                 //       several possibly large buffers and strings).
-                string contents = pip.Contents.ToString(environment.Context.PathTable);
+                string contents = pip.Contents.ToString(GetPipFragmentRendererForWriteFile(pip.WriteFileOptions, environment.Context.PathTable));
 
                 Encoding encoding;
                 switch (pip.Encoding)
@@ -561,7 +563,7 @@ namespace BuildXL.Scheduler
             string connectionString = ipcProvider.LoadAndRenderMoniker(monikerId);
             IClient client = ipcProvider.GetClient(connectionString, pip.IpcInfo.IpcClientConfig);
 
-            var ipcOperationPayload = pip.MessageBody.ToString(environment.PipFragmentRenderer);
+            var ipcOperationPayload = pip.MessageBody.ToString(environment.PipFragmentRenderer, useIpcEscaping: true);
             var operation = new IpcOperation(ipcOperationPayload, waitForServerAck: true);
 
             // execute async
@@ -822,13 +824,13 @@ namespace BuildXL.Scheduler
                     {
                         // IPC pips specify an execution result which is reported back to the scheduler
                         // which then reports the output content to the file content manager on the worker
-                        // and master machines in distributed builds
+                        // and orchestrator machines in distributed builds
                         executionResult.ReportOutputContent(destinationFile, fileContentInfo, outputOrigin);
                     }
                     else
                     {
                         // Write file pips do not specify execution result since they are not distributed
-                        // (i.e. they only run on the master). Given that, they report directly to the file content manager.
+                        // (i.e. they only run on the orchestrator). Given that, they report directly to the file content manager.
                         fileContentManager.ReportOutputContent(
                             operationContext,
                             pipInfo.SemiStableHash,
@@ -954,9 +956,7 @@ namespace BuildXL.Scheduler
             // created directories, even if they are empty
             foreach (var directory in processExecutionResult.CreatedDirectories)
             {
-                // We explicitly don't update parents, since we want to keep track of directories that were actual 
-                // outputs of the build.
-                environment.State.FileSystemView.ReportOutputFileSystemExistence(directory, PathExistence.ExistsAsDirectory, updateParents: false);
+                environment.State.FileSystemView.ReportOutputFileSystemDirectoryCreated(directory);
             }
 
             if (processExecutionResult.NumberOfWarnings > 0)
@@ -975,14 +975,14 @@ namespace BuildXL.Scheduler
             ExecutionResult processExecutionResult,
             Process process,
             out bool pipIsSafeToCache,
-            out IReadOnlyDictionary<FileArtifact, (FileMaterializationInfo, ReportedViolation)> allowedSameContentDoubleWriteViolations)
+            out IReadOnlyDictionary<FileArtifact, (FileMaterializationInfo, ReportedViolation)> allowedSameContentViolations)
         {
             pipIsSafeToCache = true;
 
             using (operationContext.StartOperation(PipExecutorCounter.AnalyzeFileAccessViolationsDuration))
             {
                 var analyzePipViolationsResult = AnalyzePipViolationsResult.NoViolations;
-                allowedSameContentDoubleWriteViolations = CollectionUtilities.EmptyDictionary<FileArtifact, (FileMaterializationInfo, ReportedViolation)>();
+                allowedSameContentViolations = CollectionUtilities.EmptyDictionary<FileArtifact, (FileMaterializationInfo, ReportedViolation)>();
 
                 var exclusiveOpaqueDirectories = processExecutionResult.DirectoryOutputs.Where(directoryArtifactWithContent => !directoryArtifactWithContent.directoryArtifact.IsSharedOpaque).ToReadOnlyArray();
 
@@ -992,7 +992,7 @@ namespace BuildXL.Scheduler
                     || processExecutionResult.SharedDynamicDirectoryWriteAccesses != null
                     || exclusiveOpaqueDirectories.Length != 0
                     || processExecutionResult.AllowedUndeclaredReads != null
-                    || processExecutionResult.AbsentPathProbesUnderOutputDirectories != null)
+                    || processExecutionResult.DynamicObservations != null)
                 {
                     analyzePipViolationsResult = environment.FileMonitoringViolationAnalyzer.AnalyzePipViolations(
                         process,
@@ -1001,9 +1001,9 @@ namespace BuildXL.Scheduler
                         exclusiveOpaqueDirectories,
                         processExecutionResult.SharedDynamicDirectoryWriteAccesses,
                         processExecutionResult.AllowedUndeclaredReads,
-                        processExecutionResult.AbsentPathProbesUnderOutputDirectories,
+                        processExecutionResult.DynamicObservations,
                         processExecutionResult.OutputContent,
-                        out allowedSameContentDoubleWriteViolations);
+                        out allowedSameContentViolations);
                 }
 
                 if (!analyzePipViolationsResult.IsViolationClean)
@@ -1027,18 +1027,18 @@ namespace BuildXL.Scheduler
             PipExecutionState.PipScopeState state,
             ExecutionResult processExecutionResult,
             Process process,
-            IReadOnlyDictionary<FileArtifact, (FileMaterializationInfo, ReportedViolation)> allowedSameContentDoubleWriteViolations)
+            IReadOnlyDictionary<FileArtifact, (FileMaterializationInfo, ReportedViolation)> allowedSameContentViolations)
         {
             using (operationContext.StartOperation(PipExecutorCounter.AnalyzeFileAccessViolationsDuration))
             {
                 var analyzePipViolationsResult = AnalyzePipViolationsResult.NoViolations;
 
-                if (allowedSameContentDoubleWriteViolations.Count > 0)
+                if (allowedSameContentViolations.Count > 0)
                 {
-                    analyzePipViolationsResult = environment.FileMonitoringViolationAnalyzer.AnalyzeDoubleWritesOnCacheConvergence(
+                    analyzePipViolationsResult = environment.FileMonitoringViolationAnalyzer.AnalyzeSameContentViolationsOnCacheConvergence(
                         process,
                         processExecutionResult.OutputContent,
-                        allowedSameContentDoubleWriteViolations);
+                        allowedSameContentViolations);
                 }
 
                 if (!analyzePipViolationsResult.IsViolationClean)
@@ -1071,7 +1071,15 @@ namespace BuildXL.Scheduler
                     runnableFromCacheCheckResult.Fingerprint.ToString(),
                     cacheHitData.Metadata.Id);
 
-                ExecutionResult executionResult = GetCacheHitExecutionResult(operationContext, environment, pip, runnableFromCacheCheckResult);
+                if (!TryGetCacheHitExecutionResult(operationContext, environment, pip, runnableFromCacheCheckResult, out var executionResult))
+                {
+                    // Error should have been logged
+                    executionResult.SetResult(operationContext.LoggingContext, PipResultStatus.Failed);
+                    executionResult.Seal();
+
+                    return executionResult;
+                }
+
                 executionResult.Seal();
 
                 // Save all dynamic writes to a sideband file if the pip needs it
@@ -1086,16 +1094,35 @@ namespace BuildXL.Scheduler
                     }
                 }
 
+                var semistableHash = pip.FormattedSemiStableHash;
+                if (environment.Configuration.Logging.LogCachedPipOutputs)
+                {
+                    foreach (var (file, fileInfo, origin) in executionResult.OutputContent)
+                    {
+                        if (!file.IsOutputFile || fileInfo.Hash.IsSpecialValue())
+                        {
+                            // only log real output content
+                            continue;
+                        }
+
+                        Logger.Log.LogCachedPipOutput(
+                            operationContext,
+                            semistableHash,
+                            file.Path.ToString(environment.Context.PathTable),
+                            fileInfo.Hash.ToHex());
+                    }
+                }
+
                 // File access violation analysis must be run before reporting the execution result output content.
                 var exclusiveOpaqueContent = executionResult.DirectoryOutputs.Where(directoryArtifactWithContent => !directoryArtifactWithContent.directoryArtifact.IsSharedOpaque).ToReadOnlyArray();
 
-                if ((executionResult.SharedDynamicDirectoryWriteAccesses?.Count > 0 || executionResult.AllowedUndeclaredReads?.Count > 0 || executionResult.AbsentPathProbesUnderOutputDirectories?.Count > 0 || exclusiveOpaqueContent.Length > 0)
+                if ((executionResult.SharedDynamicDirectoryWriteAccesses?.Count > 0 || executionResult.AllowedUndeclaredReads?.Count > 0 || executionResult.DynamicObservations.Length > 0 || exclusiveOpaqueContent.Length > 0)
                     && !environment.FileMonitoringViolationAnalyzer.AnalyzeDynamicViolations(
                             pip,
                             exclusiveOpaqueContent,
                             executionResult.SharedDynamicDirectoryWriteAccesses,
                             executionResult.AllowedUndeclaredReads,
-                            executionResult.AbsentPathProbesUnderOutputDirectories,
+                            executionResult.DynamicObservations,
                             executionResult.OutputContent))
                 {
                     Contract.Assume(operationContext.LoggingContext.ErrorWasLogged, "Error should have been logged by FileMonitoringViolationAnalyzer");
@@ -1196,7 +1223,7 @@ namespace BuildXL.Scheduler
             var pathTable = context.PathTable;
             var processExecutionResult = new ExecutionResult
             {
-                MustBeConsideredPerpetuallyDirty = IsUnconditionallyPerpetuallyDirty(pip)
+                MustBeConsideredPerpetuallyDirty = IsUnconditionallyPerpetuallyDirty(pip, environment.PipGraphView)
             };
 
             if (fingerprint.HasValue)
@@ -1289,7 +1316,8 @@ namespace BuildXL.Scheduler
             if (!(executionResult.Status == SandboxedProcessPipExecutionStatus.Succeeded ||
                 executionResult.Status == SandboxedProcessPipExecutionStatus.ExecutionFailed ||
                 executionResult.Status == SandboxedProcessPipExecutionStatus.FileAccessMonitoringFailed ||
-                executionResult.Status == SandboxedProcessPipExecutionStatus.Canceled))
+                executionResult.Status == SandboxedProcessPipExecutionStatus.Canceled ||
+                executionResult.Status == SandboxedProcessPipExecutionStatus.SharedOpaquePostProcessingFailed))
             {
                 Contract.Assert(false, "Unexpected execution result " + executionResult.Status);
             }
@@ -1340,16 +1368,12 @@ namespace BuildXL.Scheduler
                             trackFileChanges: succeeded);
                     LogSubPhaseDuration(
                         operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseValidateObservedFileAccesses, DateTime.UtcNow.Subtract(start),
-                        $"(AbsPrb: {observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories.Count}, DynFiles: {observedInputValidationResult.DynamicallyObservedFiles.Length})");
+                        $"(DynObs: {observedInputValidationResult.DynamicObservations.Length})");
                 }
 
                 // Store the dynamically observed accesses
-                processExecutionResult.DynamicallyObservedFiles = observedInputValidationResult.DynamicallyObservedFiles;
-                processExecutionResult.DynamicallyProbedFiles = observedInputValidationResult.DynamicallyProbedFiles;
-                processExecutionResult.DynamicallyObservedEnumerations = observedInputValidationResult.DynamicallyObservedEnumerations;
+                processExecutionResult.DynamicObservations = observedInputValidationResult.DynamicObservations;
                 processExecutionResult.AllowedUndeclaredReads = observedInputValidationResult.AllowedUndeclaredSourceReads;
-                processExecutionResult.AbsentPathProbesUnderOutputDirectories = observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories;
-                processExecutionResult.CreatedDirectories = executionResult.CreatedDirectories;
 
                 if (observedInputValidationResult.Status == ObservedInputProcessingStatus.Aborted)
                 {
@@ -1357,21 +1381,29 @@ namespace BuildXL.Scheduler
                     Contract.Assume(operationContext.LoggingContext.ErrorWasLogged, "No error was logged when ValidateObservedAccesses failed");
                 }
 
-                if (pip.ProcessAbsentPathProbeInUndeclaredOpaquesMode == Process.AbsentPathProbeInUndeclaredOpaquesMode.Relaxed
-                    && observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories.Count > 0)
+                if (pip.ProcessAbsentPathProbeInUndeclaredOpaquesMode == Process.AbsentPathProbeInUndeclaredOpaquesMode.Relaxed)
                 {
-                    start = DateTime.UtcNow;
-                    bool isDirty = false;
-                    foreach (var absentPathProbe in observedInputValidationResult.AbsentPathProbesUnderNonDependenceOutputDirectories)
+                    var absentPathProbesUnderNonDependenceOutputDirectories = 
+                        observedInputValidationResult.DynamicObservations
+                        .Where(o => o.Kind == DynamicObservationKind.AbsentPathProbeUnderOutputDirectory)
+                        .Select(o => o.Path);
+
+                    if (absentPathProbesUnderNonDependenceOutputDirectories.Any())
                     {
-                        if (!pip.DirectoryDependencies.Any(dir => absentPathProbe.IsWithin(pathTable, dir)))
+                        start = DateTime.UtcNow;
+                        bool isDirty = false;
+                        foreach (var absentPathProbe in absentPathProbesUnderNonDependenceOutputDirectories)
                         {
-                            isDirty = true;
-                            break;
+                            if (!pip.DirectoryDependencies.Any(dir => absentPathProbe.IsWithin(pathTable, dir)))
+                            {
+                                isDirty = true;
+                                break;
+                            }
                         }
+
+                        LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingIsDirty, DateTime.UtcNow.Subtract(start));
+                        processExecutionResult.MustBeConsideredPerpetuallyDirty = isDirty;
                     }
-                    LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseComputingIsDirty, DateTime.UtcNow.Subtract(start));
-                    processExecutionResult.MustBeConsideredPerpetuallyDirty = isDirty;
                 }
 
                 // We have all violations now.
@@ -1433,7 +1465,7 @@ namespace BuildXL.Scheduler
                         skipCaching = false;
                     }
 
-                    // TODO: Maybe all counter updates should occur on distributed build master.
+                    // TODO: Maybe all counter updates should occur on distributed build orchestrator.
                     if (skipCaching)
                     {
                         counters.IncrementCounter(PipExecutorCounter.ProcessPipsExecutedButUncacheable);
@@ -1673,7 +1705,7 @@ namespace BuildXL.Scheduler
             {
                 ProcessMemoryCountersSnapshot lastObservedMemoryCounters = default(ProcessMemoryCountersSnapshot);
                 TimeSpan? cancellationStartTime = null;
-                resourceScope.Token.Register(
+                using var cancellationTokenRegistration = resourceScope.Token.Register(
                     () =>
                     {
                         cancellationStartTime = TimestampUtilities.Timestamp;
@@ -1712,7 +1744,7 @@ namespace BuildXL.Scheduler
                 while (true)
                 {
                     lastObservedMemoryCounters = default(ProcessMemoryCountersSnapshot);
-
+                    
                     var executor = new SandboxedProcessPipExecutor(
                         context,
                         operationContext.LoggingContext,
@@ -1742,10 +1774,11 @@ namespace BuildXL.Scheduler
                         incrementalTools: configuration.IncrementalTools,
                         changeAffectedInputs: changeAffectedInputs,
                         detoursListener: detoursEventListener,
-                        symlinkedAccessResolver: environment.SymlinkedAccessResolver,
+                        reparsePointResolver: environment.ReparsePointAccessResolver,
                         staleOutputsUnderSharedOpaqueDirectories: staleDynamicOutputs,
-                        pluginManager: environment.PluginManager);
-
+                        pluginManager: environment.PluginManager,
+                        pipGraphFileSystemView: environment.PipGraphView);
+                    
                     resourceScope.RegisterQueryRamUsageMb(
                         () =>
                         {
@@ -1796,7 +1829,11 @@ namespace BuildXL.Scheduler
                     {
                         staleDynamicOutputs = null;
                         start = DateTime.UtcNow;
-                        result = await executor.RunAsync(innerResourceLimitCancellationTokenSource.Token, sandboxConnection: environment.SandboxConnection, sidebandWriter: sidebandWriter);
+                        result = await executor.RunAsync(
+                            innerResourceLimitCancellationTokenSource.Token, 
+                            sandboxConnection: environment.SandboxConnection, 
+                            sidebandWriter: sidebandWriter, 
+                            fileSystemView: pip.AllowUndeclaredSourceReads ? environment.State.FileSystemView : null);
                         LogSubPhaseDuration(operationContext, pip, SandboxedProcessCounters.PipExecutorPhaseRunningPip, DateTime.UtcNow.Subtract(start));
                         staleDynamicOutputs = result.SharedDynamicDirectoryWriteAccesses;
                     }
@@ -1921,11 +1958,6 @@ namespace BuildXL.Scheduler
                         cancelMilliseconds: (int)(cancelTime?.TotalMilliseconds ?? 0));
                 }
 
-                if (result.TimedOut && result.SuspendedDurationMs > 0)
-                {
-                    Logger.Log.PipTimedOutDueToSuspend(operationContext, pip.SemiStableHash, processDescription, result.SuspendedDurationMs, result.ProcessSandboxedProcessResultMs);
-                }
-
                 if (userRetry)
                 {
                     counters.IncrementCounter(PipExecutorCounter.ProcessUserRetriesImpactedPipsCount);
@@ -1995,7 +2027,6 @@ namespace BuildXL.Scheduler
 
         private static void LogUserSpecifiedExitCodeEvent(SandboxedProcessPipExecutionResult result, OperationContext operationContext, PipExecutionContext context, Process pip, string processDescription, int remainingUserRetries)
         {
-#pragma warning disable AsyncFixer02
             var stdErr = string.Empty;
             if (result.EncodedStandardError != null)
             {
@@ -2021,7 +2052,6 @@ namespace BuildXL.Scheduler
                              + File.ReadAllText(path, result.EncodedStandardOutput.Item2);
                 }
             }
-#pragma warning restore AsyncFixer02
             Logger.Log.PipWillBeRetriedDueToExitCode(
                 operationContext,
                 pip.SemiStableHash,
@@ -2866,20 +2896,11 @@ namespace BuildXL.Scheduler
                 return RunnableFromCacheResult.CreateForHit(
                     weakFingerprint,
                     // We use the weak fingerprint so that misses and hits are consistent (no strong fingerprint available on some misses).
-                    dynamicallyObservedFiles: observedInputProcessingResult.HasValue
-                        ? observedInputProcessingResult.Value.DynamicallyObservedFiles
-                        : ReadOnlyArray<AbsolutePath>.Empty,
-                    dynamicallyProbedFiles: observedInputProcessingResult.HasValue
-                        ? observedInputProcessingResult.Value.DynamicallyProbedFiles
-                        : ReadOnlyArray<AbsolutePath>.Empty,
-                    dynamicallyObservedEnumerations: observedInputProcessingResult.HasValue
-                        ? observedInputProcessingResult.Value.DynamicallyObservedEnumerations
-                        : ReadOnlyArray<AbsolutePath>.Empty,
+                    dynamicObservations: observedInputProcessingResult.HasValue
+                        ? observedInputProcessingResult.Value.DynamicObservations
+                        : ReadOnlyArray<(AbsolutePath, DynamicObservationKind)>.Empty,
                     allowedUndeclaredSourceReads: observedInputProcessingResult.HasValue
                         ? observedInputProcessingResult.Value.AllowedUndeclaredSourceReads
-                        : CollectionUtilities.EmptySet<AbsolutePath>(),
-                    absentPathProbesUnderNonDependenceOutputDirectories: observedInputProcessingResult.HasValue
-                        ? observedInputProcessingResult.Value.AbsentPathProbesUnderNonDependenceOutputDirectories
                         : CollectionUtilities.EmptySet<AbsolutePath>(),
                     cacheHitData: cacheHitData);
             }
@@ -2892,7 +2913,7 @@ namespace BuildXL.Scheduler
         /// </summary>
         /// <remarks>
         /// This method is used for distributed cache look-up. The result of cache look-up done on the worker is transferred back
-        /// to the master as <see cref="ExecutionResult"/> (for the sake of reusing existing transport structure). This method
+        /// to the orchestrator as <see cref="ExecutionResult"/> (for the sake of reusing existing transport structure). This method
         /// then converts it to <see cref="RunnableFromCacheResult"/> that can be consumed by the scheduler's cache look-up step.
         /// </remarks>
         [SuppressMessage("Microsoft.Usage", "CA1801:ReviewUnusedParameters")]
@@ -2926,11 +2947,8 @@ namespace BuildXL.Scheduler
             return cacheHitData != null
                 ? RunnableFromCacheResult.CreateForHit(
                     weakFingerprint: executionResult.TwoPhaseCachingInfo.WeakFingerprint,
-                    dynamicallyObservedFiles: executionResult.DynamicallyObservedFiles,
-                    dynamicallyProbedFiles: executionResult.DynamicallyProbedFiles,
-                    dynamicallyObservedEnumerations: executionResult.DynamicallyObservedEnumerations,
+                    dynamicObservations: executionResult.DynamicObservations,
                     allowedUndeclaredSourceReads: executionResult.AllowedUndeclaredReads,
-                    absentPathProbesUnderNonDependenceOutputDirectories: executionResult.AbsentPathProbesUnderOutputDirectories,
                     cacheHitData: cacheHitData)
                 : RunnableFromCacheResult.CreateForMiss(executionResult.TwoPhaseCachingInfo.WeakFingerprint);
         }
@@ -3245,11 +3263,12 @@ namespace BuildXL.Scheduler
             }
         }
 
-        private static ExecutionResult GetCacheHitExecutionResult(
+        private static bool TryGetCacheHitExecutionResult(
             OperationContext operationContext,
             IPipExecutionEnvironment environment,
             Process pip,
-            RunnableFromCacheResult runnableFromCacheCheckResult)
+            RunnableFromCacheResult runnableFromCacheCheckResult,
+            out ExecutionResult executionResult)
         {
             Contract.Requires(environment != null);
             Contract.Requires(pip != null);
@@ -3258,14 +3277,11 @@ namespace BuildXL.Scheduler
 
             var cacheHitData = runnableFromCacheCheckResult.GetCacheHitData();
 
-            var executionResult = new ExecutionResult
+            executionResult = new ExecutionResult
             {
-                MustBeConsideredPerpetuallyDirty = IsUnconditionallyPerpetuallyDirty(pip),
-                DynamicallyObservedFiles = runnableFromCacheCheckResult.DynamicallyObservedFiles,
-                DynamicallyProbedFiles = runnableFromCacheCheckResult.DynamicallyProbedFiles,
-                DynamicallyObservedEnumerations = runnableFromCacheCheckResult.DynamicallyObservedEnumerations,
+                MustBeConsideredPerpetuallyDirty = IsUnconditionallyPerpetuallyDirty(pip, environment.PipGraphView),
+                DynamicObservations = runnableFromCacheCheckResult.DynamicObservations,
                 AllowedUndeclaredReads = runnableFromCacheCheckResult.AllowedUndeclaredReads,
-                AbsentPathProbesUnderOutputDirectories = runnableFromCacheCheckResult.AbsentPathProbesUnderNonDependenceOutputDirectories,
             };
 
             executionResult.PopulateCacheInfoFromCacheResult(runnableFromCacheCheckResult);
@@ -3286,11 +3302,21 @@ namespace BuildXL.Scheduler
 
             // The index of the first artifact corresponding to an opaque directory input
             using (var poolFileList = Pools.GetFileArtifactWithAttributesList())
+            using (var existenceAssertionsWrapper = Pools.GetFileArtifactSet())
             {
+                HashSet<FileArtifact> existenceAssertions = existenceAssertionsWrapper.Instance;
+
                 var fileList = poolFileList.Instance;
                 for (int i = 0; i < pip.DirectoryOutputs.Length; i++)
                 {
                     fileList.Clear();
+                    
+                    // Let's validate here the existence assertions for opaques.
+                    // Observe that even though this is a cache hit, the existence assertions may have changed
+                    // Existence assertions are explicitly not part of the producer fingerprint since they are not
+                    // part of its inputs, and a change in them shouldn't make a pip a cache miss
+                    Contract.Assert(existenceAssertions.Count == 0);
+                    existenceAssertions.AddRange(environment.PipGraphView.GetExistenceAssertionsUnderOpaqueDirectory(pip.DirectoryOutputs[i]));
 
                     foreach (var dynamicOutputFileAndInfo in cacheHitData.DynamicDirectoryContents[i])
                     {
@@ -3298,6 +3324,20 @@ namespace BuildXL.Scheduler
                             dynamicOutputFileAndInfo.fileArtifact,
                             FileExistence.Required,
                             dynamicOutputFileAndInfo.fileMaterializationInfo.IsUndeclaredFileRewrite));
+
+                        existenceAssertions.Remove(dynamicOutputFileAndInfo.fileArtifact);
+                    }
+
+                    // There are some outputs that were asserted as belonging to the opaque that were not found
+                    if (existenceAssertions.Count != 0)
+                    {
+                        Processes.Tracing.Logger.Log.ExistenceAssertionUnderOutputDirectoryFailed(
+                            operationContext,
+                            pip.GetDescription(environment.Context),
+                            existenceAssertions.First().Path.ToString(environment.Context.PathTable),
+                            pip.DirectoryOutputs[i].Path.ToString(environment.Context.PathTable));
+
+                        return false;
                     }
 
                     executionResult.ReportDirectoryOutput(pip.DirectoryOutputs[i], fileList);
@@ -3332,8 +3372,11 @@ namespace BuildXL.Scheduler
                 executionResult.ReportOutputContent(fileArtifact, fileMaterializationInfo, PipOutputOrigin.NotMaterialized);
             }
 
+            // Populate created directories from the cache hit data
+            executionResult.ReportCreatedDirectories(cacheHitData.CreatedDirectories);
+
             executionResult.SetResult(operationContext, PipResultStatus.NotMaterialized);
-            return executionResult;
+            return true;
         }
 
         private static async Task<bool> ReplayWarningsFromCacheAsync(
@@ -3406,7 +3449,8 @@ namespace BuildXL.Scheduler
                 vmInitializer: environment.VmInitializer,
                 tempDirectoryCleaner: environment.TempCleaner,
                 incrementalTools: configuration.IncrementalTools,
-                symlinkedAccessResolver: environment.SymlinkedAccessResolver);
+                reparsePointResolver: environment.ReparsePointAccessResolver,
+                pipGraphFileSystemView: environment.PipGraphView);
 
             if (!await executor.TryInitializeWarningRegexAsync())
             {
@@ -3618,12 +3662,15 @@ namespace BuildXL.Scheduler
                 lastDynamicArtifactIndex += directoryContentsCount;
             }
 
+            var createdDirectories = metadata.CreatedDirectories.Select(directory => AbsolutePath.Create(pathTable, directory)).ToReadOnlySet();
+
             return new RunnableFromCacheResult.CacheHitData(
                     pathSetHash: pathSetHash,
                     strongFingerprint: strongFingerprint,
                     metadata: metadata,
                     cachedArtifactContentHashes: cachedArtifactContentHashesArray,
                     absentArtifacts: (IReadOnlyList<FileArtifact>)absentArtifacts ?? CollectionUtilities.EmptyArray<FileArtifact>(),
+                    createdDirectories: createdDirectories,
                     standardError: standardError,
                     standardOutput: standardOutput,
                     dynamicDirectoryContents: dynamicDirectoryContents,
@@ -3876,7 +3923,7 @@ namespace BuildXL.Scheduler
             Contract.Requires(environment != null);
             Contract.Requires(pip != null);
             Contract.Requires(pathSet.Paths.IsValid);
-
+            
             using (operationContext.StartOperation(PipExecutorCounter.PriorPathSetEvaluationToProduceStrongFingerprintDuration))
             {
                 ObservedInputProcessingResult validationResult =
@@ -4218,16 +4265,21 @@ namespace BuildXL.Scheduler
         /// <remarks>
         /// If a pip has shared opaque directory outputs it is always considered dirty since
         /// it is not clear how to infer what to run based on the state of the file system.
+        /// If a pip has exclusive opaques with existence assertions, it is considered dirty as well
+        /// since validating the assertions in a top-down scheduling is not straightforward (even though it could
+        /// be achieved in the future)
         /// </remarks>
-        public static bool IsUnconditionallyPerpetuallyDirty(Pip pip)
-            => pip.PipType == PipType.Process && (pip as Process).HasSharedOpaqueDirectoryOutputs;
+        public static bool IsUnconditionallyPerpetuallyDirty(Pip pip, IPipGraphFileSystemView pipGraphView)
+            => pip.PipType == PipType.Process && pip is Process process &&
+               (process.HasSharedOpaqueDirectoryOutputs || 
+                process.DirectoryOutputs.Any(directory => pipGraphView.GetExistenceAssertionsUnderOpaqueDirectory(directory).Count > 0)); 
 
         /// <summary>
         /// Discovers the content hashes of a process pip's outputs, which must now be on disk.
         /// The pip's outputs will be stored into the <see cref="IArtifactContentCache"/> of <see cref="IPipExecutionEnvironment.Cache"/>,
         /// and (if caching is enabled) a cache entry (the types varies; either single-phase or two-phase depending on configuration) will be created.
         /// The cache entry itself is not immediately stored, and is instead placed on the <paramref name="processExecutionResult"/>. This is so that
-        /// in distributed builds, workers can handle output processing and validation but defer all metadata storage to the master.
+        /// in distributed builds, workers can handle output processing and validation but defer all metadata storage to the orchestrator.
         /// </summary>
         /// <remarks>
         /// This may be called even if the execution environment lacks a cache, in which case the outputs are hashed and reported (but nothing else).
@@ -4328,86 +4380,112 @@ namespace BuildXL.Scheduler
                 // We need to discover dynamic outputs in the given opaque directories.
                 var fileList = poolFileList.Instance;
 
-                for (int i = 0; i < process.DirectoryOutputs.Length; i++)
+                using (var existenceAssertionsWrapper = Pools.GetFileArtifactSet())
                 {
-                    fileList.Clear();
-                    var directoryArtifact = process.DirectoryOutputs[i];
-                    var directoryArtifactPath = directoryArtifact.Path;
+                    HashSet<FileArtifact> existenceAssertions = existenceAssertionsWrapper.Instance;
 
-                    var index = i;
-
-                    // For the case of an opaque directory, the content is determined by scanning the file system
-                    if (!directoryArtifact.IsSharedOpaque)
+                    for (int i = 0; i < process.DirectoryOutputs.Length; i++)
                     {
-                        var enumerationResult = environment.State.FileContentManager.EnumerateAndTrackOutputDirectory(
-                            directoryArtifact,
-                            outputDirectoryData,
-                            handleFile: fileArtifact =>
+                        fileList.Clear();
+                        var directoryArtifact = process.DirectoryOutputs[i];
+                        var directoryArtifactPath = directoryArtifact.Path;
+
+                        var index = i;
+
+                        // For the case of an opaque directory, the content is determined by scanning the file system
+                        if (!directoryArtifact.IsSharedOpaque)
+                        {
+                            // Let's validate here the existence assertions for exclusive opaques
+                            // Shared opaques were already validated during sandboxed execution
+                            // The validation is implemented in difference places for each to avoid unnecessary
+                            // re-enumerations
+                            Contract.Assert(existenceAssertions.Count == 0);
+                            existenceAssertions.AddRange(environment.PipGraphView.GetExistenceAssertionsUnderOpaqueDirectory(directoryArtifact));
+                            
+                            var enumerationResult = environment.State.FileContentManager.EnumerateAndTrackOutputDirectory(
+                                directoryArtifact,
+                                outputDirectoryData,
+                                handleFile: fileArtifact =>
+                                {
+                                    if (!CheckForAllowedReparsePointProduction(fileArtifact.Path, operationContext, description, pathTable, processExecutionResult, environment.Configuration))
+                                    {
+                                        enableCaching = false;
+                                        return;
+                                    }
+
+                                    // Files under an exclusive opaques are always considered required outputs
+                                    fileList.Add(FileArtifactWithAttributes.Create(fileArtifact, FileExistence.Required));
+                                    FileOutputData.UpdateFileData(allOutputData, fileArtifact.Path, OutputFlags.DynamicFile, index);
+                                    var fileArtifactWithAttributes = fileArtifact.WithAttributes(FileExistence.Required);
+                                    allOutputs.Add(fileArtifactWithAttributes);
+
+                                    if (exclusiveOutputDirectoriesAreRedirected)
+                                    {
+                                        PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, fileArtifactWithAttributes, allRedirectedOutputs);
+                                    }
+
+                                    existenceAssertions.Remove(fileArtifact);
+                                },
+
+                                // TODO: Currently the logic skips empty subdirectories. The logic needs to preserve the structure of opaque directories.
+                                // TODO: THe above issue is tracked by task 872930.
+                                handleDirectory: null);
+
+                            if (!enumerationResult.Succeeded)
                             {
-                                if (!CheckForAllowedReparsePointProduction(fileArtifact.Path, operationContext, description, pathTable, processExecutionResult, environment.Configuration))
+                                Logger.Log.ProcessingPipOutputDirectoryFailed(
+                                    operationContext,
+                                    description,
+                                    directoryArtifactPath.ToString(pathTable),
+                                    enumerationResult.Failure.DescribeIncludingInnerFailures());
+                                return false;
+                            }
+
+                            // There are some outputs that were asserted as belonging to the shared opaque that were not found
+                            if (existenceAssertions.Count != 0)
+                            {
+                                Processes.Tracing.Logger.Log.ExistenceAssertionUnderOutputDirectoryFailed(
+                                            operationContext,
+                                            description,
+                                            existenceAssertions.First().Path.ToString(pathTable),
+                                            directoryArtifact.Path.ToString(pathTable));
+
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            // For the case of shared opaque directories, the content is based on detours
+                            var writeAccessesByPath = processExecutionResult.SharedDynamicDirectoryWriteAccesses;
+                            if (!writeAccessesByPath.TryGetValue(directoryArtifactPath, out var accesses))
+                            {
+                                accesses = CollectionUtilities.EmptyArray<FileArtifactWithAttributes>();
+                            }
+
+                            foreach (var access in accesses)
+                            {
+                                if (!CheckForAllowedReparsePointProduction(access.Path, operationContext, description, pathTable, processExecutionResult, environment.Configuration))
                                 {
                                     enableCaching = false;
-                                    return;
                                 }
-
-                                // Files under an exclusive opaques are always considered required outputs
-                                fileList.Add(FileArtifactWithAttributes.Create(fileArtifact, FileExistence.Required));
-                                FileOutputData.UpdateFileData(allOutputData, fileArtifact.Path, OutputFlags.DynamicFile, index);
-                                var fileArtifactWithAttributes = fileArtifact.WithAttributes(FileExistence.Required);
-                                allOutputs.Add(fileArtifactWithAttributes);
-
-                                if (exclusiveOutputDirectoriesAreRedirected)
+                                else
                                 {
-                                    PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, fileArtifactWithAttributes, allRedirectedOutputs);
-                                }
-                            },
+                                    fileList.Add(access);
+                                    FileOutputData.UpdateFileData(allOutputData, access.Path, OutputFlags.DynamicFile, index);
 
-                            // TODO: Currently the logic skips empty subdirectories. The logic needs to preserve the structure of opaque directories.
-                            // TODO: THe above issue is tracked by task 872930.
-                            handleDirectory: null);
+                                    allOutputs.Add(access);
 
-                        if (!enumerationResult.Succeeded)
-                        {
-                            Logger.Log.ProcessingPipOutputDirectoryFailed(
-                                operationContext,
-                                description,
-                                directoryArtifactPath.ToString(pathTable),
-                                enumerationResult.Failure.DescribeIncludingInnerFailures());
-                            return false;
-                        }
-                    }
-                    else
-                    {
-                        // For the case of shared opaque directories, the content is based on detours
-                        var writeAccessesByPath = processExecutionResult.SharedDynamicDirectoryWriteAccesses;
-                        if (!writeAccessesByPath.TryGetValue(directoryArtifactPath, out var accesses))
-                        {
-                            accesses = CollectionUtilities.EmptyArray<FileArtifactWithAttributes>();
-                        }
-
-                        foreach (var access in accesses)
-                        {
-                            if (!CheckForAllowedReparsePointProduction(access.Path, operationContext, description, pathTable, processExecutionResult, environment.Configuration))
-                            {
-                                enableCaching = false;
-                            }
-                            else
-                            {
-                                fileList.Add(access);
-                                FileOutputData.UpdateFileData(allOutputData, access.Path, OutputFlags.DynamicFile, index);
-
-                                allOutputs.Add(access);
-
-                                if (sharedOutputDirectoriesAreRedirected)
-                                {
-                                    PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, access, allRedirectedOutputs);
+                                    if (sharedOutputDirectoriesAreRedirected)
+                                    {
+                                        PopulateRedirectedOutputsForFileInOpaque(pathTable, environment, containerConfiguration, directoryArtifactPath, access, allRedirectedOutputs);
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    processExecutionResult.ReportDirectoryOutput(directoryArtifact, fileList);
-                    numDynamicOutputs += fileList.Count;
+                        processExecutionResult.ReportDirectoryOutput(directoryArtifact, fileList);
+                        numDynamicOutputs += fileList.Count;
+                    }
                 }
 
                 if (encodedStandardOutput != null)
@@ -4429,7 +4507,7 @@ namespace BuildXL.Scheduler
 
                 bool successfullyProcessedOutputs = true;
 
-                SemaphoreSlim concurrencySemaphore = new SemaphoreSlim(Environment.ProcessorCount);
+                SemaphoreSlim concurrencySemaphore = new SemaphoreSlim(EngineEnvironmentSettings.StoringOutputsToCacheConcurrency);
                 foreach (var output in allOutputs)
                 {
                     var outputData = allOutputData[output.Path];
@@ -4595,6 +4673,8 @@ namespace BuildXL.Scheduler
 
                     RecordOutputsOnMetadata(metadata, process, allOutputData, outputHashPairs, pathTable);
 
+                    RecordCreatedDirectoriesOnMetadata(metadata, pathTable, processExecutionResult.CreatedDirectories);
+
                     // An assertion for the static outputs
                     Contract.Assert(metadata.StaticOutputHashes.Count == process.GetCacheableOutputsCount());
 
@@ -4635,6 +4715,11 @@ namespace BuildXL.Scheduler
 
                 return true;
             }
+        }
+
+        private static void RecordCreatedDirectoriesOnMetadata(PipCacheDescriptorV2Metadata metadata, PathTable pathTable, IReadOnlySet<AbsolutePath> createdDirectories)
+        {
+            metadata.CreatedDirectories.AddRange(createdDirectories.Select(directory => directory.ToString(pathTable)));
         }
 
         private static void PopulateRedirectedOutputsForFileInOpaque(PathTable pathTable, IPipExecutionEnvironment environment, ContainerConfiguration containerConfiguration, AbsolutePath opaqueDirectory, FileArtifactWithAttributes fileArtifactInOpaque, Dictionary<AbsolutePath, FileArtifactWithAttributes> allRedirectedOutputs)
@@ -5074,7 +5159,14 @@ namespace BuildXL.Scheduler
                 null, // Don't pass observedInputProcessingResult since this function doesn't rely on the part of the output dependent on that.
                 cachingInfo.WeakFingerprint);
 
-            ExecutionResult convergedExecutionResult = GetCacheHitExecutionResult(operationContext, environment, process, runnableFromCacheResult);
+            if (!TryGetCacheHitExecutionResult(operationContext, environment, process, runnableFromCacheResult, out var convergedExecutionResult))
+            {
+                // Errors should have been logged already
+
+                // Didn't converge with cache but the storage of the two phase descriptor is still considered successful
+                // since there is a result in the cache for the strong fingerprint
+                return StoreCacheEntryResult.Succeeded;
+            }
 
             // In success case, return deployed from cache status to indicate that we converged with remote cache and that
             // reporting to environment has already happened.
@@ -5220,6 +5312,43 @@ namespace BuildXL.Scheduler
                 PipExecutorCounter.CacheMissesForProcessOutputContent,
                 PipExecutorCounter.CacheMissesForProcessConfiguredUncacheable,
             };
+        }
+
+        /// <summary>
+        /// Gets a PipFragmentRenderer for a WriteFile operation.
+        /// </summary>
+        /// <param name="options">Options to specify how the renderer should behave.</param>
+        /// <param name="pathTable">Path table</param>
+        /// <returns>PipFragmentRenderer</returns>
+        private static PipFragmentRenderer GetPipFragmentRendererForWriteFile(WriteFile.Options options, PathTable pathTable)
+        {
+            PipFragmentRenderer renderer = null;
+            Func<AbsolutePath, string> pathExpander;
+
+            switch (options.PathRenderingOption)
+            {
+                case WriteFile.PathRenderingOption.None:
+                    renderer = new PipFragmentRenderer(pathTable);
+                    break;
+                case WriteFile.PathRenderingOption.BackSlashes:
+                    pathExpander = path => path.ToString(pathTable, PathFormat.Windows);
+                    renderer = new PipFragmentRenderer(pathExpander, pathTable.StringTable, monikerRenderer: null);
+                    break;
+                case WriteFile.PathRenderingOption.EscapedBackSlashes:
+                    pathExpander = path => path.ToString(pathTable, PathFormat.Windows).Replace(@"\", @"\\");
+                    renderer = new PipFragmentRenderer(pathExpander, pathTable.StringTable, monikerRenderer: null);
+                    break;
+                case WriteFile.PathRenderingOption.ForwardSlashes:
+                    // PathFormat.Script will use forward slashes when rendering path
+                    pathExpander = path => path.ToString(pathTable, PathFormat.Script);
+                    renderer = new PipFragmentRenderer(pathExpander, pathTable.StringTable, monikerRenderer: null);
+                    break;
+                default:
+                    Contract.Assert(false, $"Invalid WriteFile.Options value specified: ${options}");
+                    break;
+            }
+
+            return renderer;
         }
     }
 }

@@ -50,14 +50,15 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 cacheConfig.MaxDegreeOfParallelismForIncorporateRequests,
                 cacheConfig.MaxFingerprintsPerIncorporateRequest,
                 domain,
+                cacheConfig.ForceUpdateOnAddContentHashList,
                 writeThroughContentStoreFunc,
                 cacheConfig.SealUnbackedContentHashLists,
                 cacheConfig.UseBlobContentHashLists,
                 cacheConfig.UseDedupStore,
                 cacheConfig.OverrideUnixFileAccessMode,
                 cacheConfig.EnableEagerFingerprintIncorporation,
-                cacheConfig.InlineFingerprintIncorporationExpiry,
-                cacheConfig.EagerFingerprintIncorporationNagleInterval,
+                TimeSpan.FromHours(cacheConfig.InlineFingerprintIncorporationExpiryHours),
+                TimeSpan.FromMinutes(cacheConfig.EagerFingerprintIncorporationNagleIntervalMinutes),
                 cacheConfig.EagerFingerprintIncorporationNagleBatchSize,
                 downloadBlobsUsingHttpClient: cacheConfig.DownloadBlobsUsingHttpClient);
         }

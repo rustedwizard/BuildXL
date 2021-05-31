@@ -16,6 +16,7 @@ using BuildXL.Cache.ContentStore.Interfaces.Secrets;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Utils;
+using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tracing;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
@@ -83,11 +84,11 @@ namespace BuildXL.Cache.Logging
 
         /// <nodoc />
         public AzureBlobStorageLog(
-            AzureBlobStorageLogConfiguration configuration, 
-            OperationContext context, 
-            IClock clock, 
-            IAbsFileSystem fileSystem, 
-            ITelemetryFieldsProvider telemetryFieldsProvider, 
+            AzureBlobStorageLogConfiguration configuration,
+            OperationContext context,
+            IClock clock,
+            IAbsFileSystem fileSystem,
+            ITelemetryFieldsProvider telemetryFieldsProvider,
             AzureBlobStorageCredentials credentials,
             IReadOnlyDictionary<string, string> additionalBlobMetadata)
             : this(configuration, context, clock, fileSystem, telemetryFieldsProvider,
@@ -98,11 +99,11 @@ namespace BuildXL.Cache.Logging
 
         /// <nodoc />
         public AzureBlobStorageLog(
-            AzureBlobStorageLogConfiguration configuration, 
-            OperationContext context, 
-            IClock clock, 
-            IAbsFileSystem fileSystem, 
-            ITelemetryFieldsProvider telemetryFieldsProvider, 
+            AzureBlobStorageLogConfiguration configuration,
+            OperationContext context,
+            IClock clock,
+            IAbsFileSystem fileSystem,
+            ITelemetryFieldsProvider telemetryFieldsProvider,
             CloudBlobContainer container,
             IReadOnlyDictionary<string, string> additionalBlobMetadata)
         {
@@ -185,7 +186,8 @@ namespace BuildXL.Cache.Logging
                 _uploadQueue.EnqueueAll(pendingUpload);
                 return BoolResult.Success;
             },
-                counter: Counters[AzureBlobStorageLogCounters.RecoverFromCrashCalls]);
+            traceErrorsOnly: true,
+            counter: Counters[AzureBlobStorageLogCounters.RecoverFromCrashCalls]);
         }
 
         /// <nodoc />
@@ -234,18 +236,23 @@ namespace BuildXL.Cache.Logging
 
                     return BoolResult.Success;
                 },
-                counter: Counters[AzureBlobStorageLogCounters.ProcessBatchCalls]);
+                counter: Counters[AzureBlobStorageLogCounters.ProcessBatchCalls],
+                traceErrorsOnly: true,
+                silentOperationDurationThreshold: TimeSpan.MaxValue,
+                extraEndMessage: _ => $"NumLines=[{logEventInfos.Length}]");
         }
 
         private Task UploadBatchAsync(LogFile[] logFilePaths)
         {
             Contract.Requires(logFilePaths.Length == 1);
 
-            return _context.PerformOperationAsync(Tracer, () =>
-                {
-                    return UploadToBlobStorageAsync(_context, logFilePaths[0]);
-                },
-                counter: Counters[AzureBlobStorageLogCounters.ProcessBatchCalls]);
+            return _context.PerformOperationAsync(Tracer, () => UploadToBlobStorageAsync(_context, logFilePaths[0]),
+                counter: Counters[AzureBlobStorageLogCounters.ProcessBatchCalls],
+                traceErrorsOnly: true,
+                // This isn't traced because we always have a single element in the batch, which gets traced inside
+                // the individual upload.
+                silentOperationDurationThreshold: TimeSpan.MaxValue,
+                extraEndMessage: _ => $"LogFile=[{logFilePaths[0].Path}]");
         }
 
         private Task<Result<LogFile>> WriteLogsToFileAsync(OperationContext context, AbsolutePath logFilePath, string[] logs)
@@ -255,7 +262,7 @@ namespace BuildXL.Cache.Logging
                     long compressedSizeBytes = 0;
                     long uncompressedSizeBytes = 0;
 
-                    using (Stream fileStream = await _fileSystem.OpenSafeAsync(
+                    using (Stream fileStream = _fileSystem.Open(
                         logFilePath,
                         FileAccess.Write,
                         FileMode.CreateNew,
@@ -304,6 +311,8 @@ namespace BuildXL.Cache.Logging
                         CompressedSizeBytes = compressedSizeBytes,
                     });
                 },
+                traceErrorsOnly: true,
+                silentOperationDurationThreshold: TimeSpan.MaxValue,
                 extraEndMessage: result =>
                 {
                     if (result.Succeeded)
@@ -333,7 +342,7 @@ namespace BuildXL.Cache.Logging
 
                     if (await blob.ExistsAsync())
                     {
-                        context.TraceDebug($"Log file `{logFilePath}` already exists");
+                        Tracer.Debug(context, $"Log file `{logFilePath}` already exists");
                         _fileSystem.DeleteFile(logFilePath);
 
                         Tracer.TrackMetric(context, $"UploadAlreadyExists", 1);
@@ -385,6 +394,8 @@ namespace BuildXL.Cache.Logging
 
                     return BoolResult.Success;
                 },
+                traceErrorsOnly: true,
+                silentOperationDurationThreshold: TimeSpan.FromMinutes(1),
                 extraEndMessage: _ => $"LogFilePath=[{logFilePath}] UploadSizeBytes=[{uploadTask.CompressedSizeBytes?.ToSizeExpression() ?? "Unknown"}]",
                 counter: Counters[AzureBlobStorageLogCounters.UploadToBlobStorageCalls]);
         }

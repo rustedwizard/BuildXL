@@ -20,10 +20,12 @@ namespace BuildXL.Cache.ContentStore.Hashing
         {
             HashType = hashType;
             ByteLength = length;
+            Zero = new ContentHash(HashType);
         }
 
         /// <summary>
         ///     Create a content hasher of this type.
+        ///     This operation maybe quite expensive. Try to avoid it and use an existing hasher from the pool.
         /// </summary>
         public abstract IContentHasher CreateContentHasher();
 
@@ -40,7 +42,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
                     {
                         if (_emptyHash == default)
                         {
-                            _emptyHash = CreateContentHasher().GetContentHash(CollectionUtilities.EmptyArray<byte>());
+                            _emptyHash = HashInfoLookup.GetContentHasher(HashType).GetContentHash(CollectionUtilities.EmptyArray<byte>());
                         }
                     }
                 }
@@ -48,6 +50,11 @@ namespace BuildXL.Cache.ContentStore.Hashing
                 return _emptyHash;
             }
         }
+
+        /// <summary>
+        ///     The content hash with all zeros.
+        /// </summary>
+        public ContentHash Zero { get; }
 
         /// <summary>
         ///     Gets hash algorithm.

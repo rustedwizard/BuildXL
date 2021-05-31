@@ -9,6 +9,13 @@
 #include <string.h>
 #endif
 
+#if _WIN32
+#include "pathcch.h"
+#endif
+
+#define _MAX_EXTENDED_DIR_LENGTH (_MAX_EXTENDED_PATH_LENGTH - _MAX_DRIVE - _MAX_FNAME - _MAX_EXT - 4)
+#define _MAX_EXTENDED_PATH_LENGTH 32768 // see https://docs.microsoft.com/en-us/cpp/c-runtime-library/path-field-limits?view=vs-2019
+
 // Magic numbers known to provide good hash distributions.
 // See here: http://www.isthe.com/chongo/tech/comp/fnv/
 
@@ -373,11 +380,16 @@ bool IsPathToNamedStream(PCPathChar const path, size_t pathLength) {
 
 size_t GetRootLength(PCPathChar path)
 {
+    if (path == nullptr)
+    {
+        return 0;
+    }
+
     size_t i = 0;
     size_t volumeSeparatorLength = 2;  // Length to the colon "C:"
     size_t uncRootLength = 2;          // Length to the start of the server name "\\"
 
-    bool extendedSyntax = HasPrefix(path, NT_LONG_PATH_PREFIX);
+    bool extendedSyntax = HasPrefix(path, NT_LONG_PATH_PREFIX) || HasPrefix(path, NT_PATH_PREFIX);
     bool extendedUncSyntax = HasPrefix(path, LONG_UNC_PATH_PREFIX);
     size_t pathLength = pathlen(path);
 
@@ -427,4 +439,107 @@ size_t GetRootLength(PCPathChar path)
     return i;
 }
 
+// Returns a collection of all path atoms of the given path
+int TryDecomposePath(const std::wstring& path, std::vector<std::wstring>& elements)
+{
+    auto drive = std::make_unique<wchar_t[]>(_MAX_DRIVE);
+    auto directory = std::make_unique<wchar_t[]>(_MAX_EXTENDED_DIR_LENGTH);
+    auto file_name = std::make_unique<wchar_t[]>(_MAX_FNAME);
+    auto extension = std::make_unique<wchar_t[]>(_MAX_EXT);
+
+    errno_t err = _wsplitpath_s(
+        path.c_str(),
+        drive.get(), _MAX_DRIVE,
+        directory.get(), _MAX_EXTENDED_DIR_LENGTH,
+        file_name.get(), _MAX_FNAME,
+        extension.get(), _MAX_EXT);
+
+    if (err != 0)
+    {
+        return err;
+    }
+
+    std::wstring wdrive = drive.get();
+    if (wdrive.size() > 0)
+    {
+        elements.push_back(std::move(wdrive));
+    }
+
+    wchar_t* context;
+    wchar_t* next = wcstok_s(directory.get(), L"\\/", &context);
+    while (next)
+    {
+        std::wstring dirAtom = next;
+        if (dirAtom.size() > 0)
+        {
+            elements.push_back(std::move(next));
+        }
+
+        next = wcstok_s(nullptr, L"\\/", &context);
+    }
+
+    std::wstring filenameAndExtension = file_name.get();
+    filenameAndExtension.append(extension.get());
+
+    if (filenameAndExtension.size() > 0)
+    {
+        elements.push_back(std::move(filenameAndExtension));
+    }
+
+    return 0;
+}
+
+std::wstring NormalizePath(const std::wstring& path)
+{
+    if (GetRootLength(path.c_str()) == 0)
+    {
+        return std::wstring(path);
+    }
+
+    std::wstring normalizedPath;
+    if (path.length() < MAX_PATH)
+    {
+        PathChar buffer[MAX_PATH];
+
+        // Deliberately not using PATHCCH_FORCE_ENABLE_LONG_NAME_PROCESS to align the long-name capability with
+        // what the process is capable of natively.
+        PathCchCanonicalizeEx(buffer, MAX_PATH, path.c_str(), PATHCCH_ALLOW_LONG_PATHS);
+        normalizedPath.assign(buffer);
+    }
+    else
+    {
+        auto buffer = std::make_unique<PathChar[]>(PATHCCH_MAX_CCH);
+
+        // Deliberately not using PATHCCH_FORCE_ENABLE_LONG_NAME_PROCESS to align the long-name capability with
+        // what the process is capable of natively.
+        PathCchCanonicalizeEx(buffer.get(), PATHCCH_MAX_CCH, path.c_str(), PATHCCH_ALLOW_LONG_PATHS);
+        normalizedPath.assign(buffer.get());
+    }
+
+    return normalizedPath;
+}
+
+std::wstring PathCombine(const std::wstring& fragment1, const std::wstring& fragment2)
+{
+    if (fragment2.size() == 0)
+    {
+        return fragment1;
+    }
+
+    if (fragment1.size() == 0)
+    {
+        return fragment2;
+    }
+
+    if (GetRootLength(fragment2.c_str()) > 0)
+    {
+        return fragment2;
+    }
+
+    auto ch = fragment1.back();
+
+    return ch != NT_DIRECTORY_SEPARATOR && ch != UNIX_DIRECTORY_SEPARATOR && ch != NT_VOLUME_SEPARATOR
+        ? fragment1 + NT_DIRECTORY_SEPARATOR + fragment2
+        : fragment1 + fragment2;
+}
 #endif // _WIN32

@@ -918,12 +918,22 @@ namespace BuildXL.Native.IO.Unix
         /// <inheritdoc />
         public Possible<PathExistence, NativeFailure> TryProbePathExistence(string path, bool followSymlink)
         {
+            return TryProbePathExistence(path, followSymlink, out _);
+        }
+
+        /// <inheritdoc />
+        public Possible<PathExistence, NativeFailure> TryProbePathExistence(string path, bool followSymlink, out bool isReparsePoint)
+        {
             var mode = GetFilePermission(path, followSymlink: false, throwOnFailure: false);
 
             if (mode < 0)
             {
+                isReparsePoint = false;
                 return PathExistence.Nonexistent;
             }
+
+            FilePermissions permissions = checked((FilePermissions)mode);
+            isReparsePoint = permissions.HasFlag(FilePermissions.S_IFLNK);
 
             if (followSymlink)
             {
@@ -933,7 +943,6 @@ namespace BuildXL.Native.IO.Unix
             }
             else
             {
-                FilePermissions permissions = checked((FilePermissions)mode);
                 return
                     permissions.HasFlag(FilePermissions.S_IFDIR) ? PathExistence.ExistsAsDirectory :
                     permissions.HasFlag(FilePermissions.S_IFLNK) ? PathExistence.ExistsAsFile :
@@ -1146,6 +1155,9 @@ namespace BuildXL.Native.IO.Unix
                 m_supportCopyOnWrite = new Lazy<bool>(() => value);
             }
         }
+
+        /// <inheritdoc />
+        public bool IsInKernelCopyingSupportedByHostSystem => !Interop.Dispatch.IsMacOS;
 
         /// <inheritdoc />
         public bool CheckIfVolumeSupportsCopyOnWriteByHandle(SafeFileHandle fileHandle)

@@ -3,29 +3,22 @@
 
 using System;
 using System.Diagnostics;
-using System.Diagnostics.ContractsLight;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed;
 using BuildXL.Cache.ContentStore.Distributed.Utilities;
 using BuildXL.Cache.ContentStore.Exceptions;
-using BuildXL.Cache.ContentStore.FileSystem;
-using BuildXL.Cache.ContentStore.Grpc;
+using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
-using BuildXL.Cache.ContentStore.Interfaces.Secrets;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
-using BuildXL.Cache.ContentStore.Service.Grpc;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Cache.Host.Configuration;
 using BuildXL.Cache.Host.Service.Internal;
-using BuildXL.Cache.Logging;
-using BuildXL.Cache.Logging.External;
-using static BuildXL.Utilities.ConfigurationHelper;
+using BuildXL.Utilities.Tasks;
 
 namespace BuildXL.Cache.Host.Service
 {
@@ -91,6 +84,17 @@ namespace BuildXL.Cache.Host.Service
 
             InitializeLifetimeTracker(host);
 
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(arguments.Cancellation);
+            arguments.Cancellation = cts.Token;
+
+            if (arguments.Configuration.RespectRequestTeardown)
+            {
+                LifetimeManager.OnTeardownRequested += _ =>
+                {
+                    cts.Cancel();
+                };
+            }
+            
             // NOTE(jubayard): this is the entry point for running CASaaS. At this point, the Logger inside the
             // arguments holds the client's implementation of our logging interface ILogger. Here, we may override the
             // client's decision with our own.
@@ -107,7 +111,7 @@ namespace BuildXL.Cache.Host.Service
 
             AdjustCopyInfrastructure(arguments);
 
-            await ReportStartingServiceAsync(operationContext, host, arguments.Configuration);
+            await ReportStartingServiceAsync(operationContext, host, arguments);
 
             var factory = new CacheServerFactory(arguments);
 
@@ -124,9 +128,9 @@ namespace BuildXL.Cache.Host.Service
                         throw new CacheException(startupResult.ToString());
                     }
 
-                    ReportServiceStarted(operationContext, host);
-
-                    await arguments.Cancellation.WaitForCancellationAsync();
+                    await ReportServiceStartedAsync(operationContext, server, host);
+                    using var cancellationAwaiter = arguments.Cancellation.ToAwaitable();
+                    await cancellationAwaiter.CompletionTask;
                     await ReportShuttingDownServiceAsync(operationContext, host);
                 }
                 catch (Exception e)
@@ -136,7 +140,7 @@ namespace BuildXL.Cache.Host.Service
                 }
                 finally
                 {
-                    var timeoutInMinutes = arguments.Configuration?.DistributedContentSettings?.MaxShutdownDurationInMinutes ?? 30;
+                    var timeoutInMinutes = arguments.Configuration?.DistributedContentSettings?.MaxShutdownDurationInMinutes ?? 5;
                     var result = await server
                         .ShutdownAsync(context)
                         .WithTimeoutAsync("Server shutdown", TimeSpan.FromMinutes(timeoutInMinutes));
@@ -160,31 +164,38 @@ namespace BuildXL.Cache.Host.Service
             LifetimeTracker.ServiceStartupFailed(context, exception, startupDuration);
         }
 
-        private static async Task ReportStartingServiceAsync(
+        private static Task ReportStartingServiceAsync(
             OperationContext context,
             IDistributedCacheServiceHost host,
-            DistributedCacheServiceConfiguration configuration)
+            DistributedCacheServiceArguments arguments)
         {
+            var configuration = arguments.Configuration;
             var logIntervalSeconds = configuration.DistributedContentSettings.ServiceRunningLogInSeconds;
             var logInterval = logIntervalSeconds != null ? (TimeSpan?)TimeSpan.FromSeconds(logIntervalSeconds.Value) : null;
-            var logFilePath = configuration.LocalCasSettings.GetCacheRootPathWithScenario(LocalCasServiceSettings.DefaultCacheName);
+            
+            var logFilePath = GetPathForLifetimeTracking(configuration);
+            
+            LifetimeTracker.ServiceStarting(context, logInterval, logFilePath, arguments.TelemetryFieldsProvider.ServiceName);
 
-            LifetimeTracker.ServiceStarting(context, logInterval, logFilePath);
-
-            if (host is IDistributedCacheServiceHostInternal hostInternal)
-            {
-                await hostInternal.OnStartingServiceAsync(context);
-            }
-
-            await host.OnStartingServiceAsync();
+            return host.OnStartingServiceAsync();
         }
 
-        private static void ReportServiceStarted(
+        private static AbsolutePath GetPathForLifetimeTracking(DistributedCacheServiceConfiguration configuration) => configuration.LocalCasSettings.GetCacheRootPathWithScenario(LocalCasServiceSettings.DefaultCacheName);
+
+        private static async Task ReportServiceStartedAsync(
             OperationContext context,
+            StartupShutdownSlimBase server,
             IDistributedCacheServiceHost host)
         {
             LifetimeTracker.ServiceStarted(context);
             host.OnStartedService();
+
+            if (host is IDistributedCacheServiceHostInternal hostInternal
+                && server is IServicesProvider sp
+                && sp.TryGetService<ICacheServerServices>(out var services))
+            {
+                await hostInternal.OnStartedServiceAsync(context, services);
+            }
         }
 
         private static async Task ReportShuttingDownServiceAsync(OperationContext context, IDistributedCacheServiceHost host)

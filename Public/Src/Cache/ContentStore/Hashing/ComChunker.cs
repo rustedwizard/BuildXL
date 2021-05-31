@@ -8,6 +8,12 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.DataDeduplication.Interop;
 
+#pragma warning disable CS1591
+#pragma warning disable CS3001 // CLS
+#pragma warning disable CS3003
+#pragma warning disable CS3010
+#pragma warning disable SA1600 // Elements must be documented
+
 namespace BuildXL.Cache.ContentStore.Hashing
 {
     /// <summary>
@@ -66,9 +72,10 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// </summary>
         public ComChunkerNonDeterministic(ChunkerConfiguration config)
         {
-            Contract.Assert(
-                Thread.CurrentThread.GetApartmentState() == ApartmentState.MTA,
-                "Thread must be in MTA ApartmentState");
+            if (Thread.CurrentThread.GetApartmentState() != ApartmentState.MTA)
+            {
+                throw new System.Threading.ThreadStateException("Thread must be in MTA ApartmentState");
+            }
 
             Contract.Assert(
                 config.AvgChunkSize == ComChunker.SupportedAvgChunkSize,

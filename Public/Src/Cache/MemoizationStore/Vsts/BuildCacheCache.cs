@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Linq;
@@ -50,6 +51,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         private readonly TimeSpan _inlineFingerprintIncorporationExpiry;
         private readonly TimeSpan _eagerFingerprintIncorporationNagleInterval;
         private readonly int _eagerFingerprintIncorporationNagleBatchSize;
+        private readonly bool _forceUpdateOnAddContentHashList;
 
         /// <summary>
         /// BuildCache may be unable to pin the content for us when we want the content to be backed.
@@ -84,10 +86,11 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         /// <param name="useDedupStore">If true, gets content through DedupStore. If false, gets content from BlobStore.</param>
         /// <param name="overrideUnixFileAccessMode">If true, overrides default Unix file access modes.</param>
         /// <param name="enableEagerFingerprintIncorporation"><see cref="BuildCacheServiceConfiguration.EnableEagerFingerprintIncorporation"/></param>
-        /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiry"/></param>
-        /// <param name="eagerFingerprintIncorporationNagleInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleInterval"/></param>
+        /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiryHours"/></param>
+        /// <param name="eagerFingerprintIncorporationNagleInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleIntervalMinutes"/></param>
         /// <param name="eagerFingerprintIncorporationNagleBatchSize"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleBatchSize"/></param>
         /// <param name="downloadBlobsUsingHttpClient"><see cref="BuildCacheServiceConfiguration.DownloadBlobsUsingHttpClient"/></param>
+        /// <param name="forceUpdateOnAddContentHashList">Whether to force an update and ignore existing CHLs when adding.</param>
         public BuildCacheCache(
             IAbsFileSystem fileSystem,
             string cacheNamespace,
@@ -104,6 +107,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             int maxDegreeOfParallelismForIncorporateRequests,
             int maxFingerprintsPerIncorporateRequest,
             IDomainId domain,
+            bool forceUpdateOnAddContentHashList,
             Func<IContentStore> writeThroughContentStoreFunc = null,
             bool sealUnbackedContentHashLists = false,
             bool useBlobContentHashLists = false,
@@ -179,6 +183,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             _inlineFingerprintIncorporationExpiry = inlineFingerprintIncorporationExpiry;
             _eagerFingerprintIncorporationNagleInterval = eagerFingerprintIncorporationNagleInterval;
             _eagerFingerprintIncorporationNagleBatchSize = eagerFingerprintIncorporationNagleBatchSize;
+            _forceUpdateOnAddContentHashList = forceUpdateOnAddContentHashList;
         }
 
         /// <inheritdoc />
@@ -377,7 +382,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                         _inlineFingerprintIncorporationExpiry,
                         _eagerFingerprintIncorporationNagleInterval,
                         _eagerFingerprintIncorporationNagleBatchSize,
-                        _manuallyExtendContentLifetime));
+                        _manuallyExtendContentLifetime,
+                        _forceUpdateOnAddContentHashList));
             });
         }
 
@@ -428,7 +434,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                         _inlineFingerprintIncorporationExpiry,
                         _eagerFingerprintIncorporationNagleInterval,
                         _eagerFingerprintIncorporationNagleBatchSize,
-                        _manuallyExtendContentLifetime));
+                        _manuallyExtendContentLifetime,
+                        _forceUpdateOnAddContentHashList));
             });
         }
 
@@ -476,7 +483,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         public Guid Id { get; private set; }
 
         /// <inheritdoc />
-        public System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
+        public IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
         {
             return AsyncEnumerable.Empty<StructResult<StrongFingerprint>>();
         }

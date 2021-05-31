@@ -3,6 +3,8 @@
 import * as ManagedSdk from "Sdk.Managed";
 
 namespace Distributed {
+    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNet472AndNetStandard20;
+    
     @@public
     export const eventHubPackages = [
         importFrom("Microsoft.Azure.EventHubs").pkg,
@@ -35,7 +37,6 @@ namespace Distributed {
             ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
             ...redisPackages,
 
-            ManagedSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
             UtilitiesCore.dll,
             Hashing.dll,
             Interfaces.dll,
@@ -56,6 +57,20 @@ namespace Distributed {
             importFrom("BuildXL.Utilities").Collections.dll,
             ...importFrom("Sdk.Selfhost.RocksDbSharp").pkgs,
             Grpc.dll,
+
+            importFrom("protobuf-net").pkg,
+            importFrom("protobuf-net.Core").pkg,
+            importFrom("protobuf-net.Grpc").pkg,
+            importFrom("protobuf-net.Grpc.Native").pkg,
+            ...getGrpcPackages(true),
+            ...BuildXLSdk.getSystemMemoryPackages(true),
+            importFrom("System.ServiceModel.Http").pkg,
+            importFrom("System.ServiceModel.Primitives").pkg,
+            ...addIf(qualifier.targetFramework === "net472",
+                importFrom("System.Private.ServiceModel").pkg),
+        ],
+        runtimeReferences: [
+            importFrom("System.Private.ServiceModel").pkg
         ],
         internalsVisibleTo: [
             "BuildXL.Cache.ContentStore.Distributed.Test",
@@ -63,6 +78,8 @@ namespace Distributed {
             "BuildXL.Cache.MemoizationStore.Distributed",
             "BuildXL.Cache.MemoizationStore.Distributed.Test",
             "BuildXL.Cache.MemoizationStore.Vsts.Test",
-        ]
+        ],
+        skipDocumentationGeneration: true,
+        sourceGenerators: [importFrom("StructRecordGenerator").pkg],
     });
 }

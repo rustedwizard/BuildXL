@@ -10,10 +10,13 @@ namespace Scheduler {
         generateLogs: true,
         sources: globR(d`.`, "*.cs"),
         references: [
-            ...addIf(BuildXLSdk.isFullFramework,
+            ...addIfLazy(BuildXLSdk.isFullFramework, () => [
                 NetFx.System.Runtime.Serialization.dll,
-                NetFx.System.Text.Encoding.dll
-            ),
+                NetFx.System.Text.Encoding.dll,
+                NetFx.Netstandard.dll,
+                importFrom("System.Text.Json").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+                importFrom("System.Collections.Immutable").pkg
+            ]),
             ...addIfLazy(BuildXLSdk.isDotNetCoreApp, () => [
                 importFrom("BuildXL.Utilities").PackedTable.dll,
                 importFrom("BuildXL.Utilities").PackedExecution.dll
@@ -41,6 +44,8 @@ namespace Scheduler {
             importFrom("BuildXL.FrontEnd").Sdk.dll,
             importFrom("Newtonsoft.Json").pkg,
             ...importFrom("Sdk.Selfhost.RocksDbSharp").pkgs,
+            
+            ...BuildXLSdk.systemMemoryDeployment,
         ],
         internalsVisibleTo: [
             "bxlanalyzer",
@@ -51,6 +56,7 @@ namespace Scheduler {
             "Test.Tool.Analyzers",
             "Test.Bxl",
             "IntegrationTest.BuildXL.Scheduler",
+            "Test.BuildXL.Distribution",
         ],
     });
 }

@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Linq;
 using System.Text;
@@ -26,6 +27,8 @@ using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using BuildXL.Utilities.Tracing;
+
+#nullable enable
 
 namespace BuildXL.Cache.ContentStore.Distributed.Stores
 {
@@ -68,7 +71,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <inheritdoc />
         protected override Tracer Tracer => _tracer;
 
-        private IContentLocationStore _contentLocationStore;
+        private IContentLocationStore? _contentLocationStore;
+
+        private IContentLocationStore ContentLocationStore => NotNull(_contentLocationStore, nameof(_contentLocationStore));
 
         private readonly DistributedContentStoreSettings _settings;
 
@@ -81,7 +86,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
         private readonly DistributedContentCopier _distributedCopier;
         private readonly DisposableDirectory _copierWorkingDirectory;
-        internal Lazy<Task<Result<ReadOnlyDistributedContentSession>>> ProactiveCopySession;
+        private Lazy<Task<Result<ReadOnlyDistributedContentSession>>>? _proactiveCopySession;
+        internal Lazy<Task<Result<ReadOnlyDistributedContentSession>>> ProactiveCopySession =>  NotNull(_proactiveCopySession, nameof(_proactiveCopySession));
 
         /// <nodoc />
         public DistributedContentStore(
@@ -91,13 +97,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             IContentLocationStoreFactory contentLocationStoreFactory,
             DistributedContentStoreSettings settings,
             DistributedContentCopier distributedCopier,
-            IClock clock = null)
+            IClock? clock = null)
         {
             Contract.Requires(settings != null);
 
             LocalMachineLocation = localMachineLocation;
             _contentLocationStoreFactory = contentLocationStoreFactory;
-            _clock = clock;
+            _clock = clock ?? SystemClock.Instance;
             _distributedCopier = distributedCopier;
             _copierWorkingDirectory = new DisposableDirectory(distributedCopier.FileSystem, localCacheRoot / "Temp");
 
@@ -106,16 +112,23 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             InnerContentStore = innerContentStoreFunc(this);
         }
 
+        [return: NotNull]
+        private static T NotNull<T>([MaybeNull] T value, string memberName)
+        {
+            Contract.Check(value != null)?.Assert($"{memberName} is null. Did you forget to call StartupAsync?");
+            return value;
+        }
+
         AbsolutePath IDistributedContentCopierHost.WorkingFolder => _copierWorkingDirectory.Path;
 
         void IDistributedContentCopierHost.ReportReputation(MachineLocation location, MachineReputation reputation)
         {
-            _contentLocationStore.MachineReputationTracker.ReportReputation(location, reputation);
+            ContentLocationStore.MachineReputationTracker.ReportReputation(location, reputation);
         }
 
         private Task<Result<ReadOnlyDistributedContentSession>> CreateCopySession(Context context)
         {
-            var sessionId = Guid.NewGuid();
+            var sessionId = Guid.NewGuid().ToString();
 
             var operationContext = OperationContext(context.CreateNested(sessionId, nameof(DistributedContentStore)));
             return operationContext.PerformOperationAsync(_tracer,
@@ -123,10 +136,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 {
                     // NOTE: We use ImplicitPin.None so that the OpenStream calls triggered by RequestCopy will only pull the content, NOT pin it in the local store.
                     var sessionResult = CreateReadOnlySession(operationContext, $"{sessionId}-DefaultCopy", ImplicitPin.None).ThrowIfFailure();
-                    var session = sessionResult.Session;
+                    var session = sessionResult.Session!;
 
                     await session.StartupAsync(context).ThrowIfFailure();
-                    return Result.Success(session as ReadOnlyDistributedContentSession);
+                    return Result.Success((ReadOnlyDistributedContentSession)session);
                 });
         }
 
@@ -135,7 +148,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         {
             var startupTask = base.StartupAsync(context);
 
-            ProactiveCopySession = new Lazy<Task<Result<ReadOnlyDistributedContentSession>>>(() => CreateCopySession(context));
+            _proactiveCopySession = new Lazy<Task<Result<ReadOnlyDistributedContentSession>>>(() => CreateCopySession(context));
 
             if (_settings.SetPostInitializationCompletionAfterStartup)
             {
@@ -156,6 +169,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <inheritdoc />
         protected override async Task<BoolResult> StartupCoreAsync(OperationContext context)
         {
+            await _distributedCopier.StartupAsync(context).ThrowIfFailure();
+
             // NOTE: We create and start the content location store before the inner content store just in case the
             // inner content store starts background eviction after startup. We need the content store to be initialized
             // so that it can be queried and used to unregister content.
@@ -281,7 +296,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                                 context,
                                 contentInfo,
                                 tryBuildRing: false,
-                                reason: CopyReason.Replication);
+                                reason: CopyReason.ProactiveBackground);
 
                             wasPreviousCopyNeeded = true;
                             switch (result.Status)
@@ -327,12 +342,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         {
             var results = new List<(string operation, BoolResult result)>();
 
-            if (ProactiveCopySession?.IsValueCreated == true)
+            if (ProactiveCopySession.IsValueCreated)
             {
                 var sessionResult = await ProactiveCopySession.Value;
                 if (sessionResult.Succeeded)
                 {
-                    var proactiveCopySessionShutdownResult = await sessionResult.Value.ShutdownAsync(context);
+                    var proactiveCopySessionShutdownResult = await sessionResult.Value!.ShutdownAsync(context);
                     results.Add((nameof(ProactiveCopySession), proactiveCopySessionShutdownResult));
                 }
             }
@@ -351,6 +366,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
             _copierWorkingDirectory.Dispose();
 
+            var copierResult = await _distributedCopier.ShutdownAsync(context);
+            results.Add((nameof(_distributedCopier), copierResult));
+
             return ShutdownErrorCompiler(results);
         }
 
@@ -366,7 +384,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     var session = new ReadOnlyDistributedContentSession(
                             name,
                             innerSessionResult.Session,
-                            _contentLocationStore,
+                            ContentLocationStore,
                             _distributedCopier,
                             this,
                             LocalMachineLocation,
@@ -427,19 +445,19 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <summary>
         /// Remove local location from the content tracker.
         /// </summary>
-        public async Task<StructResult<long>> RemoveFromTrackerAsync(Context context)
+        public async Task<Result<long>> RemoveFromTrackerAsync(Context context)
         {
             if (_settings.EnableRepairHandling)
             {
-                var result = await _contentLocationStore.InvalidateLocalMachineAsync(context, CancellationToken.None);
+                var result = await ContentLocationStore.InvalidateLocalMachineAsync(context, CancellationToken.None);
                 if (!result)
                 {
-                    return new StructResult<long>(result);
+                    return new Result<long>(result);
                 }
             }
 
             // New logic doesn't have the content removed count
-            return StructResult.Create((long)0);
+            return Result.Success((long)0);
         }
 
         /// <summary>
@@ -483,7 +501,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 var filteredHashes = contentHashes.Where(hash => !localContentStore.Contains(hash)).ToList();
                 if (filteredHashes.Count != contentHashes.Count)
                 {
-                    Tracer.OperationDebug(context, $"Hashes not unregistered because they are still present in local store: [{string.Join(",", contentHashes.Except(filteredHashes))}]");
+                    Tracer.Debug(context, $"Hashes not unregistered because they are still present in local store: [{string.Join(",", contentHashes.Except(filteredHashes))}]");
                     contentHashes = filteredHashes;
                 }
             }
@@ -493,7 +511,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                 _lastEvictedEffectiveLastAccessTime = _clock.UtcNow - minEffectiveAge;
             }
 
-            return _contentLocationStore.TrimBulkAsync(context, contentHashes, token, UrgencyHint.Nominal);
+            return ContentLocationStore.TrimBulkAsync(context, contentHashes, token, UrgencyHint.Nominal);
         }
 
         /// <nodoc />
@@ -535,7 +553,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <summary>
         /// Attempts to get local location store if enabled
         /// </summary>
-        public bool TryGetLocalLocationStore(out LocalLocationStore localLocationStore)
+        public bool TryGetLocalLocationStore([NotNullWhen(true)]out LocalLocationStore? localLocationStore)
         {
             if (_contentLocationStore is TransitioningContentLocationStore tcs)
             {
@@ -550,13 +568,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// <summary>
         /// Gets the associated local location store instance
         /// </summary>
-        public LocalLocationStore LocalLocationStore => (_contentLocationStore as TransitioningContentLocationStore)?.LocalLocationStore;
+        public LocalLocationStore? LocalLocationStore => (_contentLocationStore as TransitioningContentLocationStore)?.LocalLocationStore;
 
         /// <summary>
         /// Checks the LLS <see cref="DistributedCentralStorage"/> for the content if available and returns
         /// the storage instance if content is found
         /// </summary>
-        private bool CheckLlsForContent(ContentHash desiredContent, out DistributedCentralStorage storage)
+        private bool CheckLlsForContent(ContentHash desiredContent, [NotNullWhen(true)]out DistributedCentralStorage? storage)
         {
             if (_contentLocationStore is TransitioningContentLocationStore tcs
                 && tcs.LocalLocationStore.DistributedCentralStorage != null
@@ -592,28 +610,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             return new OpenStreamResult($"{InnerContentStore} does not implement {nameof(IStreamStore)} in {nameof(DistributedContentStore)}.");
         }
 
-        /// <inheritdoc />
-        public async Task<FileExistenceResult> CheckFileExistsAsync(Context context, ContentHash contentHash)
-        {
-            // NOTE: Checking LLS for content needs to happen first since the query to the inner stream store result
-            // is used even if the result is fails.
-            if (CheckLlsForContent(contentHash, out var storage))
-            {
-                return new FileExistenceResult(FileExistenceResult.ResultCode.FileExists);
-            }
-
-            if (InnerContentStore is IStreamStore innerStreamStore)
-            {
-                return await innerStreamStore.CheckFileExistsAsync(context, contentHash);
-            }
-
-            return new FileExistenceResult(FileExistenceResult.ResultCode.Error, $"{InnerContentStore} does not implement {nameof(IStreamStore)} in {nameof(DistributedContentStore)}.");
-        }
-
         Task<DeleteResult> IDeleteFileHandler.HandleDeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions) => DeleteAsync(context, contentHash, deleteOptions);
 
         /// <inheritdoc />
-        public Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions deleteOptions)
+        public Task<DeleteResult> DeleteAsync(Context context, ContentHash contentHash, DeleteContentOptions? deleteOptions)
         {
             var operationContext = OperationContext(context);
             deleteOptions ??= new DeleteContentOptions() {DeleteLocalOnly = true};
@@ -643,7 +643,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
 
                     var deleteResultsMapping = new Dictionary<string, DeleteResult>();
 
-                    var result = await _contentLocationStore.GetBulkAsync(
+                    var result = await ContentLocationStore.GetBulkAsync(
                         context,
                         contentHashes,
                         operationContext.Token,
@@ -659,9 +659,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     deleteResultsMapping.Add(LocalMachineLocation.Path, deleteResult);
 
                     // Go through each machine that has this content, and delete async locally on each machine.
-                    if (result.ContentHashesInfo[0].Locations != null)
+                    var machineLocations = result.ContentHashesInfo[0].Locations;
+                    if (machineLocations != null)
                     {
-                        var machineLocations = result.ContentHashesInfo[0].Locations;
                         return await _distributedCopier.DeleteAsync(operationContext, contentHash, deleteResult.ContentSize, machineLocations, deleteResultsMapping);
                     }
 
@@ -690,17 +690,17 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         }
 
         /// <inheritdoc />
-        public async Task<PutResult> HandlePushFileAsync(Context context, ContentHash hash, AbsolutePath sourcePath, CancellationToken token)
+        public async Task<PutResult> HandlePushFileAsync(Context context, ContentHash hash, FileSource source, CancellationToken token)
         {
             if (InnerContentStore is IPushFileHandler inner)
             {
-                var result = await inner.HandlePushFileAsync(context, hash, sourcePath, token);
+                var result = await inner.HandlePushFileAsync(context, hash, source, token);
                 if (!result)
                 {
                     return result;
                 }
 
-                var registerResult = await _contentLocationStore.RegisterLocalLocationAsync(context, new[] { new ContentHashWithSize(hash, result.ContentSize) }, token, UrgencyHint.Nominal, touch: false);
+                var registerResult = await ContentLocationStore.RegisterLocalLocationAsync(context, new[] { new ContentHashWithSize(hash, result.ContentSize) }, token, UrgencyHint.Nominal, touch: false);
                 if (!registerResult)
                 {
                     return new PutResult(registerResult);
@@ -732,7 +732,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
                     {
                         var effectiveLastAccessTimeResult =
                             lls.GetEffectiveLastAccessTimes(operationContext, tcs, new ContentHashWithLastAccessTime[] { new ContentHashWithLastAccessTime(hash, entry.LastAccessTimeUtc.ToDateTime()) });
-                        if (effectiveLastAccessTimeResult)
+                        if (effectiveLastAccessTimeResult.Succeeded)
                         {
                             var effectiveAge = effectiveLastAccessTimeResult.Value[0].EffectiveAge;
                             var effectiveLastAccessTime = _clock.UtcNow - effectiveAge;

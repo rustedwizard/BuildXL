@@ -102,6 +102,11 @@ namespace BuildXL.Utilities.Configuration
         /// </summary>
         AbsolutePath TimeoutDumpDirectory { get; }
 
+        /// <summary>
+        /// Root directory where surviving child process dumps should be saved
+        /// </summary>
+        AbsolutePath SurvivingPipProcessChildrenDumpDirectory { get; }
+
         #endregion
 
         #region Logging options for the Sandbox
@@ -266,5 +271,10 @@ namespace BuildXL.Utilities.Configuration
         /// Concurrency limit for executing pips inside VM. 
         /// </summary>
         int VmConcurrencyLimit { get; }
+
+        /// <summary>
+        /// Whether or not to remote all process pips.
+        /// </summary>
+        bool RemoteAllProcesses { get; }
     }
 }

@@ -9,13 +9,11 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
-using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Extensions;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
-using BuildXL.Cache.ContentStore.Interfaces.Synchronization.Internal;
 using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Native.IO;
 using BuildXL.Utilities;
@@ -35,11 +33,6 @@ namespace BuildXL.Cache.ContentStore.FileSystem
         private const string SequentialScanOnOpenStreamThreshold = "SequentialScanOnOpenStreamThresholdBytes";
         private const string SequentialScanOnOpenStreamThresholdEnvVariableName = "CloudStore" + SequentialScanOnOpenStreamThreshold;
         private const long DefaultSequentialScanOnOpenThreshold = 100 * 1024 * 1024;
-
-        /// <summary>
-        ///     Semaphore to throttle concurrent disk accesses.
-        /// </summary>
-        public static SemaphoreSlim ConcurrentAccess = new SemaphoreSlim(Environment.ProcessorCount, Environment.ProcessorCount);
 
         /// <summary>
         ///     File size, over which FileOptions.SequentialScan is used to open files.
@@ -124,19 +117,30 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                 throw new FileNotFoundException(message, sourcePath.Path);
             }
 
-            if (FileUtilities.IsCopyOnWriteSupportedByEnlistmentVolume)
+            if (replaceExisting)
             {
                 var possiblyDeleteExistingDestination = FileUtilities.TryDeletePathIfExists(destinationPath.Path);
                 if (!possiblyDeleteExistingDestination.Succeeded)
                 {
                     throw possiblyDeleteExistingDestination.Failure.CreateException();
                 }
+            }
 
-                CreateDirectory(destinationPath.GetParent());
+            CreateDirectory(destinationPath.GetParent());
 
+            if (FileUtilities.IsCopyOnWriteSupportedByEnlistmentVolume)
+            {
                 var possiblyCreateCopyOnWrite = FileUtilities.TryCreateCopyOnWrite(sourcePath.Path, destinationPath.Path, followSymlink: false);
-
                 if (possiblyCreateCopyOnWrite.Succeeded)
+                {
+                    return;
+                }
+            }
+
+            if (FileUtilities.IsInKernelCopyingSupportedByHostSystem)
+            {
+                var possibleInKernelFileCopy = FileUtilities.TryInKernelFileCopy(sourcePath.Path, destinationPath.Path, followSymlink: false);
+                if (possibleInKernelFileCopy.Succeeded)
                 {
                     return;
                 }
@@ -195,7 +199,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
         {
             path.ThrowIfPathTooLong();
 
-            if (BuildXL.Utilities.OperatingSystemHelper.IsUnixOS)
+            if (OperatingSystemHelper.IsUnixOS)
             {
                 return (int)FileUtilities.GetHardLinkCount(path.ToString());
             }
@@ -351,7 +355,13 @@ namespace BuildXL.Cache.ContentStore.FileSystem
         }
 
         /// <inheritdoc />
-        public async Task<StreamWithLength?> OpenAsync(AbsolutePath path, FileAccess fileAccess, FileMode fileMode, FileShare share, FileOptions options, int bufferSize)
+        public Task<StreamWithLength?> OpenAsync(AbsolutePath path, FileAccess fileAccess, FileMode fileMode, FileShare share, FileOptions options, int bufferSize)
+        {
+            return Task.FromResult(TryOpen(path, fileAccess, fileMode, share, options, bufferSize));
+        }
+
+        /// <inheritdoc />
+        public StreamWithLength? TryOpen(AbsolutePath path, FileAccess fileAccess, FileMode fileMode, FileShare share, FileOptions options, int bufferSize)
         {
             path.ThrowIfPathTooLong();
 
@@ -360,16 +370,13 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                 throw new NotImplementedException($"The mode '{fileMode}' is not supported by the {nameof(PassThroughFileSystem)}.");
             }
 
-            using (await ConcurrentAccess.WaitTokenAsync())
-            {
-                return TryOpenFile(path, fileAccess, fileMode, share, options, bufferSize);
-            }
+            return TryOpenFile(path, fileAccess, fileMode, share, options, bufferSize);
         }
 
         /// <inheritdoc />
         public Task<StreamWithLength?> OpenReadOnlyAsync(AbsolutePath path, FileShare share)
         {
-            return this.OpenAsync(path, FileAccess.Read, FileMode.Open, share);
+            return Task.FromResult(this.TryOpen(path, FileAccess.Read, FileMode.Open, share));
         }
 
         private static bool GetSequentialScanOnOpenStreamThresholdEnvVariable(out long result)
@@ -426,11 +433,39 @@ namespace BuildXL.Cache.ContentStore.FileSystem
             });
         }
 
-        private async Task CopyFileInsideSemaphoreAsync(AbsolutePath sourcePath, AbsolutePath destinationPath, bool replaceExisting)
+        private Task<bool> TryInKernelFileCopyAsync(
+            AbsolutePath sourcePath,
+            AbsolutePath destinationPath,
+            bool replaceExisting)
         {
-            // It is very important to call OpenInternal and not to call OpenAsync method that will re-acquire the semaphore once again.
-            // Violating this rule may cause a deadlock.
-            using (Stream? readStream = TryOpenFile(
+            return Task.Run(() =>
+            {
+                if (!FileUtilities.FileExistsNoFollow(sourcePath.Path))
+                {
+                    return false;
+                }
+
+                if (replaceExisting)
+                {
+                    var possiblyDeleteExistingDestination = FileUtilities.TryDeletePathIfExists(destinationPath.Path);
+
+                    if (!possiblyDeleteExistingDestination.Succeeded)
+                    {
+                        return false;
+                    }
+                }
+
+                CreateDirectory(destinationPath.GetParent());
+
+                var possibleInKernelFileCopy = FileUtilities.TryInKernelFileCopy(sourcePath.Path, destinationPath.Path, followSymlink: false);
+
+                return possibleInKernelFileCopy.Succeeded;
+            });
+        }
+
+        private async Task CopyFileWithStreamsAsync(AbsolutePath sourcePath, AbsolutePath destinationPath, bool replaceExisting)
+        {
+            using (StreamWithLength? readStream = TryOpenFile(
                 sourcePath, FileAccess.Read, FileMode.Open, FileShare.Read | FileShare.Delete, FileOptions.None, AbsFileSystemExtension.DefaultFileStreamBufferSize))
             {
                 if (readStream == null)
@@ -444,9 +479,7 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                 // If asked to replace the file Create mode must be use to truncate the content of the file
                 // if the target file larger than the source.
                 var mode = replaceExisting ? FileMode.Create : FileMode.CreateNew;
-
-                using (Stream? writeStream = TryOpenFile(
-                    destinationPath, FileAccess.Write, mode, FileShare.Delete, FileOptions.None, AbsFileSystemExtension.DefaultFileStreamBufferSize))
+                using (Stream? writeStream = this.OpenForWrite(destinationPath, readStream.Value.Length, mode, FileShare.Delete))
                 {
                     if (writeStream == null)
                     {
@@ -454,7 +487,8 @@ namespace BuildXL.Cache.ContentStore.FileSystem
                         throw new FileNotFoundException(message, sourcePath.Path);
                     }
 
-                    await readStream.CopyToWithFullBufferAsync(writeStream, FileSystemConstants.FileIOBufferSize).ConfigureAwait(false);
+                    using var pooledHandle = GlobalObjectPools.FileIOBuffersArrayPool.Get();
+                    await readStream.Value.Stream.CopyToWithFullBufferAsync(writeStream, pooledHandle.Value).ConfigureAwait(false);
                 }
             }
         }
@@ -595,21 +629,23 @@ namespace BuildXL.Cache.ContentStore.FileSystem
             sourcePath.ThrowIfPathTooLong();
             destinationPath.ThrowIfPathTooLong();
 
-            using (await ConcurrentAccess.WaitTokenAsync())
+            if (FileUtilities.IsCopyOnWriteSupportedByEnlistmentVolume)
             {
-                if (FileUtilities.IsCopyOnWriteSupportedByEnlistmentVolume)
+                if (await TryCopyOnWriteFileInsideSemaphoreAsync(sourcePath, destinationPath, replaceExisting))
                 {
-                    if (await TryCopyOnWriteFileInsideSemaphoreAsync(
-                        sourcePath,
-                        destinationPath,
-                        replaceExisting))
-                    {
-                        return;
-                    }
+                    return;
                 }
-
-                await CopyFileInsideSemaphoreAsync(sourcePath, destinationPath, replaceExisting);;
             }
+
+            if (FileUtilities.IsInKernelCopyingSupportedByHostSystem)
+            {
+                if (await TryInKernelFileCopyAsync(sourcePath, destinationPath, replaceExisting))
+                {
+                    return;
+                }
+            }
+
+            await CopyFileWithStreamsAsync(sourcePath, destinationPath, replaceExisting);
         }
 
         /// <inheritdoc />

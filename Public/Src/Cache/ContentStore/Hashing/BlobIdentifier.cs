@@ -3,12 +3,15 @@
 
 using System;
 using System.Diagnostics.ContractsLight;
+using System.Linq;
+using System.Runtime.Serialization;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
+using BuildXL.Cache.ContentStore.UtilitiesCore;
 
-// disable 'Missing XML comment for publicly visible type' warnings.
-#pragma warning disable 1591
-#pragma warning disable SA1600 // Elements must be documented
+#pragma warning disable CS1591 // disable 'Missing XML comment for publicly visible type' warnings.
+#pragma warning disable SA1600 // Elements must be documented.
 
+[assembly:CLSCompliant(true)] // This marks the assembly to be CLS Compliant. Do Not Remove - since it has re-percussions in the ADO repo.
 namespace BuildXL.Cache.ContentStore.Hashing
 {
     /// <summary>
@@ -16,11 +19,28 @@ namespace BuildXL.Cache.ContentStore.Hashing
     /// Internally represented as a byte array of the algorithm result with a single byte algorithm identifier appended.
     /// </summary>
     [Serializable]
-    public sealed class BlobIdentifier : IEquatable<BlobIdentifier>, IComparable
+    [DataContract]
+    public sealed class BlobIdentifier : IEquatable<BlobIdentifier>, IComparable, ILongHash, IHashCount
     {
         private const int MinimumIdentifierValueByteCount = 4;
         private const int MinimumAlgorithmResultByteCount = MinimumIdentifierValueByteCount - 1;
+        private int AlgorithmIdIndex => _identifierValue.Length - 1;
+        [DataMember(Name = "identifierValue")]
         private readonly byte[] _identifierValue;
+
+        /// <nodoc />
+        public static readonly BlobIdentifier MinValue = CreateFromAlgorithmResult(Enumerable.Repeat<byte>(byte.MinValue, 32).ToArray(), algorithmId: byte.MinValue);
+        /// <nodoc />
+        public static readonly BlobIdentifier MaxValue = CreateFromAlgorithmResult(Enumerable.Repeat<byte>(byte.MaxValue, 32).ToArray(), algorithmId: byte.MaxValue);
+
+        /// <nodoc />
+        public static BlobIdentifier TestInstance() => new BlobIdentifier();
+
+        // Default constructor for test ONLY usage in the ADO repo.
+        private BlobIdentifier()
+        {
+            _identifierValue = null!; // CS8618 - Nullable value initialize, suppressing since the usage is test only.
+        }
 
         public BlobIdentifier(byte[] algorithmResult, byte algorithmId)
         {
@@ -44,17 +64,53 @@ namespace BuildXL.Cache.ContentStore.Hashing
         {
             if (string.IsNullOrWhiteSpace(valueIncludingAlgorithm))
             {
-                throw new ArgumentNullException(nameof(valueIncludingAlgorithm), "Invalid hash value");
+                throw new ArgumentNullException(nameof(valueIncludingAlgorithm), "BlobIdentifier cannot be instantiated, hash value is invalid.");
             }
 
-            // Ignore the result of this call as ValidateInternal will check for null.
-            _identifierValue = HexUtilities.HexToBytes(valueIncludingAlgorithm);
+            if (!HexUtilities.TryToByteArray(valueIncludingAlgorithm, out byte[]? parsedValue))
+            {
+                throw new ArgumentException(nameof(valueIncludingAlgorithm), "BlobIdentifier cannot be instantiated, hash value is invalid.");
+            }
+
+            _identifierValue = parsedValue;
             Validate();
         }
 
         /// <summary>
+        /// Create a new identifier based on the given value.
+        /// </summary>
+        /// <remarks>
+        /// The value is expected to contain both the hash and the algorithm id.
+        /// </remarks>
+        /// <param name="value">Must be the value corresponding to the Bytes of the id to be created.</param>
+        public BlobIdentifier(byte[] value)
+        {
+            Contract.Requires(value != null);
+
+            _identifierValue = value;
+            Validate();
+        }
+
+        /// <summary>
+        /// Gets the (single byte) algorithm id used to generate the blob identifier (hash).
+        /// </summary>
+        public byte AlgorithmId => _identifierValue[AlgorithmIdIndex];
+
+        /// <summary>
         /// Gets the unique identifier for binary content computed when the
-        /// class instance was created  (ex:  54CE418A2A89A74B42CC396301).
+        /// class instance was created
+        /// This is *NOT* the complete value as it *excludes* the AlgorithmId suffix.
+        /// </summary>
+        public byte[] AlgorithmResultBytes => _identifierValue.Take(AlgorithmIdIndex).ToArray();
+
+        /// <summary>
+        /// AlgorithmResult in HexString format (ex:  54CE418A2A89A74B42CC3963)
+        /// </summary>
+        public string AlgorithmResultString => AlgorithmResultBytes.ToHex();
+
+        /// <summary>
+        /// Gets the unique identifier for binary content computed when the
+        /// class instance was created  (ex:  54CE418A2A89A74B42CC3963*01*).
         /// This is the complete value as it includes the AlgorithmId suffix.
         /// </summary>
         public string ValueString => _identifierValue.ToHex();
@@ -72,16 +128,61 @@ namespace BuildXL.Cache.ContentStore.Hashing
             }
         }
 
-        /// <summary>
-        /// Gets the (single byte) algorithm id used to generate the blob identifier (hash).
-        /// </summary>
-        public byte AlgorithmId => _identifierValue[AlgorithmIdIndex];
+        /// <nodoc />
+        public int GetByteCount() { return Bytes.Length; }
 
-        private int AlgorithmIdIndex => _identifierValue.Length - 1;
+        /// <summary>
+        /// Returns a user-friendly, non-canonical string representation of the unique identifier for binary content
+        /// </summary>
+        public override string ToString()
+        {
+            return $"Blob:{ValueString}";
+        }
+
+        /// <inheritdoc/>
+        public override int GetHashCode()
+        {
+            return BitConverter.ToInt32(_identifierValue, 0);
+        }
+
+        /// <summary>
+        /// A 64 bit signed hash value for the content identifier.
+        /// </summary>
+        public long GetLongHashCode()
+        {
+            return BitConverter.ToInt64(_identifierValue, 0);
+        }
+
+        public ContentHash ToContentHash()
+        {
+            return BlobIdentifierHelperExtensions.ToContentHash(this);
+        }
+
+        /// <summary>
+        /// Produces a non-cryptographic pseudo random BlobIdentifier. This function must not be used
+        /// when it is required that the result can't be predicted.
+        /// </summary>
+        [CLSCompliant(false)]
+        public static BlobIdentifier Random(HashType hashType = HashType.Vso0)
+        {
+            var randomBlob = new byte[32];
+            ThreadSafeRandom.Generator.NextBytes(randomBlob);
+            return CreateFromAlgorithmResult(randomBlob, AlgorithmIdLookup.Find(hashType));
+        }
 
         public static BlobIdentifier CreateFromAlgorithmResult(string algorithmResult, byte algorithmId = VsoHash.VsoAlgorithmId)
         {
-            return new BlobIdentifier(HexUtilities.HexToBytes(algorithmResult), algorithmId);
+            if (!HexUtilities.TryToByteArray(algorithmResult, out var identifier))
+            {
+                throw new ArgumentException($"BlobIdentifier cannot be created, invalid hex string encountered : {algorithmResult}");
+            }
+
+            return new BlobIdentifier(identifier, algorithmId);
+        }
+
+        public static BlobIdentifier CreateFromAlgorithmResult(byte[] algorithmResult, byte algorithmId = VsoHash.VsoAlgorithmId)
+        {
+            return new BlobIdentifier(algorithmResult, algorithmId);
         }
 
         public static BlobIdentifier Deserialize(string valueIncludingAlgorithm)
@@ -134,28 +235,6 @@ namespace BuildXL.Cache.ContentStore.Hashing
             return (other is object) && _identifierValue.SequenceEqual(other._identifierValue);
         }
 
-        /// <summary>
-        /// Gets the unique hash for this unique identifier for binary content.
-        /// </summary>
-        /// <returns>
-        /// A hash value for the content identifier
-        /// </returns>
-        public override int GetHashCode()
-        {
-            return BitConverter.ToInt32(_identifierValue, 0);
-        }
-
-        /// <summary>
-        /// Returns a user-friendly, non-canonical string representation of the unique identifier for binary content
-        /// </summary>
-        /// <returns>
-        /// A user-friendly, non-canonical string representation of the content identifier
-        /// </returns>
-        public override string ToString()
-        {
-            return $"Blob:{ValueString}";
-        }
-
         public int CompareTo(object? obj)
         {
             if (!(obj is BlobIdentifier))
@@ -173,8 +252,6 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
         private void Validate()
         {
-            Contract.Requires(_identifierValue != null);
-
             int algorithmResultLength = _identifierValue.Length - 1;
 
             // The final byte array needs to be at least 4 bytes long for GetHashCode to work.
@@ -186,5 +263,16 @@ namespace BuildXL.Cache.ContentStore.Hashing
                 throw new ArgumentException("Invalid hash length", nameof(_identifierValue));
             }
         }
+    }
+
+    // DEVNOTE: These interfaces make the BlobIdentifier in BXL wire-to-wire compatible with the one in ADO.
+    public interface ILongHash
+    {
+        long GetLongHashCode();
+    }
+
+    public interface IHashCount
+    {
+        int GetByteCount();
     }
 }

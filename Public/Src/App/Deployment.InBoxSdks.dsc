@@ -18,6 +18,7 @@ function createSdkDeploymentDefinition(serverDeployment: boolean, evaluationOnly
     return {
         contents: [
             {
+                // CODESYNC: Public\Src\FrontEnd\Core\FrontEndHostController.cs (TryCreateInBoxSDKResolver)
                 subfolder: "Sdk",
                 contents: [
                     {
@@ -64,6 +65,12 @@ function createSdkDeploymentDefinition(serverDeployment: boolean, evaluationOnly
                                     targetFramework: "net472",
                                     targetRuntime: "win-x64"
                                 }).selectDeployment(evaluationOnly)
+                            ]
+                        },
+                        {
+                            subfolder: "Sdk.JavaScript",
+                            contents: [ 
+                                importFrom("Sdk.JavaScript").deployment
                             ]
                         },
                     ])

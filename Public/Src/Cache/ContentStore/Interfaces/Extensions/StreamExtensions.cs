@@ -19,7 +19,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
         public static void SerializeToJSON<T>(this T obj, Stream stream)
         {
             Contract.Requires(obj != null);
-            Contract.RequiresNotNull(stream);
+            Contract.Requires(stream != null);
 
             var settings = new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true };
             var serializer = new DataContractJsonSerializer(typeof(T), settings);
@@ -31,12 +31,13 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
         /// </summary>
         public static T DeserializeFromJSON<T>(this Stream stream)
         {
-            Contract.RequiresNotNull(stream);
+            Contract.Requires(stream != null);
 
             var settings = new DataContractJsonSerializerSettings {UseSimpleDictionaryFormat = true};
             var serializer = new DataContractJsonSerializer(typeof(T), settings);
             stream.Position = 0;
-            return (T)serializer.ReadObject(stream);
+            // TODO: suppressing this for now, but the clients need to respect that the result of this method may be null.
+            return (T)serializer.ReadObject(stream)!;
         }
 
         /// <summary>
@@ -47,8 +48,8 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
         /// <param name="count">Number of bytes to read.</param>
         public static async Task<int> ReadBytes(this Stream stream, byte[] buffer, int count)
         {
-            Contract.RequiresNotNull(stream);
-            Contract.RequiresNotNull(buffer);
+            Contract.Requires(stream != null);
+            Contract.Requires(buffer != null);
             Contract.Requires(count <= buffer.Length);
 
             int bytesRead;
@@ -77,14 +78,32 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
         /// <param name="bufferSize">Size of the buffer to fill for writes</param>
         public static async Task CopyToWithFullBufferAsync(this Stream stream, Stream destination, int bufferSize)
         {
-            Contract.RequiresNotNull(stream);           
-            Contract.RequiresNotNull(destination);
+            Contract.Requires(stream != null);
+            Contract.Requires(destination != null);
             Contract.Requires(stream.CanRead);
             Contract.Requires(destination.CanWrite);
             Contract.Requires(bufferSize > 0);
 
             var buffer = new byte[bufferSize];
 
+            int bytesRead;
+            while ((bytesRead = await stream.ReadBytes(buffer, buffer.Length).ConfigureAwait(false)) != 0)
+            {
+                await destination.WriteAsync(buffer, 0, bytesRead).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        ///     Copies from one stream to another with writes guaranteed to be called with a full buffer (except the last call)
+        /// </summary>
+        public static async Task CopyToWithFullBufferAsync(this Stream stream, Stream destination, byte[] buffer)
+        {
+            Contract.Requires(stream != null);
+            Contract.Requires(destination != null);
+            Contract.Requires(buffer != null);
+            Contract.Requires(stream.CanRead);
+            Contract.Requires(destination.CanWrite);
+            
             int bytesRead;
             while ((bytesRead = await stream.ReadBytes(buffer, buffer.Length).ConfigureAwait(false)) != 0)
             {

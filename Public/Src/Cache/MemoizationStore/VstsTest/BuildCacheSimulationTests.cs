@@ -115,6 +115,7 @@ namespace BuildXL.Cache.MemoizationStore.VstsTest
                 5,
                 20,
                 new ByteDomainId(BuildCacheServiceConfiguration.DefaultDomainId),
+                forceUpdateOnAddContentHashList: false,
                 writeThroughContentStoreFunc,
                 backingOption == BackingOption.WriteBehind,
                 storageOption == StorageOption.Blob);
@@ -341,7 +342,7 @@ namespace BuildXL.Cache.MemoizationStore.VstsTest
             return RunTestAsync(context, referenceFingerprintsAsync, createTestCache);
         }
 
-        private async Task AssertExpirationInRangeAsync(Context context, string cacheNamespace, StrongFingerprint strongFingerprint, DateTime expectedLow, DateTime expectedHigh)
+        private Task AssertExpirationInRangeAsync(Context context, string cacheNamespace, StrongFingerprint strongFingerprint, DateTime expectedLow, DateTime expectedHigh)
         {
             // Create a bare BuildCache client so that the value read is not thwarted by some intermediate cache layer (like Redis)
             Func<DisposableDirectory, ICache> createCheckerCacheFunc =
@@ -356,10 +357,10 @@ namespace BuildXL.Cache.MemoizationStore.VstsTest
                 // Raw expiration is only visible to the adapter, not through the ICacheSession APIs.
                 // This also has the nice (non-)side-effect of not updating the expiration as part of *this* read.
                 IContentHashListAdapter buildCacheHttpClientAdapter = buildCacheSession.ContentHashListAdapter;
-                ObjectResult<ContentHashListWithCacheMetadata> getResult = await buildCacheHttpClientAdapter.GetContentHashListAsync(context, cacheNamespace, strongFingerprint);
+                Result<ContentHashListWithCacheMetadata> getResult = await buildCacheHttpClientAdapter.GetContentHashListAsync(context, cacheNamespace, strongFingerprint);
                 Assert.True(getResult.Succeeded);
-                Assert.NotNull(getResult.Data);
-                DateTime? rawExpiration = getResult.Data.GetRawExpirationTimeUtc();
+                Assert.NotNull(getResult.Value);
+                DateTime? rawExpiration = getResult.Value.GetRawExpirationTimeUtc();
                 Assert.NotNull(rawExpiration);
 
                 // Verify that the raw expiration (i.e. the value's TTL w/o consideration for content existence or whether the value might be replaced) is visible and correct
@@ -367,7 +368,7 @@ namespace BuildXL.Cache.MemoizationStore.VstsTest
                 Assert.InRange(rawExpiration.Value, expectedLow - assertionTolerance, expectedHigh + assertionTolerance);
             };
 
-            await RunTestAsync(context, checkFunc, createCheckerCacheFunc);
+            return RunTestAsync(context, checkFunc, createCheckerCacheFunc);
         }
     }
 }

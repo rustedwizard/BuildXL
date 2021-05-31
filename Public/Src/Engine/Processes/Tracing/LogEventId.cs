@@ -43,7 +43,7 @@ namespace BuildXL.Processes.Tracing
         PipProcessWroteToStandardErrorOnCleanExit = 45,
         PipProcessOutputPreparationFailed = 46,
         PipProcessPreserveOutputDirectoryFailedToMakeFilePrivate = 53,
-
+        PipProcessPreserveOutputDirectorySkipMakeFilesPrivate = 54,
 
 #pragma warning disable 618
         PipProcessError = SharedLogEventId.PipProcessError,
@@ -103,6 +103,9 @@ namespace BuildXL.Processes.Tracing
         CannotReadSidebandFileWarning = 876,
         CannotDeleteSharedOpaqueOutputFile = 877,
         ResumeOrSuspendProcessError = 878,
+        ResumeOrSuspendException = 879,
+        // 880 is used
+
 
         // Temp files/directory cleanup
         PipTempDirectoryCleanupWarning = 2201,
@@ -146,6 +149,15 @@ namespace BuildXL.Processes.Tracing
         FailedToCreateHardlinkOnMerge = 12209,
         DoubleWriteAllowedDueToPolicy = 12210,
         DisallowedDoubleWriteOnMerge = 12211,
+
+        DumpSurvivingPipProcessChildrenStatus = 12213,
+        ExistenceAssertionUnderOutputDirectoryFailed = 12214,
+
+        /// Sandboxed process remoting.
+        LogRemotingDebugMessage = 12500,
+        LogRemotingErrorMessage = 12501,
+        PipProcessStartRemoteExecution = 12502,
+        PipProcessFinishedRemoteExecution = 12503,
 
         //// Special tool errors
         PipProcessToolErrorDueToHandleToFileBeingUsed = 14300,

@@ -42,7 +42,7 @@ namespace BuildXL.Scheduler.Distribution
         protected int WorkerEnableSequenceNumber = 0;
 
         /// <summary>
-        /// Whether the current BuildXL instance serves as a master node in the distributed build and has workers attached.
+        /// Whether the current BuildXL instance serves as a orchestrator node in the distributed build and has workers attached.
         /// </summary>
         protected bool AnyRemoteWorkers => Workers.Count > 1;
 
@@ -111,14 +111,14 @@ namespace BuildXL.Scheduler.Distribution
         /// </summary>
         protected abstract Task<Worker> ChooseWorkerCore(RunnablePip runnablePip);
 
-        protected bool MustRunOnMaster(RunnablePip runnablePip)
+        protected bool MustRunOnOrchestrator(RunnablePip runnablePip)
         {
             if (!AnyRemoteWorkers)
             {
                 return true;
             }
 
-            return runnablePip.PipType == PipType.Ipc && ((IpcPip)runnablePip.Pip).MustRunOnMaster;
+            return runnablePip.PipType == PipType.Ipc && ((IpcPip)runnablePip.Pip).MustRunOnOrchestrator;
         }
 
         protected void TogglePauseChooseWorkerQueue(bool pause, RunnablePip blockedPip = null)

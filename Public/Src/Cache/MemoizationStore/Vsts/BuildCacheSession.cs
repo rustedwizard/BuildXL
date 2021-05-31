@@ -20,6 +20,7 @@ using BuildXL.Cache.MemoizationStore.Interfaces.Results;
 using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Cache.MemoizationStore.Tracing;
 using BuildXL.Cache.MemoizationStore.Vsts.Adapters;
+using BuildXL.Cache.MemoizationStore.Vsts.Internal;
 using BuildXL.Cache.MemoizationStore.VstsInterfaces;
 
 namespace BuildXL.Cache.MemoizationStore.Vsts
@@ -27,7 +28,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
     /// <summary>
     ///     ICacheSession for BuildCacheCache.
     /// </summary>
-    public class BuildCacheSession : BuildCacheReadOnlySession, ICacheSession
+    public class BuildCacheSession : BuildCacheReadOnlySession, ICacheSession, ICachePublisher
     {
         /// <summary>
         /// Initializes a new instance of the <see cref="BuildCacheSession"/> class.
@@ -50,10 +51,11 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         /// <param name="overrideUnixFileAccessMode">If true, overrides default Unix file access modes when placing files.</param>
         /// <param name="tracer">A tracer for logging calls</param>
         /// <param name="enableEagerFingerprintIncorporation"><see cref="BuildCacheServiceConfiguration.EnableEagerFingerprintIncorporation"/></param>
-        /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiry"/></param>
-        /// <param name="eagerFingerprintIncorporationInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleInterval"/></param>
+        /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiryHours"/></param>
+        /// <param name="eagerFingerprintIncorporationInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleIntervalMinutes"/></param>
         /// <param name="eagerFingerprintIncorporationBatchSize"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleBatchSize"/></param>
         /// <param name="manuallyExtendContentLifetime">Whether to manually extend content lifetime when doing incorporate calls</param>
+        /// <param name="forceUpdateOnAddContentHashList">Whether to force an update and ignore existing CHLs when adding.</param>
         public BuildCacheSession(
             IAbsFileSystem fileSystem,
             string name,
@@ -76,7 +78,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             TimeSpan inlineFingerprintIncorporationExpiry,
             TimeSpan eagerFingerprintIncorporationInterval,
             int eagerFingerprintIncorporationBatchSize,
-            bool manuallyExtendContentLifetime)
+            bool manuallyExtendContentLifetime,
+            bool forceUpdateOnAddContentHashList)
             : base(
                 fileSystem,
                 name,
@@ -99,7 +102,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 inlineFingerprintIncorporationExpiry,
                 eagerFingerprintIncorporationInterval,
                 eagerFingerprintIncorporationBatchSize,
-                manuallyExtendContentLifetime)
+                manuallyExtendContentLifetime,
+                forceUpdateOnAddContentHashList)
         {
         }
 
@@ -150,21 +154,22 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                     {
                         var debugString = $"Adding contentHashList=[{valueToAdd.ContentHashListWithDeterminism.ContentHashList}] " +
                                             $"determinism=[{valueToAdd.ContentHashListWithDeterminism.Determinism}] to VSTS with " +
-                                            $"contentAvailabilityGuarantee=[{valueToAdd.ContentGuarantee}] and expirationUtc=[{expirationUtc}]";
+                                            $"contentAvailabilityGuarantee=[{valueToAdd.ContentGuarantee}], expirationUtc=[{expirationUtc}], forceUpdate=[{ForceUpdateOnAddContentHashList}]";
                         Tracer.Debug(context, debugString);
-                        ObjectResult<ContentHashListWithCacheMetadata> responseObject =
+                        Result<ContentHashListWithCacheMetadata> responseObject =
                             await ContentHashListAdapter.AddContentHashListAsync(
                                 context,
                                 CacheNamespace,
                                 strongFingerprint,
-                                valueToAdd).ConfigureAwait(false);
+                                valueToAdd,
+                                forceUpdate: ForceUpdateOnAddContentHashList).ConfigureAwait(false);
 
                         if (!responseObject.Succeeded)
                         {
                             return new AddOrGetContentHashListResult(responseObject);
                         }
 
-                        ContentHashListWithCacheMetadata response = responseObject.Data;
+                        ContentHashListWithCacheMetadata response = responseObject.Value;
                         var inconsistencyErrorMessage = CheckForResponseInconsistency(response);
                         if (inconsistencyErrorMessage != null)
                         {
@@ -210,8 +215,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
 
                 },
                 traceOperationStarted: true,
-                extraStartMessage: $"StrongFingerprint=({strongFingerprint}) {contentHashListWithDeterminism.ToTraceString()}",
-                extraEndMessage: _ => $"StrongFingerprint=({strongFingerprint}) {contentHashListWithDeterminism.ToTraceString()}");
+                extraStartMessage: $"StrongFingerprint=({strongFingerprint}), ForceUpdate=({ForceUpdateOnAddContentHashList}) {contentHashListWithDeterminism.ToTraceString()}",
+                extraEndMessage: _ => $"StrongFingerprint=({strongFingerprint}), ForceUpdate=({ForceUpdateOnAddContentHashList}) {contentHashListWithDeterminism.ToTraceString()}");
         }
 
         private async Task<bool> CheckNeedToUpdateExistingValueAsync(

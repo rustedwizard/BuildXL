@@ -6,7 +6,7 @@ import * as ILRepack from "Sdk.Managed.Tools.ILRepack";
 import * as Shared from "Sdk.Managed.Shared";
 
 namespace Hashing {
-    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNetStandard20;
+    export declare const qualifier : BuildXLSdk.AllSupportedQualifiers;
 
     @@public
     export const dll = BuildXLSdk.library({
@@ -15,10 +15,12 @@ namespace Hashing {
         references: [
             UtilitiesCore.dll,
             
+            ...getSystemTextJson(/*includeNetStandard*/true),
             ...addIfLazy(BuildXLSdk.isFullFramework, () => [
                 NetFx.System.Runtime.Serialization.dll,
                 NetFx.System.Xml.dll,
             ]),
+            ...BuildXLSdk.systemMemoryDeployment,
             ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
         ],
         runtimeContent: Context.getCurrentHost().os !== "win" ? [] : [
@@ -30,6 +32,7 @@ namespace Hashing {
                 ]
             },
         ],
+        sourceGenerators: [importFrom("StructRecordGenerator").pkg],
         nullable: true,
         allowUnsafeBlocks: true,
     });

@@ -28,9 +28,6 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
     /// </summary>
     public partial class AmbientTransformerBase : AmbientDefinitionBase
     {
-        private static readonly Type[] s_convertFileContentExpectedTypes = { typeof(string), typeof(PathAtom), typeof(RelativePath), typeof(AbsolutePath) };
-        private static readonly Type[] s_convertFileContentExpectedTypesWithArray = { typeof(string), typeof(PathAtom), typeof(RelativePath), typeof(AbsolutePath), typeof(ArrayLiteral) };
-
         private static readonly Dictionary<string, FileExistence> s_fileExistenceKindMap = new Dictionary<string, FileExistence>(StringComparer.Ordinal)
         {
             ["required"] = FileExistence.Required,
@@ -107,6 +104,7 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
         private SymbolAtom m_preservePathSetCasing;
         private SymbolAtom m_processRetries;
         private SymbolAtom m_executeKeepOutputsWritable;
+        private SymbolAtom m_succeedFastExitCodes;
         private SymbolAtom m_privilegeLevel;
         private SymbolAtom m_disableCacheLookup;
         private SymbolAtom m_uncancellable;
@@ -119,6 +117,8 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
         private SymbolAtom m_executeServiceShutdownCmd;
         private SymbolAtom m_executeServiceFinalizationCmds;
         private SymbolAtom m_executeServicePipDependencies;
+        private SymbolAtom m_executeServiceTrackableTag;
+        private SymbolAtom m_executeServiceTrackableTagDisplayName;
         private SymbolAtom m_executeDescription;
         private SymbolAtom m_executeAbsentPathProbeInUndeclaredOpaqueMode;
         private SymbolAtom m_executeAdditionalTempDirectories;
@@ -255,6 +255,7 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
             m_executeAbsentPathProbeInUndeclaredOpaqueMode = Symbol("absentPathProbeInUndeclaredOpaquesMode");
 
             m_executeKeepOutputsWritable = Symbol("keepOutputsWritable");
+            m_succeedFastExitCodes = Symbol("succeedFastExitCodes");
             m_privilegeLevel = Symbol("privilegeLevel");
             m_disableCacheLookup = Symbol("disableCacheLookup");
             m_uncancellable = Symbol("uncancellable");
@@ -264,6 +265,8 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
             m_executeServiceShutdownCmd = Symbol("serviceShutdownCmd");
             m_executeServiceFinalizationCmds = Symbol("serviceFinalizationCmds");
             m_executeServicePipDependencies = Symbol("servicePipDependencies");
+            m_executeServiceTrackableTag = Symbol("serviceTrackableTag");
+            m_executeServiceTrackableTagDisplayName = Symbol("serviceTrackableTagDisplayName");
             m_executeDescription = Symbol("description");
             m_executeAdditionalTempDirectories = Symbol("additionalTempDirectories");
             m_executeWarningRegex = Symbol("warningRegex");
@@ -509,7 +512,9 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
             }
 
             // Exit Codes
-            processBuilder.SuccessExitCodes = ProcessOptionalIntArray(obj, m_executeSuccessExitCodes);
+            // If a process exits with one of these codes, skip downstream pips but treat it as a success.
+            processBuilder.SucceedFastExitCodes = ProcessOptionalIntArray(obj, m_succeedFastExitCodes);
+            processBuilder.SuccessExitCodes = ReadOnlyArray<int>.FromWithoutCopy(ProcessOptionalIntArray(obj, m_executeSuccessExitCodes).Concat(processBuilder.SucceedFastExitCodes.ToArray()).ToArray());
             processBuilder.RetryExitCodes = ProcessOptionalIntArray(obj, m_executeRetryExitCodes);
 
             // Retry attempt environment variable.
@@ -616,6 +621,17 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
 
                     processBuilder.FinalizationPipIds = ReadOnlyArray<PipId>.FromWithoutCopy(finalizationPipIds);
                 }
+
+                var trackableTagString = Converter.ExtractString(obj, m_executeServiceTrackableTag, allowUndefined: true);
+                var trackableTag = string.IsNullOrEmpty(trackableTagString)
+                    ? StringId.Invalid
+                    : StringId.Create(context.StringTable, trackableTagString);
+                var trackableTagDisplayNameString = Converter.ExtractString(obj, m_executeServiceTrackableTagDisplayName, allowUndefined: true);
+                var trackableTagDisplayName = string.IsNullOrEmpty(trackableTagDisplayNameString)
+                    ? StringId.Invalid
+                    : StringId.Create(context.StringTable, trackableTagDisplayNameString);
+
+                processBuilder.SetServiceTrackableTag(trackableTag, trackableTagDisplayName);
             }
 
             // Light process flag.
@@ -1423,44 +1439,6 @@ namespace BuildXL.FrontEnd.Script.Ambients.Transformers
                 TryScheduleIpcPip(context, obj, allowUndefinedTargetService: true, isServiceFinalization: true, out _, out var ipcPipId);
                 return ipcPipId;
             }
-        }
-
-
-        /// <summary>
-        /// This function is used for both the scalar case (e.g. a string is passed as the file content) or for the array case element (e.g. a string[] is passed)
-        /// The objectContext is passed for the array case only.
-        /// </summary>
-        private static PipDataAtom ConvertFileContentElement(Context context, EvaluationResult result, int pos, object objectContext)
-        {
-            // Expected types are AmbientTypes.PathType, AmbientTypes.RelativePathType , AmbientTypes.PathAtomType or PrimitiveType.StringType
-            var element = result.Value;
-            if (element is string e)
-            {
-                return e;
-            }
-
-            if (element is PathAtom atom)
-            {
-                return atom;
-            }
-
-            if (element is RelativePath relativePath)
-            {
-                return relativePath.ToString(context.StringTable);
-            }
-
-            if (element is AbsolutePath absolutePath)
-            {
-                return absolutePath;
-            }
-
-            // If the object context is null, that means we are in the scalar case, in which case we can also expect an array
-            throw Converter.CreateException(
-                objectContext == null
-                    ? s_convertFileContentExpectedTypesWithArray
-                    : s_convertFileContentExpectedTypes,
-                result,
-                new ConversionContext(false, pos: pos, objectCtx: objectContext));
         }
 
         private static void IfPropertyDefined<TState>(TState state, ObjectLiteral obj, SymbolAtom propertyName, Action<TState, EvaluationResult, ConversionContext> callback)

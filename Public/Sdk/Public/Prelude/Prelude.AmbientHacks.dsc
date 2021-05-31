@@ -58,7 +58,7 @@ namespace _PreludeAmbientHack_ValueCache {
 
 namespace _PreludeAmbientHack_Json{
     /** Writes an object as Json */
-    export declare function write<T extends Object>(destinationFile: Path, data: T, quoteChar?: "'" | "\"", tags?: string[], description?: string): File;
+    export declare function write<T extends Object>(destinationFile: Path, data: T, quoteChar?: "'" | "\"", tags?: string[], description?: string, additionalOptions? : Object): File;
 }
 
 namespace _PreludeAmbientHack_Xml {
@@ -70,10 +70,12 @@ namespace _PreludeAmbientHack_Transformer {
 
     interface SharedOpaqueDirectory extends StaticDirectory {
         kind: "shared"
+        assertExistence: (path: Path | PathFragment) => File;
     }
 
     interface ExclusiveOpaqueDirectory extends StaticDirectory {
         kind: "exclusive"
+        assertExistence: (path: Path | PathFragment) => File;
     }
 
     interface SourceTopDirectory extends StaticDirectory {
@@ -111,6 +113,7 @@ namespace _PreludeAmbientHack_Transformer {
     export declare function sealSourceDirectory(rootOrArgs: (Directory | Object), option?: number, tags?: string[], description?: string, patterns?: string[]): SourceDirectory;
     export declare function sealPartialDirectory(rootOrArgs: (Directory | Object), files: File[], tags?: string[], description?: string): PartialStaticContentDirectory;
     export declare function composeSharedOpaqueDirectories(rootOrArgs: (Directory | Object), directories: SharedOpaqueDirectory[], directoryFilteringRegexExpression?: Object): SharedOpaqueDirectory;
+    export declare function getSharedOpaqueSubDirectory(directory: SharedOpaqueDirectory, subDirectory: Directory, directoryFilteringRegexExpression?: Object): SharedOpaqueDirectory;
 
     export interface FragmentHandle {}
     export declare function readPipGraphFragment(file: SourceFile, dependencyFragments: FragmentHandle[], description?: string): FragmentHandle;

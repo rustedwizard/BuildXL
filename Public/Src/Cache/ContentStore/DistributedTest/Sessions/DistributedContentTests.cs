@@ -29,10 +29,12 @@ using BuildXL.Cache.ContentStore.Service.Grpc;
 using BuildXL.Cache.ContentStore.Sessions;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Synchronization;
+using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Cache.Host.Service.Internal;
+using BuildXL.Utilities.Tasks;
 using ContentStoreTest.Distributed.ContentLocation;
 using ContentStoreTest.Extensions;
 using ContentStoreTest.Test;
@@ -44,6 +46,8 @@ namespace ContentStoreTest.Distributed.Sessions
 {
     public abstract class DistributedContentTests : TestBase
     {
+        private static readonly Tracer _tracer = new Tracer(nameof(DistributedContentTests));
+
         // It is very important to use "cancellable" cancellation token instance.
         // This fact can be used by the system and change the behavior based on it.
         protected static readonly CancellationToken Token = new CancellationTokenSource().Token;
@@ -116,7 +120,6 @@ namespace ContentStoreTest.Distributed.Sessions
                         TestFileCopier.PushHandlersByLocation[distributedStore.LocalMachineLocation] = distributedStore;
                         TestFileCopier.DeleteHandlersByLocation[distributedStore.LocalMachineLocation] = distributedStore;
                     }
-
                 }
             }
 
@@ -127,12 +130,13 @@ namespace ContentStoreTest.Distributed.Sessions
                 idBytes[0] = (byte)index;
                 idBytes[5] = (byte)iteration;
 
-                return new Context(Context, new Guid(idBytes));
+                var nestedContextId = $"{Context.TraceId}.Idx_{index}.Iteration_{iteration}";
+                return new Context(Context, nestedContextId, componentName: _tracer.Name);
             }
 
             public virtual async Task StartupAsync(ImplicitPin implicitPin, int? storeToStartupLast, string buildId = null)
             {
-                var startupResults = await TaskSafetyHelpers.WhenAll(Servers.Select(async (server, index) =>
+                var startupResults = await TaskUtilities.SafeWhenAll(Servers.Select(async (server, index) =>
                 {
                     if (index == storeToStartupLast)
                     {
@@ -150,7 +154,7 @@ namespace ContentStoreTest.Distributed.Sessions
                 }
 
                 Sessions = Stores.Select((store, id) => store.CreateSession(Context, GetSessionName(id, buildId), implicitPin).Session).ToList();
-                await TaskSafetyHelpers.WhenAll(Sessions.Select(async (session, index) => await session.StartupAsync(StoreContexts[index])));
+                await TaskUtilities.SafeWhenAll(Sessions.Select(async (session, index) => await session.StartupAsync(StoreContexts[index])));
             }
 
             protected static string GetSessionName(int id, string buildId) =>
@@ -160,7 +164,7 @@ namespace ContentStoreTest.Distributed.Sessions
 
             public virtual async Task ShutdownAsync()
             {
-                await TaskSafetyHelpers.WhenAll(
+                await TaskUtilities.SafeWhenAll(
                     Sessions.Select(async (session, index) =>
                     {
                         if (!session.ShutdownCompleted)
@@ -184,7 +188,7 @@ namespace ContentStoreTest.Distributed.Sessions
 
             protected virtual async Task ShutdownStoresAsync()
             {
-                await TaskSafetyHelpers.WhenAll(
+                await TaskUtilities.SafeWhenAll(
                     Servers.Select(
                         async (server, index) =>
                         {
@@ -210,7 +214,7 @@ namespace ContentStoreTest.Distributed.Sessions
                     {
                         foreach (var counter in stats.CounterSet.ToDictionaryIntegral())
                         {
-                            StoreContexts[storeId].Debug($"Stat: Store{storeId}.{counter.Key}=[{counter.Value}]");
+                            _tracer.Debug(StoreContexts[storeId], $"Stat: Store{storeId}.{counter.Key}=[{counter.Value}]");
                         }
                     }
                 }
@@ -228,6 +232,11 @@ namespace ContentStoreTest.Distributed.Sessions
             public virtual DistributedContentSession GetDistributedSession(int idx, bool primary = true)
             {
                 return GetTypedSession<DistributedContentSession>(idx, primary);
+            }
+
+            public DistributedContentSession[] GetDistributedSessions()
+            {
+                return EnumerateWorkersIndices().Select(i => GetDistributedSession(i)).ToArray();
             }
 
             internal FileSystemContentSession GetFileSystemSession(int idx, bool primary = true)
@@ -542,14 +551,6 @@ namespace ContentStoreTest.Distributed.Sessions
                 var localContentPath = PathUtilities.GetContentPath(context.Directories[0].Path / "Root", putResult0.ContentHash);
                 File.Delete(localContentPath.Path);
                 context.TestFileCopier.FilesCopied.TryAdd(localContentPath, localContentPath);
-                context.TestFileCopier.FileExistenceByReturnCode.GetOrAdd(
-                    localContentPath,
-                    (_) =>
-                    {
-                        var queue = new ConcurrentQueue<FileExistenceResult.ResultCode>();
-                        queue.Enqueue(FileExistenceResult.ResultCode.FileNotFound);
-                        return queue;
-                    });
 
                 // Query for file from session 2
                 await OpenStreamReturnsExpectedFile(sessions[2], context.Context, putResult0.ContentHash, randomBytes);
@@ -869,14 +870,13 @@ namespace ContentStoreTest.Distributed.Sessions
                         WorkingDirectory = indexedDirectories[0].Directory.Path
                     };
 
-                    context.Always($"Starting test iteration {iteration}");
+                    _tracer.Always(context, $"Starting test iteration {iteration}");
 
                     var ports = UseGrpcServer ? Enumerable.Range(0, storeCount).Select(n => PortExtensions.GetNextAvailablePort()).ToArray() : new int[storeCount];
 
                     IRemoteFileCopier[] testFileCopiers;
                     if (UseGrpcServer && storeCount > 1)
                     {
-                        Contract.Assert(storeCount == 2, "Currently we can only handle two stores while using gRPC, because of copiers.");
                         var grpcCopyClientCacheConfiguration = new GrpcCopyClientCacheConfiguration()
                         {
                             ResourcePoolVersion = GrpcCopyClientCacheConfiguration.PoolVersion.V2,
@@ -887,13 +887,14 @@ namespace ContentStoreTest.Distributed.Sessions
                             }
                         };
 
-                        testFileCopiers = Enumerable.Range(0, 2).Select(i =>
+                        testFileCopiers = Enumerable.Range(0, storeCount).Select(i =>
                         {
                             var grpcFileCopierConfiguration = new GrpcFileCopierConfiguration()
                             {
-                                GrpcPort = ports[i == 1 ? 0 : 1],
+                                GrpcPort = ports[i],
                                 GrpcCopyClientCacheConfiguration = grpcCopyClientCacheConfiguration,
                                 GrpcCopyClientInvalidationPolicy = GrpcFileCopierConfiguration.ClientInvalidationPolicy.OnEveryError,
+                                UseUniversalLocations = true,
                             };
 
                             return new GrpcFileCopier(context, grpcFileCopierConfiguration);
@@ -964,7 +965,7 @@ namespace ContentStoreTest.Distributed.Sessions
             IReadOnlyContentSession session, Context context, ContentHash hash, byte[] expected)
         {
             OpenStreamResult openResult = await session.OpenStreamAsync(context, hash, Token);
-            context.Debug($"Validating stream for content hash {hash} returned result {openResult.Code} with diagnostics {openResult} with ErrorMessage {openResult.ErrorMessage} diagnostics {openResult.Diagnostics}");
+            _tracer.Debug(context, $"Validating stream for content hash {hash} returned result {openResult.Code} with diagnostics {openResult} with ErrorMessage {openResult.ErrorMessage} diagnostics {openResult.Diagnostics}");
             Assert.Equal<OpenStreamResult.ResultCode>(OpenStreamResult.ResultCode.Success, openResult.Code);
             Assert.True(openResult.Succeeded, $"OpenStream did not succeed for content hash {hash}");
             Assert.NotNull(openResult.Stream);

@@ -4,6 +4,8 @@
 using System;
 using System.Collections.Generic;
 
+#nullable disable
+
 namespace BuildXL.Cache.Host.Configuration
 {
     public class HostParameters
@@ -70,7 +72,7 @@ namespace BuildXL.Cache.Host.Configuration
 
     public class DeploymentParameters : HostParameters
     {
-        public Guid ContextId { get; set; } = Guid.NewGuid();
+        public string ContextId { get; set; } = Guid.NewGuid().ToString();
         public string AuthorizationSecretName { get; set; }
         public string AuthorizationSecret { get; set; }
         public bool GetContentInfoOnly { get; set; }

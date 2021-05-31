@@ -7,29 +7,29 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
-using Microsoft.Practices.TransientFaultHandling;
+using BuildXL.Cache.ContentStore.Utils;
 
 #nullable enable
 
 namespace BuildXL.Cache.ContentStore.Distributed.Redis
 {
     /// <summary>
-    /// Set of extension methods for <see cref="RetryPolicy"/>.
+    /// Set of extension methods for <see cref="IRetryPolicy"/>.
     /// </summary>
     public static class RetryPolicyExtensions
     {
         /// <summary>
         /// Execute a given <paramref name="func"/> func and trace transient failures.
         /// </summary>
-        public static async Task ExecuteAsync(
-            this RetryPolicy policy,
+        public static Task ExecuteAsync(
+            this IRetryPolicy policy,
             Context context,
             Func<Task> func,
             CancellationToken token,
             string? databaseName,
             [CallerMemberName] string? caller = null)
         {
-            await policy.ExecuteAsync(
+            return policy.ExecuteAsync(
                 context,
                 async () =>
                 {
@@ -44,8 +44,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
         /// <summary>
         /// Execute a given <paramref name="func"/> func and trace transient failures.
         /// </summary>
-        public static async Task<T> ExecuteAsync<T>(
-            this RetryPolicy policy,
+        public static Task<T> ExecuteAsync<T>(
+            this IRetryPolicy policy,
             Context context,
             Func<Task<T>> func,
             CancellationToken token,
@@ -67,13 +67,13 @@ namespace BuildXL.Cache.ContentStore.Distributed.Redis
                 {
                     // Intentionally tracing only message, because if the issue is transient, its not very important to see the full stack trace (we never seen them before)
                     // and if the issue is not transient, then the client of this class is responsible for properly tracing the full stack trace.
-                    context.Debug($"RetryPolicy.ExecuteAsync: attempt #{attempt}, Redis operation '{caller}'{databaseText} failed with: {e.Message}.");
+                    context.Debug($"RetryPolicy.ExecuteAsync: attempt #{attempt}, Redis operation '{caller}'{databaseText} failed with: {e.Message}.", component: nameof(RetryPolicyExtensions));
                     ExceptionDispatchInfo.Capture(e).Throw();
                     throw; // unreachable
                 }
             };
 
-            return await policy.ExecuteAsync(outerFunc, token);
+            return policy.ExecuteAsync(outerFunc, token);
         }
     }
 }

@@ -22,10 +22,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// </summary>
         public static ContentHash CalculateHash(this byte[] content, HashType hashType)
         {
-            using (var hasher = HashInfoLookup.Find(hashType).CreateContentHasher())
-            {
-                return hasher.GetContentHash(content);
-            }
+            return HashInfoLookup.GetContentHasher(hashType).GetContentHash(content);
         }
 
         /// <summary>
@@ -34,7 +31,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// <exception cref="FileNotFoundException">Throws if the file <paramref name="path"/> is not on disk.</exception>
         public static async Task<ContentHash> CalculateHashAsync(this IAbsFileSystem fileSystem, AbsolutePath path, HashType hashType)
         {
-            using (var stream = await fileSystem.OpenSafeAsync(
+            using (var stream = fileSystem.Open(
                 path, FileAccess.Read, FileMode.Open, FileShare.Read | FileShare.Delete, FileOptions.SequentialScan, HashStreamBufferSize))
             {
                 return await stream.CalculateHashAsync(hashType);
@@ -44,12 +41,10 @@ namespace BuildXL.Cache.ContentStore.Hashing
         /// <summary>
         ///     Calculate content hash of content in a stream.
         /// </summary>
-        public static async Task<ContentHash> CalculateHashAsync(this StreamWithLength stream, HashType hashType)
+        public static Task<ContentHash> CalculateHashAsync(this StreamWithLength stream, HashType hashType)
         {
-            using (var hasher = HashInfoLookup.Find(hashType).CreateContentHasher())
-            {
-                return await hasher.GetContentHashAsync(stream);
-            }
+            var hasher = HashInfoLookup.GetContentHasher(hashType);
+            return hasher.GetContentHashAsync(stream);
         }
 
         /// <summary>
@@ -58,6 +53,11 @@ namespace BuildXL.Cache.ContentStore.Hashing
         public static bool IsEmptyHash(this ContentHash contentHash)
         {
             return contentHash == HashInfoLookup.Find(contentHash.HashType).EmptyHash;
+        }
+
+        public static bool IsZero(this ContentHash contentHash)
+        {
+            return contentHash == HashInfoLookup.Find(contentHash.HashType).Zero;
         }
     }
 }

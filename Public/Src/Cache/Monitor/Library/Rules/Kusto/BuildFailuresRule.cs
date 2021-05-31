@@ -31,6 +31,15 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
                 Error = 0.4,
                 Fatal = 0.5,
             };
+
+            public IcmThresholds<double> FailureRateIcmThresholds = new IcmThresholds<double>();
+
+            /// <summary>
+            /// Avoid the case where we fail 1 out of 1 builds
+            /// </summary>
+            public long MinimumAmountOfBuildsForIcm { get; set; } = 5;
+
+            public TimeSpan IcmIncidentCacheTtl { get; set; } = TimeSpan.FromHours(1);
         }
 
         private readonly Configuration _configuration;
@@ -67,9 +76,9 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
                 | where not(isnull(Failed))";
             var results = (await QueryKustoAsync<Result>(context, query)).ToList();
 
-            GroupByStampAndCallHelper<Result>(results, result => result.Stamp, buildFailuresHelper);
+            await GroupByStampAndCallHelperAsync<Result>(results, result => result.Stamp, buildFailuresHelper);
 
-            void buildFailuresHelper(string stamp, List<Result> results)
+            async Task buildFailuresHelper(string stamp, List<Result> results)
             {
                 if (results.Count == 0)
                 {
@@ -90,6 +99,22 @@ namespace BuildXL.Cache.Monitor.App.Rules.Kusto
                         stamp,
                         eventTimeUtc: now);
                 });
+
+                if (total >= _configuration.MinimumAmountOfBuildsForIcm)
+                {
+                    await _configuration.FailureRateIcmThresholds.CheckAsync(failureRate, (severity, threshold) =>
+                    {
+                        return EmitIcmAsync(
+                            severity,
+                            title: $"{stamp}: build failure rate is higher than {threshold*100}%",
+                            stamp,
+                            machines: null,
+                            correlationIds: null,
+                            description: $"Build failure rate `{failed}/{total}={Math.Round(failureRate * 100.0, 4, MidpointRounding.AwayFromZero)}%` over last `{_configuration.LookbackPeriod}``",
+                            eventTimeUtc: now,
+                            cacheTimeToLive: _configuration.IcmIncidentCacheTtl);
+                    });
+                }
             }
         }
     }

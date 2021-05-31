@@ -227,6 +227,84 @@ namespace Test.BuildXL.Processes
             XAssert.AreEqual(ExitCodes.Timeout, result.ExitCode);
         }
 
+        [Fact]
+        public async Task SuspensionExtendsTimeout()
+        {
+            if (!JobObject.OSSupportsNestedJobs)
+            {
+                return;
+            }
+
+            var info = GetInfiniteWaitProcessInfo();
+
+            using (ISandboxedProcess process = await TryStartProcessAndSuspendImmediately(info, 100, multiplier: 2, retries: 5)) 
+            {
+                // If this fails a lot, consider changing the knobs above
+                XAssert.IsNotNull(process, "Unable to start sandboxed process and suspend it immediately"); 
+
+                // The process will time out next, but we will grant it more time while suspended
+                await Task.Delay((int)(info.Timeout.Value.TotalMilliseconds * 4));
+
+                // Kill it while suspended
+                await process.KillAsync();
+ 
+                SandboxedProcessResult result = await process.GetResultAsync();
+                XAssert.IsTrue(result.Killed);
+                XAssert.IsFalse(result.TimedOut, "Process claims it was timed out, but instead it was killed.");
+            }
+        }
+        
+        [Fact]
+        public async Task SuspendResumeTimeout()
+        {
+            if (!JobObject.OSSupportsNestedJobs)
+            {
+                return;
+            }
+
+            var info = GetInfiniteWaitProcessInfo();
+
+            using (ISandboxedProcess process = await TryStartProcessAndSuspendImmediately(info, 100, multiplier: 2, retries: 5))
+            {
+                // If this fails a lot, consider changing the knobs above
+                XAssert.IsNotNull(process, "Unable to start sandboxed process and suspend it immediately"); 
+
+                // The process will definitely time out next, but we will grant it more time
+                await Task.Delay((int)(info.Timeout.Value.TotalMilliseconds * 4));
+
+                // This will succeed because the timeout was extended
+                var resumeSucceeded = process.TryResumeProcess();
+                XAssert.IsTrue(resumeSucceeded);
+
+                // Now we will definitely time out
+                var result = await process.GetResultAsync();
+                XAssert.IsTrue(result.TimedOut);
+            }
+        }
+
+        private async Task<ISandboxedProcess> TryStartProcessAndSuspendImmediately(SandboxedProcessInfo info, double timeout, double multiplier = 2, int retries = 5)
+        {
+            // When starting the process with a timeout, there's a chance that we won't be able to suspend it before 
+            // the time is consumed and the process is killed. We try to do it a few times and return the "suspended"
+            // process, or null if we failed every time.
+            for (var i = 0; i < retries; i++)
+            {
+                info.Timeout = TimeSpan.FromMilliseconds(timeout);
+                var process = await StartProcessAsync(info);
+                var suspendedResult = process.TryEmptyWorkingSet(isSuspend: true);
+                if (suspendedResult == EmptyWorkingSetResult.Success)
+                {
+                    return process;
+                }
+
+                // We failed, try again
+                process.Dispose();
+                timeout *= multiplier;
+            }
+
+            return null;
+        }
+
         [Fact(Skip = "Test is flakey TFS 495531")]
         public async Task JobCounters()
         {
@@ -1091,6 +1169,25 @@ namespace Test.BuildXL.Processes
                 "The captured processes arguments are incorrect");
         }
 
+        [Theory]
+        [InlineData("$hi")]
+        [InlineData("${hi}")]
+        [InlineData("$(hi)")]
+        [InlineData("`hi`")]
+        [InlineData("` hi `")]
+        [InlineData("\"hi\"")]
+        [InlineData("\" hi \"")]
+        [InlineData("'hi'")]
+        [InlineData("' hi '")]
+        [InlineData("# hi")]
+        [InlineData("#hi")]
+        public async Task TestCmdLineArgEscaping(string echoMessage)
+        {
+            var info = GetEchoProcessInfo(echoMessage);
+            var result = await RunProcess(info);
+            await CheckEchoProcessResult(result, echoMessage);
+        }
+
         [FactIfSupported(requiresUnixBasedOperatingSystem: true)]
         public async Task TrackVForkAsync()
         {
@@ -1317,6 +1414,73 @@ namespace Test.BuildXL.Processes
             XAssert.IsTrue(observedAccesses.Contains(childInput.Path), "Input file of child process should have been observed");
             // We should see the access that happens on the spawned grandchild process
             XAssert.IsTrue(observedAccesses.Contains(grandChildInput.Path), "Input file of grandchild process should have been observed");
+        }
+
+        [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
+        public async Task VerifyOpenedFileOrDirectoryAttributesWithFiles()
+        {
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true))
+            {
+                var pathTable = new PathTable();
+                var tempRootDir = AbsolutePath.Create(pathTable, tempFiles.RootDirectory);
+                var fileToBeCreated = tempFiles.GetUniqueFileName();
+                var fileToBeDeleted = tempFiles.GetUniqueFileName();
+                var arguments = $"/d /c echo test > {fileToBeCreated} & del {fileToBeDeleted}";
+
+                File.WriteAllText(fileToBeDeleted, "delete");
+
+                await ExecuteAndAssertOpenedFileOrDirectoryAttributeTest(isDirectory: false, tempRootDir, arguments, pathTable, tempFiles);
+            }
+        }
+
+        [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
+        public async Task VerifyOpenedFileOrDirectoryAttributesWithDirectories()
+        {
+            using (var tempFiles = new TempFileStorage(canGetFileNames: true))
+            {
+                var pathTable = new PathTable();
+                var tempRootDir = AbsolutePath.Create(pathTable, tempFiles.RootDirectory);
+                var directoryToBeCreated = tempFiles.GetUniqueDirectoryWithoutCreate();
+                var directoryToBeDeleted = tempFiles.GetUniqueDirectory();
+                var arguments = $"/d /c mkdir {directoryToBeCreated} & rmdir {directoryToBeDeleted}";
+
+                await ExecuteAndAssertOpenedFileOrDirectoryAttributeTest(isDirectory: true, tempRootDir, arguments, pathTable, tempFiles);
+            }
+        }
+
+        private async Task ExecuteAndAssertOpenedFileOrDirectoryAttributeTest(bool isDirectory, AbsolutePath tempRootDir, string cmdLineArguments, PathTable pathTable, TempFileStorage tempFiles)
+        {
+            var info =
+                new SandboxedProcessInfo(pathTable, tempFiles, CmdHelper.CmdX64, disableConHostSharing: false, loggingContext: LoggingContext)
+                {
+                    PipSemiStableHash = 0,
+                    PipDescription = DiscoverCurrentlyExecutingXunitTestMethodFQN(),
+                    Arguments = cmdLineArguments,
+                };
+
+            info.FileAccessManifest.AddScope(
+                AbsolutePath.Invalid,
+                FileAccessPolicy.MaskNothing,
+                FileAccessPolicy.AllowAll); // Ignore everything outside of the temp directory
+            info.FileAccessManifest.AddScope(
+                tempRootDir,
+                mask: FileAccessPolicy.MaskNothing,
+                values: FileAccessPolicy.AllowAll | FileAccessPolicy.ReportAccess); // explicitly report all accesses inside temp directory
+
+            var result = await RunProcess(info);
+            var fileAccesses = result.ExplicitlyReportedFileAccesses.ToList();
+
+            foreach (var access in fileAccesses)
+            {
+                if (isDirectory)
+                {
+                    Assert.True(access.IsOpenedHandleDirectory());
+                }
+                else
+                {
+                    Assert.False(access.IsOpenedHandleDirectory());
+                }
+            }
         }
 
         private static ReportedFileAccess GetFileAccessForReadFileOperation(

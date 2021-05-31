@@ -1071,6 +1071,26 @@ namespace BuildXL.Pips.Tracing
             string sealDirectoryMemberPath);
 
         [GeneratedEvent(
+            (int)LogEventId.ScheduleFailAddPipInvalidComposedSealDirectoryDoesNotContainRoot,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
+            EventTask = (int)Tasks.Scheduler,
+            Message =
+                EventConstants.ProvenancePrefix +
+                "Output directory '{compositeSealedDirectoryPath}' (created via '{pipValueId}') cannot be sealed. The root is not nested within a member directory ('{sealDirectoryMemberPath}').")]
+        public abstract void ScheduleFailAddPipInvalidComposedSealDirectoryDoesNotContainRoot(
+            LoggingContext context,
+            string file,
+            int line,
+            int column,
+            long pipSemiStableHash,
+            string pipDescription,
+            string pipValueId,
+            string compositeSealedDirectoryPath,
+            string sealDirectoryMemberPath);
+
+        [GeneratedEvent(
             (int)LogEventId.PipStaticFingerprint,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
@@ -1117,6 +1137,36 @@ namespace BuildXL.Pips.Tracing
             EventTask = (ushort)Tasks.Storage,
             Message = "Duplicate temporary directory at path: {duplicatePath} detected between the following pips: [{pipDescription1}] and [{pipDescription2}]. Please use unique temporary directories for each of these pips or if you would like to disable bxl's duplicate temporary directory validation feature, please pass bxl arg /unsafe_AllowDuplicateTemporaryDirectory+")]
         public abstract void MultiplePipsUsingSameTemporaryDirectory(LoggingContext loggingContext, string duplicatePath, string pipDescription1, string pipDescription2);
+
+        [GeneratedEvent(
+            (int)LogEventId.ScheduleFailAddPipAssertionNotSupportedInCompositeOpaques,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
+            EventTask = (int)Tasks.Scheduler,
+            Message =
+                EventConstants.ProvenancePrefix +
+                "File '{assertedFile}' existence was asserted on composite output directory '{pipDescription}'. Assertions are not supported on composite opaque directories and should be made on the opaque directories directly produced by a process.")]
+        public abstract void ScheduleFailAddPipAssertionNotSupportedInCompositeOpaques(
+            LoggingContext context,
+            string file,
+            int line,
+            int column,
+            long pipSemiStableHash,
+            string pipDescription,
+            string pipValueId,
+            string assertedFile);
+
+        [GeneratedEvent(
+            (int)LogEventId.WriteDeclaredOutsideOfKnownMount,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
+            EventTask = (int)Tasks.Scheduler,
+            Message = "Output '{writePath}' is declared outside any known mount. Please consider declaring a writable mount that contains the output.")]
+        public abstract void WriteDeclaredOutsideOfKnownMount(
+            LoggingContext context,
+            string writePath);
     }
 }
 #pragma warning restore CA1823 // Unused field

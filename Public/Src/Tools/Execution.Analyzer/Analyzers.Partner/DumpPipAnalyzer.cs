@@ -153,17 +153,16 @@ namespace BuildXL.Execution.Analyzer
                 }
             }
 
+            if (m_pip == null)
+            {
+                throw CommandLineUtilities.Error("Did not find a matching pip.");
+            }
+
             m_html = new HtmlHelper(PathTable, StringTable, SymbolTable, CachedGraph.PipTable);
         }
 
         public XDocument GetXDocument()
         {
-            if (m_pip == null)
-            {
-                Console.Error.WriteLine("Did not find matching pip");
-                return null;
-            }
-
             var basicRows = new List<object>();
             basicRows.Add(m_html.CreateRow("PipId", m_pip.PipId.Value.ToString(CultureInfo.InvariantCulture) + " (" + m_pip.PipId.Value.ToString("X16", CultureInfo.InvariantCulture) + ")"));
             basicRows.Add(m_html.CreateRow("SemiStableHash", m_pip.SemiStableHash.ToString("X16")));
@@ -605,7 +604,7 @@ namespace BuildXL.Execution.Analyzer
                 m_html.CreateRow("LazilyMaterialized File Dependencies", pip.LazilyMaterializedDependencies.Where(a => a.IsFile).Select(a => a.FileArtifact)),
                 m_html.CreateRow("LazilyMaterialized Directory Dependencies", pip.LazilyMaterializedDependencies.Where(a => a.IsDirectory).Select(a => a.DirectoryArtifact)),
                 m_html.CreateRow("IsServiceFinalization", pip.IsServiceFinalization),
-                m_html.CreateRow("MustRunOnMaster", pip.MustRunOnMaster));
+                m_html.CreateRow("MustRunOnOrchestrator", pip.MustRunOnOrchestrator));
         }
 
         private XElement GetValuePipDetails(ValuePip pip)
@@ -713,9 +712,10 @@ namespace BuildXL.Execution.Analyzer
                 if (PipTable.IsSealDirectoryComposite(sealPipId))
                 {
                     var sealPip = (SealDirectory)CachedGraph.PipGraph.GetSealedDirectoryPip(directory.artifact, PipQueryContext.SchedulerExecuteSealDirectoryPip);
+                    var isSubDir = sealPip.CompositionActionKind == SealDirectoryCompositionActionKind.NarrowDirectoryCone;
                     foreach (var nestedDirectory in sealPip.ComposedDirectories.Select(d => (artifact: d, path: d.Path.ToString(PathTable))).OrderByDescending(tupple => tupple.path))
                     {
-                        directories.Push((nestedDirectory.artifact, nestedDirectory.path, directory.tabCount + 1));
+                        directories.Push((nestedDirectory.artifact, $"{(isSubDir ? "subdirectory of " : "")}{nestedDirectory.path}", directory.tabCount + 1));
                     }
                 }
             }

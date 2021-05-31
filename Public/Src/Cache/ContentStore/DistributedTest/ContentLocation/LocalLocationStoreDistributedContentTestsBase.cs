@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 using System;
 using System.Collections.Concurrent;
@@ -17,14 +17,17 @@ using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
+using BuildXL.Cache.ContentStore.Interfaces.Sessions;
 using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.InterfacesTest.Results;
 using BuildXL.Cache.ContentStore.Service;
+using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.Host.Configuration;
 using BuildXL.Cache.Host.Service;
 using BuildXL.Cache.Host.Service.Internal;
-using ContentStoreTest.Distributed.ContentLocation;
+using BuildXL.Cache.MemoizationStore.Interfaces.Caches;
 using ContentStoreTest.Distributed.Redis;
 using ContentStoreTest.Test;
 using Xunit.Abstractions;
@@ -33,6 +36,8 @@ namespace ContentStoreTest.Distributed.Sessions
 {
     public abstract class LocalLocationStoreDistributedContentTestsBase : DistributedContentTests
     {
+        protected static readonly Tracer Tracer = new Tracer(nameof(LocalLocationStoreDistributedContentTestsBase));
+
         protected const HashType ContentHashType = HashType.Vso0;
         protected const int ContentByteCount = 100;
         protected const int SafeToLazilyUpdateMachineCountThreshold = 3;
@@ -51,7 +56,7 @@ namespace ContentStoreTest.Distributed.Sessions
         protected bool _poolSecondaryRedisDatabase = true;
         protected bool _registerAdditionalLocationPerMachine = false;
 
-        protected readonly ConcurrentDictionary<(Guid, int), LocalRedisProcessDatabase> _localDatabases = new ConcurrentDictionary<(Guid, int), LocalRedisProcessDatabase>();
+        protected readonly ConcurrentDictionary<(string, int), LocalRedisProcessDatabase> _localDatabases = new();
 
         protected Func<AbsolutePath, int, RedisContentLocationStoreConfiguration> CreateContentLocationStoreConfiguration { get; set; }
         protected LocalRedisProcessDatabase PrimaryGlobalStoreDatabase { get; private set; }
@@ -61,7 +66,8 @@ namespace ContentStoreTest.Distributed.Sessions
         protected AbsolutePath _redirectedTargetPath = new AbsolutePath(@"X:\cache");
 
         protected bool EnableProactiveCopy { get; set; } = false;
-        protected bool ProactiveCopyInsideRing { get; set; } = false;
+
+        protected ProactiveCopyMode ProactiveCopyMode { get; set; } = ProactiveCopyMode.OutsideRing;
         protected int? ProactiveCopyLocationThreshold { get; set; } = null;
         protected int? ProactivePushCountLimit { get; set; }
         protected bool EnableProactiveReplication { get; set; } = false;
@@ -72,6 +78,8 @@ namespace ContentStoreTest.Distributed.Sessions
 
         protected bool UseRealStorage { get; set; } = false;
         protected bool UseRealEventHub { get; set; } = false;
+
+        protected bool EnablePublishingCache { get; set; } = false;
 
         protected Action<RedisContentLocationStoreConfiguration> _overrideRedis = null;
         protected Action<DistributedContentStoreSettings> _overrideDistributedContentStooreSettings = null;
@@ -95,10 +103,10 @@ namespace ContentStoreTest.Distributed.Sessions
 
             index++;
 
-            if (!_localDatabases.TryGetValue((context.Id, index), out var localDatabase))
+            if (!_localDatabases.TryGetValue((context.TraceId, index), out var localDatabase))
             {
                 localDatabase = LocalRedisProcessDatabase.CreateAndStartEmpty(_redis, TestGlobal.Logger, SystemClock.Instance);
-                _localDatabases.TryAdd((context.Id, index), localDatabase);
+                _localDatabases.TryAdd((context.TraceId, index), localDatabase);
             }
 
             return localDatabase;
@@ -158,7 +166,6 @@ namespace ContentStoreTest.Distributed.Sessions
                                IsRepairHandlingEnabled = true,
 
                                UseUnsafeByteStringConstruction = true,
-                               Unsafe_DisableDeprecatedConcurrentAccessLock = true,
 
                                SafeToLazilyUpdateMachineCountThreshold = SafeToLazilyUpdateMachineCountThreshold,
 
@@ -172,7 +179,7 @@ namespace ContentStoreTest.Distributed.Sessions
                                CheckLocalFiles = true,
 
                                // Tests disable reconciliation by default
-                               Unsafe_DisableReconciliation = true,
+                               ReconcileMode = ReconciliationMode.None.ToString(),
 
                                IsPinBetterEnabled = false,
                                PinMinUnverifiedCount = 1,
@@ -180,7 +187,7 @@ namespace ContentStoreTest.Distributed.Sessions
                                MachineRisk = 0.0000001,
 
                                TraceProactiveCopy = true,
-                               ProactiveCopyMode = EnableProactiveCopy ? (ProactiveCopyInsideRing ? nameof(ProactiveCopyMode.InsideRing) : nameof(ProactiveCopyMode.OutsideRing)) : nameof(ProactiveCopyMode.Disabled),
+                               ProactiveCopyMode = EnableProactiveCopy ? ProactiveCopyMode.ToString() : nameof(ProactiveCopyMode.Disabled),
                                PushProactiveCopies = true,
                                EnableProactiveReplication = EnableProactiveReplication,
                                ProactiveCopyRejectOldContent = true,
@@ -190,8 +197,8 @@ namespace ContentStoreTest.Distributed.Sessions
                                ProactiveCopyUsePreferredLocations = ProactiveCopyUsePreferredLocations,
                                ProactiveCopyMaxRetries = ProactiveCopyRetries,
 
-                               ContentLocationDatabaseOpenReadOnly = false,
-                               DistributedCentralStorageImmutabilityOptimizations = true,
+                               ContentLocationDatabaseOpenReadOnly = true,
+                               EnablePublishingCache = EnablePublishingCache,
                            };
 
             if (ProactiveCopyLocationThreshold.HasValue)
@@ -202,15 +209,15 @@ namespace ContentStoreTest.Distributed.Sessions
             _overrideDistributed?.Invoke(settings);
 
             var localCasSettings = new LocalCasSettings()
-                                   {
-                                       UseScenarioIsolation = false,
-                                       CasClientSettings = new LocalCasClientSettings()
-                                                           {
-                                                               UseCasService = true,
-                                                               DefaultCacheName = "Default",
-                                                           },
-                                       PreferredCacheDrive = Path.GetPathRoot(rootPath.Path),
-                                       CacheSettings = new Dictionary<string, NamedCacheSettings>()
+            {
+                UseScenarioIsolation = false,
+                CasClientSettings = new LocalCasClientSettings()
+                {
+                    UseCasService = true,
+                    DefaultCacheName = "Default",
+                },
+                PreferredCacheDrive = Path.GetPathRoot(rootPath.Path),
+                CacheSettings = new Dictionary<string, NamedCacheSettings>()
                                                        {
                                                            {
                                                                "Default",
@@ -221,22 +228,22 @@ namespace ContentStoreTest.Distributed.Sessions
                                                                }
                                                            }
                                                        },
-                                       ServiceSettings = new LocalCasServiceSettings()
-                                                         {
-                                                             GrpcPort = grpcPort,
-                                                             GrpcPortFileName = Guid.NewGuid().ToString(),
-                                                             ScenarioName = _overrideScenarioName ?? Guid.NewGuid().ToString(),
-                                                             MaxProactivePushRequestHandlers = ProactivePushCountLimit,
-                                                         }
-                                   };
+                ServiceSettings = new LocalCasServiceSettings()
+                {
+                    GrpcPort = grpcPort,
+                    GrpcPortFileName = Guid.NewGuid().ToString(),
+                    ScenarioName = _overrideScenarioName ?? Guid.NewGuid().ToString(),
+                    MaxProactivePushRequestHandlers = ProactivePushCountLimit,
+                }
+            };
 
             if (_registerAdditionalLocationPerMachine)
             {
                 localCasSettings.CacheSettings["RedirectedCas"] = new NamedCacheSettings()
-                                                                  {
-                                                                      CacheRootPath = (_redirectedSourcePath / index.ToString()).Path,
-                                                                      CacheSizeQuotaString = "1MB"
-                                                                  };
+                {
+                    CacheRootPath = (_redirectedSourcePath / index.ToString()).Path,
+                    CacheSizeQuotaString = "1MB"
+                };
             }
 
             var configuration = new DistributedCacheServiceConfiguration(localCasSettings, settings);
@@ -273,6 +280,15 @@ namespace ContentStoreTest.Distributed.Sessions
 
                 var topLevelStore = factory.CreateTopLevelStore().topLevelStore;
                 return (topLevelStore, null);
+            }
+        }
+
+        protected async Task OpenStreamAndDisposeAsync(IContentSession session, Context context, ContentHash hash)
+        {
+            var openResult = await session.OpenStreamAsync(context, hash, Token).ShouldBeSuccess();
+            using (openResult.Stream)
+            {
+                // Just dispose stream.
             }
         }
 

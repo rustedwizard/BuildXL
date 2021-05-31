@@ -32,10 +32,10 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         /// <nodoc />
         public ReadOnlyDatabaseMemoizationSession(string name, DatabaseMemoizationStore memoizationStore)
         {
-            Contract.RequiresNotNull(name);
-            Contract.RequiresNotNull(memoizationStore);
+            Contract.Requires(name != null);
+            Contract.Requires(memoizationStore != null);
 
-            Tracer = new Tracer(name);
+            Tracer = new Tracer(nameof(ReadOnlyDatabaseMemoizationSession));
             Name = name;
             MemoizationStore = memoizationStore;
         }
@@ -43,7 +43,8 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         /// <inheritdoc />
         public Task<GetContentHashListResult> GetContentHashListAsync(Context context, StrongFingerprint strongFingerprint, CancellationToken cts, UrgencyHint urgencyHint = UrgencyHint.Nominal)
         {
-            return MemoizationStore.GetContentHashListAsync(context, strongFingerprint, cts);
+            bool preferShared = urgencyHint == UrgencyHint.PreferShared;
+            return MemoizationStore.GetContentHashListAsync(context, strongFingerprint, cts, preferShared);
         }
 
         /// <inheritdoc />

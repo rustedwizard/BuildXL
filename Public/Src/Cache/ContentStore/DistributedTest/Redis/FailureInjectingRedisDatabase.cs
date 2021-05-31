@@ -6,7 +6,11 @@ using System.Collections.Generic;
 using System.Runtime.Serialization;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Time;
+#if MICROSOFT_INTERNAL
+using Microsoft.Caching.Redis;
+#else
 using StackExchange.Redis;
+#endif
 
 namespace ContentStoreTest.Distributed.Redis
 {
@@ -66,7 +70,7 @@ namespace ContentStoreTest.Distributed.Redis
                 }
                 else
                 {
-                    throw new InvalidOperationException($"Unknown exception has occurred. Calls={Calls}, FailingQuery={FailingQuery}, _fail={_fail}.");
+                    throw new Exception($"Unknown exception has occurred. Calls={Calls}, FailingQuery={FailingQuery}, _fail={_fail}.");
                 }
             }
         }

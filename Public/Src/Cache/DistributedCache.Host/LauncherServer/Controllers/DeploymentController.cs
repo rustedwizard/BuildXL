@@ -36,7 +36,7 @@ namespace BuildXL.Launcher.Server.Controllers
 
         [HttpPost]
         [Route("deployment")]
-        public async Task<ActionResult> GetAsync(DeploymentParameters parameters)
+        public async Task<ActionResult> GetLaunchManifestAsync(DeploymentParameters parameters)
         {
             OperationContext context = new OperationContext(new Context(parameters.ContextId, _logger));
 
@@ -51,7 +51,7 @@ namespace BuildXL.Launcher.Server.Controllers
 
         [HttpPost]
         [Route("getproxyaddress")]
-         public ActionResult GetProxyAddress(Guid contextId, string accessToken, [FromBody] HostParameters parameters)
+         public ActionResult GetProxyAddress(string contextId, string accessToken, [FromBody] HostParameters parameters)
         {
             OperationContext context = new OperationContext(new Context(contextId, _logger));
 
@@ -66,7 +66,7 @@ namespace BuildXL.Launcher.Server.Controllers
 
         [HttpGet]
         [Route("content")]
-        public async Task<ActionResult> GetContentAsync(Guid contextId, string hash, string accessToken)
+        public async Task<ActionResult> GetContentAsync(string contextId, string hash, string accessToken)
         {
             await Task.Yield();
 

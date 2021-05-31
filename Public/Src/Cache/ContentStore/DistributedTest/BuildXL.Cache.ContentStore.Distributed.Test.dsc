@@ -5,6 +5,8 @@ import * as XUnit from "Sdk.Managed.Testing.XUnit";
 import * as ManagedSdk from "Sdk.Managed";
 
 namespace DistributedTest {
+    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNet472;
+
     @@public
     export const dll = BuildXLSdk.cacheTest({
         assemblyName: "BuildXL.Cache.ContentStore.Distributed.Test",
@@ -18,8 +20,7 @@ namespace DistributedTest {
         assemblyBindingRedirects: BuildXLSdk.cacheBindingRedirects(),
         appConfig: f`App.config`,
         references: [
-            ManagedSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
-            ...addIf(BuildXLSdk.isFullFramework || qualifier.targetFramework === "netstandard2.0", importFrom("System.Collections.Immutable").pkg),
+            ...addIf(BuildXLSdk.isFullFramework, importFrom("System.Collections.Immutable").pkg),
             ...addIf(BuildXLSdk.isFullFramework,
                 NetFx.System.IO.dll,
                 NetFx.System.Net.Primitives.dll,
@@ -49,6 +50,7 @@ namespace DistributedTest {
             importFrom("BuildXL.Utilities").Collections.dll,
             importFrom("BuildXL.Utilities").KeyValueStore.dll,
             importFrom("BuildXL.Utilities").Native.dll,
+            Grpc.dll,
             ...getGrpcPackages(true),
             ...importFrom("Sdk.Selfhost.RocksDbSharp").pkgs,
 
@@ -56,6 +58,15 @@ namespace DistributedTest {
 
             ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
             importFrom("WindowsAzure.Storage").pkg,
+
+            importFrom("protobuf-net").pkg,
+            importFrom("protobuf-net.Core").pkg,
+            importFrom("protobuf-net.Grpc").pkg,
+            importFrom("protobuf-net.Grpc.Native").pkg,
+            ...getGrpcPackages(true),
+            ...BuildXLSdk.getSystemMemoryPackages(true),
+            importFrom("System.ServiceModel.Http").pkg,
+            importFrom("System.ServiceModel.Primitives").pkg,
         ],
         runtimeContent: [
             {

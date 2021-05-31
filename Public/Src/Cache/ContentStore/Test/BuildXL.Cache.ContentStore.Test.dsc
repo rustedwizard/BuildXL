@@ -25,6 +25,7 @@ namespace Test {
             ),
             // TODO: This needs to be renamed to just utilities... but it is in a package in public/src
             importFrom("BuildXL.Utilities").dll,
+            importFrom("BuildXL.Utilities").Collections.dll,
             importFrom("BuildXL.Utilities").Native.dll,
             importFrom("Google.Protobuf").pkg,
             
@@ -36,7 +37,6 @@ namespace Test {
             Library.dll,
             Grpc.dll,
             App.exe, // Tests launch the server, so this needs to be deployed.
-            BuildXLSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
 
             ...importFrom("BuildXL.Utilities").Native.securityDlls,
             ...BuildXLSdk.fluentAssertionsWorkaround,

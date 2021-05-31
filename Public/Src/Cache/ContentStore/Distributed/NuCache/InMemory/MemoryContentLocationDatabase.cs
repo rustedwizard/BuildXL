@@ -94,7 +94,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.InMemory
         }
 
         /// <inheritdoc />
-        public override IEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(OperationContext context)
+        public override IEnumerable<Result<StrongFingerprint>> EnumerateStrongFingerprints(OperationContext context)
         {
             throw new NotImplementedException();
         }
@@ -154,12 +154,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache.InMemory
             }
 
             return ContentLocationEntry.Missing;
-        }
-
-        /// <inheritdoc />
-        protected override BoolResult GarbageCollectMetadataCore(OperationContext context)
-        {
-            throw new NotImplementedException();
         }
     }
 }

@@ -199,12 +199,7 @@ namespace Transformer {
         }
 
         @@public
-        export interface ExecuteResult {
-            getOutputFile(output: Path): DerivedFile;
-            getOutputFiles(): DerivedFile[];
-            getRequiredOutputFiles(): DerivedFile[];
-            getOutputDirectory(dir: Directory): OpaqueDirectory;
-        }
+		export type ExecuteResult = TransformerExecuteResult;
 
         @@public
         export type EnvironmentValueType = string | boolean | number | Path | Path[] | File | File[] | Directory | Directory[] | StaticDirectory | StaticDirectory[];
@@ -292,7 +287,12 @@ namespace Transformer {
         /**
          * Whether this pip must execute on the master node in a distributed build.  Defaults to false.
          */
-        mustRunOnMaster?: boolean;
+         mustRunOnOrchestrator?: boolean;
+
+        /**
+         * Deprecated: use mustRunOnOrchestrator.
+         */
+         mustRunOnMaster?: boolean;
 
         /** Arbitrary tags */
         tags?: string[];
@@ -349,6 +349,12 @@ namespace Transformer {
    export function filterSharedOpaqueDirectory(directory: any, contentFilter?: any): SharedOpaqueDirectory {
        return _PreludeAmbientHack_Transformer.composeSharedOpaqueDirectories(directory, [], contentFilter);
    }
+
+    /** Creates a new shared opaque directory that is a subdirectory of an existing shared opaque directory. */
+   @@public
+   export function getSharedOpaqueSubDirectory(directory: any, subDirectoryPath: any, contentFilter?: any): SharedOpaqueDirectory {
+       return _PreludeAmbientHack_Transformer.getSharedOpaqueSubDirectory(directory, subDirectoryPath, contentFilter);
+   }  
 
     /** Options for sealing source directory. */
     @@public

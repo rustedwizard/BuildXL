@@ -191,7 +191,8 @@ namespace BuildXL.Processes
                 info.PipDescription,
                 info.LoggingContext,
                 info.DetoursEventListener,
-                info.SidebandWriter);
+                info.SidebandWriter,
+                info.FileSystemView);
 
             var useSingleProducer = !(SandboxConnection.Kind == SandboxKind.MacOsHybrid || SandboxConnection.Kind == SandboxKind.MacOsDetours);
 
@@ -335,8 +336,6 @@ namespace BuildXL.Processes
         /// <inheritdoc />
         public override async Task KillAsync()
         {
-            LogProcessState($"{nameof(SandboxedProcessUnix)}::{nameof(KillAsync)}");
-
             // In the case that the process gets shut down by either its timeout or e.g. SandboxedProcessPipExecutor
             // detecting resource usage issues and calling KillAsync(), we flag the process with m_processKilled so we
             // don't process any more kernel reports that get pushed into report structure asynchronously!
@@ -426,7 +425,15 @@ namespace BuildXL.Processes
 
         private void KillAllChildProcesses()
         {
-            NotifyPipTerminated(PipId, CoalesceProcesses(GetCurrentlyActiveChildProcesses()));
+            var distinctProcessIds = CoalesceProcesses(GetCurrentlyActiveChildProcesses())
+                .Select(p => p.ProcessId)
+                .ToHashSet();
+            foreach (int processId in distinctProcessIds)
+            {
+                bool killed = BuildXL.Interop.Unix.Process.ForceQuit(processId);
+                LogProcessState($"KillAllChildProcesses: kill({processId}) = {killed}");
+                SandboxConnection.NotifyPipProcessTerminated(PipId, processId);
+            }
         }
 
         private bool ShouldWaitForSurvivingChildProcesses()
@@ -455,20 +462,15 @@ namespace BuildXL.Processes
             m_pendingReports.Post(report);
         }
 
-        private void NotifyPipTerminated(long pipId, IEnumerable<ReportedProcess> survivingChildProcesses)
-        {
-            // TODO: bundle this into a single message
-            var distinctProcessIds = new HashSet<uint>(survivingChildProcesses.Select(p => p.ProcessId));
-            foreach (var processId in distinctProcessIds)
-            {
-                SandboxConnection.NotifyPipProcessTerminated(pipId, (int)processId);
-            }
-        }
-
         private async Task FeedStdInAsync(SandboxedProcessInfo info, [CanBeNull] string processStdinFileName)
         {
             string redirectedStdin = processStdinFileName != null ? $" < {ToPathInsideRootJail(processStdinFileName)}" : string.Empty;
-            string escapedArguments = (info.Arguments ?? string.Empty).Replace(Environment.NewLine, "\\" + Environment.NewLine);
+
+            // this additional round of escaping is needed because we are flushing the arguments to a shell script
+            string escapedArguments = (info.Arguments ?? string.Empty)
+                .Replace(Environment.NewLine, "\\" + Environment.NewLine)
+                .Replace("$", "\\$")
+                .Replace("`", "\\`");
             string cmdLine = $"{info.FileName} {escapedArguments} {redirectedStdin}";
 
             LogProcessState("Feeding stdin");
@@ -479,8 +481,13 @@ namespace BuildXL.Processes
 
             if (info.RootJailInfo != null)
             {
-                lines.Add($"sudo chroot --userspec={userIdExpr()}:{groupIdExpr()} \"{info.RootJailInfo?.RootJail}\" {ShellExecutable} <<{EofDelim}");
+                // A process executed in a chroot jail does not automatically inherit the environment from the parent process,
+                // so we must export the vars before entering chroot and then source them once inside.
+                const string BxlEnvFile = "bxl_pip_env.sh";
+                lines.Add($"export -p > '{info.RootJailInfo.Value.RootJail}/{BxlEnvFile}'");
+                lines.Add($"sudo chroot --userspec={userIdExpr()}:{groupIdExpr()} '{info.RootJailInfo.Value.RootJail}' {ShellExecutable} <<'{EofDelim}'");
                 lines.Add("set -e");
+                lines.Add($". /{BxlEnvFile}");
                 lines.Add($"cd \"{info.WorkingDirectory}\"");
             }
 
@@ -832,7 +839,7 @@ namespace BuildXL.Processes
         private bool ReportProvider(
             ref AccessReport report, out uint processId, out uint id, out uint correlationId, out ReportedFileOperation operation, out RequestedAccess requestedAccess, out FileAccessStatus status,
             out bool explicitlyReported, out uint error, out Usn usn, out DesiredAccess desiredAccess, out ShareMode shareMode, out CreationDisposition creationDisposition,
-            out FlagsAndAttributes flagsAndAttributes, out AbsolutePath manifestPath, out string path, out string enumeratePattern, out string processArgs, out string errorMessage)
+            out FlagsAndAttributes flagsAndAttributes, out FlagsAndAttributes openedFileOrDirectoryAttributes, out AbsolutePath manifestPath, out string path, out string enumeratePattern, out string processArgs, out string errorMessage)
         {
             var errorMessages = new List<string>();
             checked
@@ -860,16 +867,17 @@ namespace BuildXL.Processes
 
                 bool isWrite = (report.RequestedAccess & (byte)RequestedAccess.Write) != 0;
 
-                explicitlyReported  = report.ExplicitLogging > 0;
-                error               = report.Error;
-                usn                 = ReportedFileAccess.NoUsn;
-                desiredAccess       = isWrite ? DesiredAccess.GENERIC_WRITE : DesiredAccess.GENERIC_READ;
-                shareMode           = ShareMode.FILE_SHARE_READ;
-                creationDisposition = CreationDisposition.OPEN_ALWAYS;
-                flagsAndAttributes  = 0;
-                path                = report.DecodePath();
-                enumeratePattern    = string.Empty;
-                processArgs         = string.Empty;
+                explicitlyReported              = report.ExplicitLogging > 0;
+                error                           = report.Error;
+                usn                             = ReportedFileAccess.NoUsn;
+                desiredAccess                   = isWrite ? DesiredAccess.GENERIC_WRITE : DesiredAccess.GENERIC_READ;
+                shareMode                       = ShareMode.FILE_SHARE_READ;
+                creationDisposition             = CreationDisposition.OPEN_ALWAYS;
+                flagsAndAttributes              = 0;
+                openedFileOrDirectoryAttributes = 0;
+                path                            = report.DecodePath();
+                enumeratePattern                = string.Empty;
+                processArgs                     = string.Empty;
 
                 AbsolutePath.TryCreate(PathTable, path, out manifestPath);
 

@@ -2,17 +2,15 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using BuildXL.Engine.Tracing;
 using BuildXL.Native.IO;
 using BuildXL.Utilities;
-using BuildXL.Utilities.Tracing;
 using BuildXL.Utilities.Configuration;
+using BuildXL.Utilities.Configuration.Mutable;
 using Test.BuildXL.Engine;
 using Test.BuildXL.EngineTestUtilities;
-using Test.BuildXL.TestUtilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
@@ -52,6 +50,46 @@ namespace Test.BuildXL.EngineTests
             XAssert.IsTrue(s.Equals("Hello World, BuildXL!", StringComparison.Ordinal));
         }
 
+        [Fact]
+        public void MiniBuildExitEarlyOnNewGraph()
+        {
+            // Ignore DX222 for csc.exe being outside of src directory
+            IgnoreWarnings();
+
+            SetupHelloWorld();
+            Configuration.Engine.ExitOnNewGraph = true;
+            RunEngine("First build");
+
+            AssertInformationalEventLogged(LogEventId.ExitOnNewGraph);
+
+            var objectDirectoryPath = Configuration.Layout.ObjectDirectory.ToString(Context.PathTable);
+
+            XAssert.IsFalse(File.Exists(Path.Combine(objectDirectoryPath, "HelloWorld.cs")));
+            XAssert.IsFalse(File.Exists(Path.Combine(objectDirectoryPath, "src", "HelloWorld.cs")));
+            XAssert.IsFalse(File.Exists(Path.Combine(objectDirectoryPath, "bin", "HelloWorld.exe")));
+
+            string outPath = Path.Combine(objectDirectoryPath, "HelloWorld.out");
+            XAssert.IsFalse(File.Exists(outPath));
+
+            Configuration.Engine.ExitOnNewGraph = false;
+            RunEngine("Second build");
+            AssertInformationalEventLogged(LogEventId.ExitOnNewGraph, 0);
+
+            XAssert.IsTrue(File.Exists(Path.Combine(objectDirectoryPath, "HelloWorld.cs")));
+            XAssert.IsTrue(File.Exists(Path.Combine(objectDirectoryPath, "src", "HelloWorld.cs")));
+            XAssert.IsTrue(File.Exists(Path.Combine(objectDirectoryPath, "bin", "HelloWorld.exe")));
+            XAssert.IsTrue(File.Exists(outPath));
+
+            Configuration.Engine.ExitOnNewGraph = true;
+            RunEngine("Second build");
+            AssertInformationalEventLogged(LogEventId.ExitOnNewGraph, 0);
+
+            AppendNewLine(Configuration.Startup.ConfigFile);
+            RunEngine("Final build");
+
+            AssertInformationalEventLogged(LogEventId.ExitOnNewGraph);
+        }
+
         /// <summary>
         /// The lifetime of the scheduler is different when no pips match the filter. Historically we've had a bunch of
         /// crash bugs in this case. Make sure BuildXL doesn't crash.
@@ -79,7 +117,7 @@ namespace Test.BuildXL.EngineTests
 
             var outputDirectoryPath = Configuration.Layout.OutputDirectory.ToString(Context.PathTable);
             XAssert.IsTrue(File.Exists(Path.Combine(
-                outputDirectoryPath, 
+                outputDirectoryPath,
                 "vs",
                 Configuration.Ide.IsNewEnabled ? "srcNew" : "src",
                 Configuration.Ide.IsNewEnabled ? "srcNew.sln" : "src.sln")));
@@ -682,6 +720,68 @@ namespace Test.BuildXL.EngineTests
             DeleteEngineCache();
         }
 
+        [Fact]
+        public void MiniBuildCachedGraphIsStableWithModuleMounts()
+        {
+            const string MountName = "MyMountTest";
+            const string EnvVarName = "MyEnvTest";
+            const string SourceDir1 = "Src1";
+            const string SourceDir2 = "Src2";
+            const string ModuleName = nameof(MiniBuildCachedGraphWithMountAndEnvironmentChanges);
+
+            var sourceRootPath = Configuration.Layout.SourceDirectory.ToString(Context.PathTable);
+
+            // Set layout for mounts.
+            var sourceDir1 = Path.Combine(sourceRootPath, SourceDir1);
+            var sourceDir2 = Path.Combine(sourceRootPath, SourceDir2);
+
+            Directory.CreateDirectory(sourceDir1);
+            Directory.CreateDirectory(sourceDir2);
+            File.WriteAllText(Path.Combine(sourceDir1, "file.txt"), "Test1");
+            File.WriteAllText(Path.Combine(sourceDir2, "file.txt"), "Test2");
+
+            // Setup cache
+            ConfigureInMemoryCache(new TestCache());
+
+            // Setup spec and configuration. Add a module defined mount.
+            SetupPipsWithModuleMounts(
+                MountName, 
+                ModuleName, 
+                new Mount { 
+                    Name = PathAtom.Create(Context.StringTable, "module-mount"), 
+                    Path = AbsolutePath.Create(Context.PathTable, sourceDir2),
+                    IsReadable = true,
+                    TrackSourceFileChanges = true});
+
+            SetConfigForPipsWithMountAndEnvironmentAccess(MountName, I($"./{SourceDir1}"), ModuleName);
+
+            Configuration.Cache.CacheGraph = true;
+            Configuration.Cache.AllowFetchingCachedGraphFromContentCache = true;
+            Configuration.Cache.Incremental = true;
+            Configuration.Startup.Properties.Add(EnvVarName, "Env1");
+
+            RunEngine("First build");
+
+            AssertInformationalEventLogged(FrontEndEventId.FrontEndStartEvaluateValues);
+            AssertInformationalEventLogged(LogEventId.EndSerializingPipGraph);
+
+            RunEngine("Second build - graph should be retrieved from local state");
+
+            AssertInformationalEventLogged(FrontEndEventId.FrontEndStartEvaluateValues, count: 0);
+            AssertInformationalEventLogged(LogEventId.EndDeserializingEngineState);
+            AssertInformationalEventLogged(LogEventId.FetchedSerializedGraphFromCache, count: 0);
+
+            DeleteEngineCache();
+
+            RunEngine("Third build - graph should be retrieved from cache");
+
+            AssertInformationalEventLogged(FrontEndEventId.FrontEndStartEvaluateValues, count: 0);
+            AssertInformationalEventLogged(LogEventId.EndDeserializingEngineState);
+            AssertInformationalEventLogged(LogEventId.FetchedSerializedGraphFromCache);
+
+            DeleteEngineCache();
+        }
+
         /// <summary>
         /// This test shows the limitation of graph caching algorithm when a spec is no longer referenced
         /// during the build but gets modified.
@@ -1117,7 +1217,7 @@ export const writeFile = Transformer.writeAllLines(p`${{outputDirectory}}/write.
             AddModule(moduleName, ("spec.dsc", spec));
         }
 
-        private void SetupPipsWithMountAndEnvironmentAccess(string mountName, string environmentVarName, string moduleName)
+        private void SetupPipsWithMountAndEnvironmentAccess(string mountName, string environmentVarName, string moduleName, IMount[] moduleMounts = null)
         {
             var spec = I(
                 $@"
@@ -1131,7 +1231,23 @@ export const copyFile  = Transformer.copyFile(f`${{sourcePath}}/file.txt`, p`${{
 export const writeFile = Transformer.writeAllLines(p`${{outputDirectory}}/write.out`, [Environment.getStringValue('{environmentVarName}')]);
 ");
 
-            AddModule(moduleName, ("spec.dsc", spec));
+            AddModule(moduleName, ("spec.dsc", spec), moduleMounts: moduleMounts);
+        }
+
+        private void SetupPipsWithModuleMounts(string mountName, string moduleName, IMount moduleMount)
+        {
+            var spec = I(
+                $@"
+import {{Transformer}} from 'Sdk.Transformers';
+
+const outputDirectory = Context.getNewOutputDirectory('{moduleName}');
+const sourcePath1 = Context.getMount('{mountName}').path;
+const sourcePath2 = Context.getMount('{moduleMount.Name.ToString(Context.StringTable)}').path;
+export const copyFile1  = Transformer.copyFile(f`${{sourcePath1}}/file.txt`, p`${{outputDirectory}}/copy1.out`);
+export const copyFile2  = Transformer.copyFile(f`${{sourcePath2}}/file.txt`, p`${{outputDirectory}}/copy2.out`);
+");
+
+            AddModule(moduleName, ("spec.dsc", spec), moduleMounts: new[] { moduleMount });
         }
 
         private void SetConfigForPipsWithMountAndEnvironmentAccess(string mountName, string mountPath, string moduleName)

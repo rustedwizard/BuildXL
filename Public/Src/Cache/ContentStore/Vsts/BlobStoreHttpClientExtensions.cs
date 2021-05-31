@@ -11,10 +11,13 @@ using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using Microsoft.VisualStudio.Services.BlobStore.Common;
 using Microsoft.VisualStudio.Services.BlobStore.WebApi;
 using Microsoft.VisualStudio.Services.Content.Common;
+using VsoHash = Microsoft.VisualStudio.Services.BlobStore.Common.VsoHash;
+using BlobIdentifierWithBlocks = Microsoft.VisualStudio.Services.BlobStore.Common.BlobIdentifierWithBlocks;
 
 namespace BuildXL.Cache.ContentStore.Vsts
 {
@@ -27,7 +30,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
         ///     Alternative for UploadAndReferenceBlobAsync that uses WalkBlocksAsync instead of the synchronous WalkBlocks.
         ///     Also utilizes the AsyncHttpRetryHelper to mitigate transient exceptions.
         /// </summary>
-        public static async Task UploadAndReferenceBlobWithRetriesAsync(
+        public static Task UploadAndReferenceBlobWithRetriesAsync(
             this IBlobStoreHttpClient client,
             BlobIdentifier blobId,
             Stream stream,
@@ -38,7 +41,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
             Contract.Requires(stream != null);
 
             var attempt = 0;
-            await AsyncHttpRetryHelper.InvokeVoidAsync(
+            return AsyncHttpRetryHelper.InvokeVoidAsync(
                 async () =>
                 {
                     bool blobUploaded = false;
@@ -101,7 +104,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                 },
                 cancellationToken: cts,
                 continueOnCapturedContext: false,
-                context: context.Id.ToString());
+                context: context.TraceId);
         }
     }
 }

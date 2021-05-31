@@ -98,9 +98,7 @@ namespace BuildXL.FrontEnd.Sdk
             if (TryGetFrontEndFile(path, "dummyFrontEnd", out stream))
             {
                 var result = await FileContent.ReadFromAsync(stream);
-#pragma warning disable AsyncFixer02
                 stream?.Dispose();
-#pragma warning restore AsyncFixer02
 
                 return result;
             }
@@ -280,6 +278,20 @@ namespace BuildXL.FrontEnd.Sdk
             }
 
             return result;
+        }
+
+        /// <inheritdoc/>
+        public override bool CompleteMountInitialization() => true;
+
+        /// <inheritdoc/>
+        public override void AddResolvedModuleDefinedMount(IMount mount, LocationData? mountLocation = null)
+        {
+            if (!mount.Name.IsValid)
+            {
+                throw new InvalidOperationException("Mount has invalid name");
+            }
+
+            m_customMountsTable.Add(mount.Name.ToString(m_pathTable.StringTable), mount);
         }
     }
 }

@@ -5,7 +5,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Extensions;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
@@ -18,16 +17,15 @@ using BuildXL.Cache.Monitor.App.Rules;
 using BuildXL.Cache.Monitor.App.Rules.Autoscaling;
 using BuildXL.Cache.Monitor.App.Rules.Kusto;
 using BuildXL.Cache.Monitor.App.Scheduling;
-using BuildXL.Cache.Monitor.Library.Client;
+using BuildXL.Cache.Monitor.Library.Az;
+using BuildXL.Cache.Monitor.Library.IcM;
 using BuildXL.Cache.Monitor.Library.Notifications;
 using BuildXL.Cache.Monitor.Library.Rules.Autoscaling;
 using BuildXL.Cache.Monitor.Library.Rules.Kusto;
 using BuildXL.Cache.Monitor.Library.Scheduling;
+using Kusto.Cloud.Platform.Utils;
 using Kusto.Data.Common;
 using Kusto.Ingest;
-using Microsoft.Azure.Management.Fluent;
-using Microsoft.Azure.Management.Monitor;
-using Microsoft.Azure.Management.Redis.Fluent;
 
 namespace BuildXL.Cache.Monitor.App
 {
@@ -35,22 +33,24 @@ namespace BuildXL.Cache.Monitor.App
     {
         public class Configuration
         {
-            public string KustoClusterUrl { get; set; } = Constants.DefaultKustoClusterUrl;
+            public KustoCredentials KustoIngestionCredentials { get; set; } = Constants.CloudBuildProdKustoCredentials;
 
-            public string KustoIngestionClusterUrl { get; set; } = Constants.DefaultKustoClusterUrl;
+            public string KeyVaultUrl { get; set; } = Constants.DefaultKeyVaultUrl;
 
-            public string AzureTenantId { get; set; } = Constants.DefaultAzureTenantId;
+            public AzureActiveDirectoryCredentials KeyVaultCredentials { get; set; } = Constants.PMETenantCredentials;
 
-            public string AzureAppId { get; set; } = Constants.DefaultAzureAppId;
+            public string IcmUrl { get; set; } = Constants.DefaultIcmUrl;
 
-            public string AzureAppKey { get; set; } = string.Empty;
+            public Guid IcmConnectorId { get; set; } = Constants.DefaultIcmConnectorId;
+
+            public string IcmCertificateName { get; set; } = Constants.DefaultIcmCertificateName;
 
             public bool ReadOnly { get; set; } = true;
 
             /// <summary>
             /// Which environments to monitor
             /// </summary>
-            public IReadOnlyDictionary<CloudBuildEnvironment, EnvironmentConfiguration> Environments { get; set; } = Constants.DefaultEnvironments;
+            public IReadOnlyDictionary<MonitorEnvironment, EnvironmentConfiguration> Environments { get; set; } = Constants.DefaultEnvironments;
 
             public KustoNotifier<Notification>.Configuration KustoNotifier { get; set; } = new KustoNotifier<Notification>.Configuration
             {
@@ -95,10 +95,10 @@ namespace BuildXL.Cache.Monitor.App
         private readonly INotifier<Notification> _alertNotifier;
         private readonly INotifier<RuleScheduler.LogEntry> _schedulerLogWriter;
 
-        private readonly IReadOnlyDictionary<CloudBuildEnvironment, EnvironmentResources> _environmentResources;
+        private readonly IReadOnlyDictionary<MonitorEnvironment, EnvironmentResources> _environmentResources;
 
         private readonly IKustoIngestClient _kustoIngestClient;
-        private readonly IKustoClient _kustoClient;
+        private readonly IIcmClient _icmClient;
 
         private static Tracer Tracer { get; } = new Tracer(nameof(Monitor));
 
@@ -106,30 +106,59 @@ namespace BuildXL.Cache.Monitor.App
         public static async Task<Result<Monitor>> CreateAsync(OperationContext context, Configuration configuration)
         {
             Tracer.Info(context, "Creating Kusto ingest client");
-            var kustoIngestClient = ExternalDependenciesFactory.CreateKustoIngestClient(
-                configuration.KustoIngestionClusterUrl,
-                configuration.AzureTenantId,
-                configuration.AzureAppId,
-                configuration.AzureAppKey).ThrowIfFailure();
+            var kustoIngestClient = ExternalDependenciesFactory.CreateKustoIngestClient(configuration.KustoIngestionCredentials).ThrowIfFailure();
 
-            Tracer.Info(context, "Creating Kusto query client");
-            var kustoClient = ExternalDependenciesFactory.CreateKustoQueryClient(
-                configuration.KustoClusterUrl,
-                configuration.AzureTenantId,
-                configuration.AzureAppId,
-                configuration.AzureAppKey).ThrowIfFailure();
+            IIcmClient icmClient;
+            if (!configuration.ReadOnly)
+            {
+                Tracer.Info(context, "Creating KeyVault client");
+                var keyVaultClient = new KeyVaultClient(
+                    configuration.KeyVaultUrl,
+                    configuration.KeyVaultCredentials.TenantId,
+                    configuration.KeyVaultCredentials.AppId,
+                    configuration.KeyVaultCredentials.AppKey,
+                    SystemClock.Instance,
+                    Constants.IcmCertificateCacheTimeToLive);
 
-            var environmentResources = new Dictionary<CloudBuildEnvironment, EnvironmentResources>();
+                Tracer.Info(context, "Creating IcM client");
+                icmClient = new IcmClient(
+                    keyVaultClient,
+                    configuration.IcmUrl,
+                    configuration.IcmConnectorId,
+                    configuration.IcmCertificateName,
+                    SystemClock.Instance);
+            }
+            else
+            {
+                Tracer.Info(context, "Using mock ICM client");
+                icmClient = new MockIcmClient();
+            }
+
+            var environmentResources = await CreateEnvironmentResourcesAsync(context, configuration.Environments);
+
+            context.Token.ThrowIfCancellationRequested();
+            return new Monitor(
+                configuration,
+                kustoIngestClient,
+                icmClient,
+                SystemClock.Instance,
+                environmentResources,
+                context.TracingContext.Logger);
+        }
+
+        internal static async Task<Dictionary<MonitorEnvironment, EnvironmentResources>> CreateEnvironmentResourcesAsync(OperationContext context, IReadOnlyDictionary<MonitorEnvironment, EnvironmentConfiguration> configurations)
+        {
+            var environmentResources = new Dictionary<MonitorEnvironment, EnvironmentResources>();
 
             // This does a bunch of Azure API calls, which are really slow. Making them a bit faster by doing them
             // concurrently.
-            await configuration.Environments.ParallelForEachAsync(async (keyValuePair) =>
+            await configurations.ParallelForEachAsync(async (keyValuePair) =>
             {
                 var environment = keyValuePair.Key;
                 var environmentConfiguration = keyValuePair.Value;
 
                 Tracer.Info(context, $"Loading resources for environment `{environment}`");
-                var resources = await CreateEnvironmentResourcesAsync(context, configuration, environmentConfiguration);
+                var resources = await CreateEnvironmentResourcesAsync(context, environmentConfiguration);
 
                 lock (environmentResources)
                 {
@@ -137,23 +166,13 @@ namespace BuildXL.Cache.Monitor.App
                 }
             });
 
-            context.Token.ThrowIfCancellationRequested();
-            return new Monitor(configuration, kustoIngestClient, kustoClient, SystemClock.Instance, environmentResources, context.TracingContext.Logger);
+            return environmentResources;
         }
 
-        private static async Task<EnvironmentResources> CreateEnvironmentResourcesAsync(OperationContext context, Configuration configuration, EnvironmentConfiguration environmentConfiguration)
+        private static async Task<EnvironmentResources> CreateEnvironmentResourcesAsync(OperationContext context, EnvironmentConfiguration configuration)
         {
-            var azure = ExternalDependenciesFactory.CreateAzureClient(
-                configuration.AzureTenantId,
-                environmentConfiguration.AzureSubscriptionId,
-                configuration.AzureAppId,
-                configuration.AzureAppKey).ThrowIfFailure();
-
-            var monitorManagementClient = await ExternalDependenciesFactory.CreateAzureMetricsClientAsync(
-                configuration.AzureTenantId,
-                environmentConfiguration.AzureSubscriptionId,
-                configuration.AzureAppId,
-                configuration.AzureAppKey).ThrowIfFailureAsync();
+            var azure = ExternalDependenciesFactory.CreateAzureClient(configuration.AzureCredentials).ThrowIfFailure();
+            var monitorManagementClient = await ExternalDependenciesFactory.CreateAzureMetricsClientAsync(configuration.AzureCredentials).ThrowIfFailureAsync();
 
             var redisCaches =
                 (await azure
@@ -161,18 +180,20 @@ namespace BuildXL.Cache.Monitor.App
                     .ListAsync(cancellationToken: context.Token))
                 .ToDictionary(cache => cache.Name, cache => cache);
 
+            var kustoClient = ExternalDependenciesFactory.CreateKustoQueryClient(configuration.KustoCredentials).ThrowIfFailure();
+
             context.Token.ThrowIfCancellationRequested();
-            return new EnvironmentResources(azure, monitorManagementClient, redisCaches);
+            return new EnvironmentResources(azure, monitorManagementClient, redisCaches, kustoClient);
         }
 
-        private Monitor(Configuration configuration, IKustoIngestClient kustoIngestClient, IKustoClient kustoClient, IClock clock, IReadOnlyDictionary<CloudBuildEnvironment, EnvironmentResources> environmentResources, ILogger logger)
+        private Monitor(Configuration configuration, IKustoIngestClient kustoIngestClient, IIcmClient icmClient, IClock clock, IReadOnlyDictionary<MonitorEnvironment, EnvironmentResources> environmentResources, ILogger logger)
         {
             _configuration = configuration;
 
             _clock = clock;
             _logger = logger;
             _kustoIngestClient = kustoIngestClient;
-            _kustoClient = kustoClient;
+            _icmClient = icmClient;
             _environmentResources = environmentResources;
 
             if (configuration.ReadOnly)
@@ -188,22 +209,6 @@ namespace BuildXL.Cache.Monitor.App
 
             _scheduler = new RuleScheduler(_configuration.Scheduler, _logger, _clock, _schedulerLogWriter);
         }
-
-        private class EnvironmentResources
-        {
-            public IAzure Azure { get; }
-
-            public IMonitorManagementClient MonitorManagementClient { get; }
-
-            public IReadOnlyDictionary<string, IRedisCache> RedisCaches { get; }
-
-            public EnvironmentResources(IAzure azure, IMonitorManagementClient monitorManagementClient, IReadOnlyDictionary<string, IRedisCache> redisCaches)
-            {
-                Azure = azure;
-                MonitorManagementClient = monitorManagementClient;
-                RedisCaches = redisCaches;
-            }
-        }
         #endregion
 
         public async Task RunAsync(OperationContext context, Action? onWatchlistChange = null)
@@ -212,7 +217,12 @@ namespace BuildXL.Cache.Monitor.App
 
             // The watchlist is essentially immutable on every run. The reason is that a change to the Watchlist
             // likely triggers a change in the scheduled rules, so we need to regenerate the entire schedule.
-            var watchlist = await Watchlist.CreateAsync(_logger, _kustoClient, _configuration.Environments);
+            var watchlist = await Watchlist.CreateAsync(
+                _logger,
+                _configuration.Environments,
+                _environmentResources.ToDictionary(
+                    kvp => kvp.Key,
+                    kvp => kvp.Value.KustoQueryClient));
 
             Tracer.Info(context, "Creating rules schedule");
             CreateSchedule(watchlist);
@@ -243,7 +253,6 @@ namespace BuildXL.Cache.Monitor.App
         /// </summary>
         private void CreateSchedule(Watchlist watchlist)
         {
-            // TODO: single query for all stamps in rules that support it. This should significantly improve performance.
             // TODO: per-stamp configuration (some stamps are more important than others, query frequency should reflect that)
             // TODO: query weight (how much does it cost). We should adapt scheduling policy to have lighter queries prioritize earlier than the others.
             // TODO: stamp configuration knowledge. Stamp configuration affects what our thresholds should be. We should reflect that here.
@@ -306,6 +315,16 @@ namespace BuildXL.Cache.Monitor.App
                 return Analysis.Utilities.Yield(new Instantiation()
                 {
                     Rule = new BuildFailuresRule(configuration),
+                    PollingPeriod = TimeSpan.FromMinutes(45),
+                });
+            }, watchlist);
+
+            OncePerEnvironment(arguments =>
+            {
+                var configuration = new MostRecentBuildsFailureRateRule.Configuration(arguments.BaseConfiguration);
+                return Analysis.Utilities.Yield(new Instantiation()
+                {
+                    Rule = new MostRecentBuildsFailureRateRule(configuration),
                     PollingPeriod = TimeSpan.FromMinutes(45),
                 });
             }, watchlist);
@@ -436,6 +455,28 @@ namespace BuildXL.Cache.Monitor.App
                 });
             }, watchlist);
 
+            OncePerEnvironment(arguments =>
+            {
+                var configuration = new MachineReimagesRule.Configuration(arguments.BaseConfiguration);
+
+                return Analysis.Utilities.Yield(new Instantiation()
+                {
+                    Rule = new MachineReimagesRule(configuration),
+                    PollingPeriod = TimeSpan.FromMinutes(30),
+                });
+            }, watchlist);
+
+            OncePerEnvironment(arguments =>
+            {
+                var configuration = new DiskCorruptionRule.Configuration(arguments.BaseConfiguration);
+
+                return Analysis.Utilities.Yield(new Instantiation()
+                {
+                    Rule = new DiskCorruptionRule(configuration),
+                    PollingPeriod = TimeSpan.FromMinutes(30),
+                });
+            }, watchlist);
+
             OncePerStamp(GenerateRedisAutoscalingRules, watchlist);
         }
 
@@ -458,7 +499,8 @@ namespace BuildXL.Cache.Monitor.App
                 autoscalingAgentConfiguration.MaximumClusterMemoryAllowedMb = arguments.DynamicStampProperties.RedisAutoscalingMaximumClusterMemoryAllowedMb;
             }
 
-            var redisAutoscalingAgent = new RedisAutoscalingAgent(autoscalingAgentConfiguration, arguments.EnvironmentResources.MonitorManagementClient);
+            var azureMetricsClient = new AzureMetricsClient(arguments.EnvironmentResources.MonitorManagementClient);
+            var redisAutoscalingAgent = new RedisAutoscalingAgent(autoscalingAgentConfiguration, azureMetricsClient);
             var configuration = new RedisAutoscalingRule.Configuration(arguments.BaseConfiguration);
 
             var primaryRedisInstance = RedisInstance
@@ -489,12 +531,16 @@ namespace BuildXL.Cache.Monitor.App
         {
             foreach (var (stampId, properties) in watchlist.Entries)
             {
+                var environmentConfiguration = _configuration.Environments[stampId.Environment];
+                var resources = _environmentResources[stampId.Environment];
+
                 var configuration = new SingleStampRuleConfiguration(
                     _clock,
                     _logger,
                     _alertNotifier,
-                    _kustoClient,
-                    _configuration.Environments[stampId.Environment].KustoDatabaseName,
+                    resources.KustoQueryClient,
+                    _icmClient,
+                    environmentConfiguration.KustoDatabaseName,
                     properties.CacheTableName,
                     stampId);
 
@@ -503,7 +549,7 @@ namespace BuildXL.Cache.Monitor.App
                     StampId = stampId,
                     DynamicStampProperties = properties,
                     BaseConfiguration = configuration,
-                    EnvironmentResources = _environmentResources[stampId.Environment],
+                    EnvironmentResources = resources,
                 };
 
                 foreach (var rule in generator(request))
@@ -519,16 +565,25 @@ namespace BuildXL.Cache.Monitor.App
         /// </summary>
         private void OncePerEnvironment(Func<MultiStampRuleArguments, IEnumerable<Instantiation>> generator, Watchlist watchlist)
         {
-            var tableNames = watchlist.Entries.Select(kvp => (kvp.Key.Environment, kvp.Value.CacheTableName)).Distinct()
-                .ToDictionary(keySelector: pair => pair.Environment, elementSelector: pair => pair.CacheTableName);
+            var tableNames =
+                watchlist
+                    .Entries
+                    .Select(kvp => (kvp.Key.Environment, kvp.Value.CacheTableName))
+                    .Distinct()
+                    .ToDictionary(
+                        keySelector: pair => pair.Environment,
+                        elementSelector: pair => pair.CacheTableName);
 
             foreach (var kvp in tableNames)
             {
+                var resources = _environmentResources[kvp.Key];
+
                 var configuration = new MultiStampRuleConfiguration(
                     _clock,
                     _logger,
                     _alertNotifier,
-                    _kustoClient,
+                    resources.KustoQueryClient,
+                    _icmClient,
                     _configuration.Environments[kvp.Key].KustoDatabaseName,
                     kvp.Value,
                     kvp.Key,
@@ -537,7 +592,7 @@ namespace BuildXL.Cache.Monitor.App
                 var request = new MultiStampRuleArguments
                 {
                     BaseConfiguration = configuration,
-                    EnvironmentResources = _environmentResources[kvp.Key],
+                    EnvironmentResources = resources,
                 };
 
                 foreach (var rule in generator(request))
@@ -602,7 +657,11 @@ namespace BuildXL.Cache.Monitor.App
                     }
 
                     _kustoIngestClient?.Dispose();
-                    _kustoClient?.Dispose();
+
+                    foreach (var (_, resources) in _environmentResources)
+                    {
+                        resources.Dispose();
+                    }
                 }
 
                 _disposedValue = true;

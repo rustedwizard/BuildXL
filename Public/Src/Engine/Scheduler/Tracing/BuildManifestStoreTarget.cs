@@ -18,6 +18,11 @@ namespace BuildXL.Scheduler.Tracing
         public override bool CanHandleWorkerEvents => true;
 
         /// <summary>
+        /// Handle the events from workers
+        /// </summary>
+        public override IExecutionLogTarget CreateWorkerTarget(uint workerId) => this;
+
+        /// <summary>
         /// Constructor.
         /// </summary>
         public BuildManifestStoreTarget(BuildManifestGenerator buildManifestGenerator)
@@ -29,7 +34,7 @@ namespace BuildXL.Scheduler.Tracing
         /// <inheritdoc/>
         public override void RecordFileForBuildManifest(RecordFileForBuildManifestEventData data)
         {
-            m_buildManifestGenerator.RecordFileForBuildManifest(data.DropName, data.RelativePath, data.AzureArtifactsHash, data.BuildManifestHash);
+            m_buildManifestGenerator.RecordFileForBuildManifest(data.Records);
         }
     }
 }

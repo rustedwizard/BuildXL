@@ -65,12 +65,12 @@ namespace BuildXL.Launcher.Server
         /// <summary>
         /// Map for getting expirable secrets by name, kind, and time to live
         /// </summary>
-        private VolatileMap<(string secretName, SecretKind kind), AsyncLazy<string>> CachedSecrets { get; }
+        private VolatileMap<(ISecretsProvider secretsProvider, string secretName, SecretKind kind), AsyncLazy<string>> CachedSecrets { get; }
 
         /// <summary>
         /// Map from storage account secret name to target storage account
         /// </summary>
-        private VolatileMap<string, AsyncLazy<CentralStorage>> StorageAccountsBySecretName { get; }
+        private VolatileMap<string, AsyncLazy<CentralStorage>> StorageAccountsBySecret { get; }
 
         private VolatileMap<string, Lazy<ProxyManager>> ProxyManagers { get; }
 
@@ -97,12 +97,12 @@ namespace BuildXL.Launcher.Server
             DeploymentRoot = deploymentRoot;
             Clock = clock;
             SecretsProviderFactory = secretsProviderFactory;
-            StorageAccountsBySecretName = new VolatileMap<string, AsyncLazy<CentralStorage>>(clock);
+            StorageAccountsBySecret = new VolatileMap<string, AsyncLazy<CentralStorage>>(clock);
             SecretsProvidersByUri = new VolatileMap<string, AsyncLazy<ISecretsProvider>>(clock);
             SasUrls = new VolatileMap<(string storageName, string hash), AsyncLazy<DownloadInfo>>(clock);
             SasUrlsByToken = new VolatileMap<string, string>(clock);
             CachedDeploymentInfo = new VolatileMap<string, Lazy<object>>(clock);
-            CachedSecrets = new VolatileMap<(string secretName, SecretKind kind), AsyncLazy<string>>(clock);
+            CachedSecrets = new VolatileMap<(ISecretsProvider, string, SecretKind), AsyncLazy<string>>(clock);
             ProxyManagers = new VolatileMap<string, Lazy<ProxyManager>>(clock);
 
             UploadQueue = new ActionQueue(uploadConcurrency);
@@ -119,17 +119,17 @@ namespace BuildXL.Launcher.Server
                 Tracer,
                 async () =>
                 {
-                    context.TraceDebug("IsAuthorizedAsync: Reading deployment configuration");
+                    Tracer.Debug(context, "IsAuthorizedAsync: Reading deployment configuration");
                     var deployConfig = ReadDeploymentConfiguration(parameters, out _, out var contentId);
                     if (!deployConfig.AuthorizationSecretNames.Contains(parameters.AuthorizationSecretName))
                     {
                         throw new UnauthorizedAccessException($"Secret names do not match: Expected='{string.Join(", ", deployConfig.AuthorizationSecretNames)}' Actual='{parameters.AuthorizationSecretName}'");
                     }
 
-                    context.TraceDebug("IsAuthorizedAsync: Loading secrets provider");
+                    Tracer.Debug(context, "IsAuthorizedAsync: Loading secrets provider");
                     var secretsProvider = await GetSecretsProviderAsync(context, deployConfig.KeyVaultUri);
 
-                    context.TraceDebug("IsAuthorizedAsync: Getting secret");
+                    Tracer.Debug(context, "IsAuthorizedAsync: Getting secret");
                     var secret = await GetSecretAsync(context, secretsProvider, new SecretConfiguration()
                     {
                         Name = parameters.AuthorizationSecretName,
@@ -137,7 +137,7 @@ namespace BuildXL.Launcher.Server
                         Kind = SecretKind.PlainText
                     });
 
-                    context.TraceDebug("IsAuthorizedAsync: Comparing secret");
+                    Tracer.Debug(context, "IsAuthorizedAsync: Comparing secret");
                     if (secret != parameters.AuthorizationSecret)
                     {
                         throw new UnauthorizedAccessException($"Secret values do not match for secret name: '{parameters.AuthorizationSecretName}'");
@@ -153,15 +153,15 @@ namespace BuildXL.Launcher.Server
 
         private Task<ISecretsProvider> GetSecretsProviderAsync(OperationContext context, string keyVaultUri)
         {
-           return GetOrAddExpirableAsync<string, ISecretsProvider>(
-                SecretsProvidersByUri,
-                keyVaultUri,
-                TimeSpan.FromHours(2),
-                () => context.PerformOperationAsync(
-                    Tracer,
-                    () => Task.FromResult(Result.Success(SecretsProviderFactory.Invoke(keyVaultUri))),
-                    extraStartMessage: keyVaultUri,
-                    extraEndMessage: r => keyVaultUri).ThrowIfFailureAsync());
+            return GetOrAddExpirableAsync<string, ISecretsProvider>(
+                 SecretsProvidersByUri,
+                 keyVaultUri,
+                 TimeSpan.FromHours(2),
+                 () => context.PerformOperationAsync(
+                     Tracer,
+                     () => Task.FromResult(Result.Success(SecretsProviderFactory.Invoke(keyVaultUri))),
+                     extraStartMessage: keyVaultUri,
+                     extraEndMessage: r => keyVaultUri).ThrowIfFailureAsync());
         }
 
         /// <summary>
@@ -216,7 +216,7 @@ namespace BuildXL.Launcher.Server
                         resultManifest.ContentId += $"_{secretsContentId}";
                     }
 
-                    var storage = await LoadStorageAsync(context, secretsProvider, deployConfig.AzureStorageSecretInfo);
+                    var storage = await LoadStorageAsync(context, secretsProvider, deployConfig.AzureStorageSecretInfo, deployConfig.AzureFileShareName);
 
                     var proxyBaseAddress = GetProxyBaseAddress(context, () => (deployConfig, deploymentManifest), parameters);
 
@@ -335,11 +335,16 @@ namespace BuildXL.Launcher.Server
                 messageFactory: r => $"{parameters} BaseAddress={r.GetValueOrDefault()}").Value;
         }
 
-        private Task<string> GetSecretAsync(OperationContext context, ISecretsProvider secretsProvider, SecretConfiguration secretInfo)
+        private async Task<string> GetSecretAsync(OperationContext context, ISecretsProvider secretsProvider, SecretConfiguration secretInfo)
         {
-            return GetOrAddExpirableAsync(
+            if (secretInfo.OverrideKeyVaultUri != null)
+            {
+                secretsProvider = await GetSecretsProviderAsync(context, secretInfo.OverrideKeyVaultUri);
+            }
+
+            return await GetOrAddExpirableAsync(
                 CachedSecrets,
-                (secretInfo.Name, secretInfo.Kind),
+                (secretsProvider, secretInfo.Name, secretInfo.Kind),
                 secretInfo.TimeToLive,
                 () =>
                 {
@@ -369,22 +374,36 @@ namespace BuildXL.Launcher.Server
                 });
         }
 
-        private Task<CentralStorage> LoadStorageAsync(OperationContext context, ISecretsProvider secretsProvider, SecretConfiguration storageSecretInfo)
+        private async Task<CentralStorage> LoadStorageAsync(OperationContext context, ISecretsProvider secretsProvider, SecretConfiguration storageSecretInfo, string fileShare)
         {
-            return GetOrAddExpirableAsync<string, CentralStorage>(
-                StorageAccountsBySecretName,
-                storageSecretInfo.Name,
+            var secretValue = await GetSecretAsync(context, secretsProvider, storageSecretInfo);
+
+            return await GetOrAddExpirableAsync<string, CentralStorage>(
+                StorageAccountsBySecret,
+                secretValue,
                 storageSecretInfo.TimeToLive,
                 async () =>
                 {
-                    var secretValue = await GetSecretAsync(context, secretsProvider, storageSecretInfo);
-
                     var credentials = new AzureBlobStorageCredentials(new PlainTextSecret(secretValue));
 
-                    CentralStorage centralStorage = OverrideCreateCentralStorage?.Invoke((storageSecretInfo.Name, credentials))
-                        ?? new BlobCentralStorage(new BlobCentralStoreConfiguration(credentials,
-                            containerName: "deploymentfiles",
-                            checkpointsKey: "N/A"));
+                    CentralStorage centralStorage;
+
+                    if (OverrideCreateCentralStorage != null)
+                    {
+                        centralStorage = OverrideCreateCentralStorage.Invoke((storageSecretInfo.Name, credentials));
+                    }
+                    else if (!string.IsNullOrEmpty(fileShare))
+                    {
+                        centralStorage = new AzureFilesCentralStorage(new BlobCentralStoreConfiguration(credentials,
+                                containerName: fileShare,
+                                checkpointsKey: "N/A"));
+                    }
+                    else
+                    {
+                        centralStorage = new BlobCentralStorage(new BlobCentralStoreConfiguration(credentials,
+                                 containerName: "deploymentfiles",
+                                 checkpointsKey: "N/A"));
+                    }
 
                     await centralStorage.StartupAsync(context).ThrowIfFailure();
 

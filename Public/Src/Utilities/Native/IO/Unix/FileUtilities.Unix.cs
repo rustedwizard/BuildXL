@@ -22,6 +22,12 @@ namespace BuildXL.Native.IO.Unix
     public sealed class FileUtilitiesUnix : IFileUtilities
     {
         /// <summary>
+        /// The optimal buffer size for copy throughput and keeping system call overhead minimal:
+        /// see: https://eklitzke.org/efficient-file-copying-on-linux#:~:text=The%20file%20includes%20a%20cryptic,calls%20need%20to%20be%20made.
+        /// </summary>
+        private static readonly long s_copyBufferSizeMax = 512 * 1024;
+
+        /// <summary>
         /// A concrete native FileSystem implementation based on Unix APIs
         /// </summary>
         private readonly FileSystemUnix m_fileSystem;
@@ -50,9 +56,10 @@ namespace BuildXL.Native.IO.Unix
             bool deleteRootDirectory = false,
             Func<string, bool> shouldDelete = null,
             ITempCleaner tempDirectoryCleaner = null,
+            bool bestEffort = false,
             CancellationToken? cancellationToken = default)
         {
-            DeleteDirectoryContentsInternal(path, deleteRootDirectory, shouldDelete, tempDirectoryCleaner, cancellationToken);
+            DeleteDirectoryContentsInternal(path, deleteRootDirectory, shouldDelete, tempDirectoryCleaner, bestEffort, cancellationToken);
         }
 
         private int DeleteDirectoryContentsInternal(
@@ -60,6 +67,7 @@ namespace BuildXL.Native.IO.Unix
             bool deleteRootDirectory,
             Func<string, bool> shouldDelete,
             ITempCleaner tempDirectoryCleaner,
+            bool bestEffort,
             CancellationToken? cancellationToken)
         {
             int remainingChildCount = 0;
@@ -87,6 +95,7 @@ namespace BuildXL.Native.IO.Unix
                             deleteRootDirectory: true,
                             shouldDelete: shouldDelete,
                             tempDirectoryCleaner: tempDirectoryCleaner,
+                            bestEffort: bestEffort,
                             cancellationToken: cancellationToken);
 
                         if (subDirectoryCount > 0)
@@ -99,7 +108,7 @@ namespace BuildXL.Native.IO.Unix
                         if (shouldDelete(childPath))
                         {
                             // This method already has retry logic, so no need to do retry in DeleteFile
-                            DeleteFile(childPath, waitUntilDeletionFinished: true, tempDirectoryCleaner: tempDirectoryCleaner);
+                            DeleteFile(childPath, retryOnFailure: !bestEffort, tempDirectoryCleaner: tempDirectoryCleaner);
                         }
                         else
                         {
@@ -119,7 +128,8 @@ namespace BuildXL.Native.IO.Unix
 
                         // Only reached if there are no exceptions
                         return true;
-                    });
+                    },
+                    numberOfAttempts: bestEffort ? 1 : Helpers.DefaultNumberOfAttempts);
 
                 if (!success && Directory.Exists(path))
                 {
@@ -137,12 +147,12 @@ namespace BuildXL.Native.IO.Unix
         /// <inheritdoc />
         public Possible<string, DeletionFailure> TryDeleteFile(
             string path,
-            bool waitUntilDeletionFinished = true,
+            bool retryOnFailure = true,
             ITempCleaner tempDirectoryCleaner = null)
         {
             try
             {
-                DeleteFile(path, waitUntilDeletionFinished, tempDirectoryCleaner);
+                DeleteFile(path, retryOnFailure, tempDirectoryCleaner);
                 return path;
             }
             catch (BuildXLException ex)
@@ -161,7 +171,7 @@ namespace BuildXL.Native.IO.Unix
         /// <inheritdoc />
         public void DeleteFile(
             string path,
-            bool waitUntilDeletionFinished = true,
+            bool retryOnFailure = true,
             ITempCleaner tempDirectoryCleaner = null)
         {
             Contract.Requires(!string.IsNullOrEmpty(path));
@@ -187,7 +197,7 @@ namespace BuildXL.Native.IO.Unix
                     }
                 };
 
-            if (waitUntilDeletionFinished)
+            if (retryOnFailure)
             {
                 successfullyDeletedFile = Helpers.RetryOnFailure(
                     attempt =>
@@ -479,6 +489,95 @@ namespace BuildXL.Native.IO.Unix
         }
 
         /// <inheritdoc />
+        public void InKernelFileCopy(string source, string destination, bool followSymlink)
+        {
+            SafeFileHandle sourceHandle;
+            OpenFileResult openResult = m_fileSystem.TryCreateOrOpenFile(
+                source,
+                FileDesiredAccess.GenericRead,
+                FileShare.Read | FileShare.Delete,
+                FileMode.Open,
+                followSymlink ? FileFlagsAndAttributes.FileFlagOpenReparsePoint : FileFlagsAndAttributes.None,
+                out sourceHandle);
+
+            if (!openResult.Succeeded)
+            {
+                throw new NativeWin32Exception(Marshal.GetLastWin32Error(), I($"Failed to open source file '{source}' in {nameof(InKernelFileCopy)}"));
+            }
+
+            using (sourceHandle)
+            {
+                // Ignore return of PosixFadvise(), the file handle was opened successfully above
+                // and the advice hint is a less important optimization.
+                Interop.Unix.IO.PosixFadvise(sourceHandle, 0, 0, AdviceHint.POSIX_FADV_SEQUENTIAL);
+
+                SafeFileHandle destinationHandle;
+                openResult = m_fileSystem.TryCreateOrOpenFile(
+                    destination,
+                    FileDesiredAccess.GenericRead | FileDesiredAccess.GenericWrite,
+                    FileShare.Read | FileShare.Write | FileShare.Delete,
+                    FileMode.Create,
+                    FileFlagsAndAttributes.None,
+                    out destinationHandle);
+
+                if (!openResult.Succeeded)
+                {
+                    throw new NativeWin32Exception(Marshal.GetLastWin32Error(), I($"Failed to open destination file '{destination}' in {nameof(InKernelFileCopy)}"));
+                }
+
+                using (destinationHandle)
+                {
+                    var statBuffer = new StatBuffer();
+                    if (StatFileDescriptor(sourceHandle, ref statBuffer) != 0)
+                    {
+                        throw new NativeWin32Exception(Marshal.GetLastWin32Error(), I($"Failed to stat source file '{source}' for size query in {nameof(InKernelFileCopy)}"));
+                    }
+
+                    var length = statBuffer.Size;
+                    long bytesCopied = 0;
+                    int lastError = 0;
+
+                    do
+                    {
+                        bytesCopied = Interop.Unix.IO.CopyFileRange(sourceHandle, IntPtr.Zero, destinationHandle, IntPtr.Zero, s_copyBufferSizeMax);
+                        if (bytesCopied == -1)
+                        {
+                            lastError = Marshal.GetLastWin32Error();
+                            break;
+                        }
+
+                        length -= bytesCopied;
+                    } while (length > 0 && bytesCopied > 0);
+
+                    // copy_file_range() is available in kernel versions > 4.5, let's try sendfile() if copy_file_range() is not implemented
+                    if (lastError == (int)Errno.ENOSYS)
+                    {
+                        length = statBuffer.Size;
+                        bytesCopied = 0;
+                        lastError = 0;
+
+                        do
+                        {
+                            bytesCopied = Interop.Unix.IO.SendFile(sourceHandle, destinationHandle, IntPtr.Zero, s_copyBufferSizeMax);
+                            if (bytesCopied == -1)
+                            {
+                                lastError = Marshal.GetLastWin32Error();
+                                break;
+                            }
+
+                            length -= bytesCopied;
+                        } while (length > 0 && bytesCopied > 0);
+                    }
+
+                    if (lastError != 0)
+                    {
+                        throw new NativeWin32Exception(lastError, I($"{nameof(InKernelFileCopy)} failed  copying '{source}' to '{destination}' with error code: {lastError}"));
+                    }
+                }
+            }
+        }
+
+        /// <inheritdoc />
         public TResult UsingFileHandleAndFileLength<TResult>(
             string path,
             FileDesiredAccess desiredAccess,
@@ -527,7 +626,7 @@ namespace BuildXL.Native.IO.Unix
             // a new inode and thus have a different identity from the old one (on EXT4 filesystems, a simple
             // "rm file && touch file" is very likely to result in 'file' getting the same inode as it had before)
             var tempFile = FileUtilities.GetTempFileName();
-            DeleteFile(path, waitUntilDeletionFinished: true);
+            DeleteFile(path, retryOnFailure: true);
             MoveFileAsync(tempFile, path).GetAwaiter().GetResult();
 
             return openAsync

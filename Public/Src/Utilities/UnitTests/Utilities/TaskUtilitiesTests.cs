@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +15,18 @@ namespace Test.BuildXL.Utilities
 {
     public sealed class TaskUtilitiesTests
     {
+        [Fact]
+        public Task ToAwaitableCompletesWhenCanceled()
+        {
+            var cts = new CancellationTokenSource();
+
+            using var awaitable = cts.Token.ToAwaitable();
+            Assert.False(awaitable.CompletionTask.IsCompleted);
+
+            cts.Cancel();
+            return awaitable.CompletionTask;
+        }
+
         [Fact]
         public async Task WhenAllWithCancellationShouldNotCauseUnobservedTaskExceptions()
         {
@@ -91,17 +102,15 @@ namespace Test.BuildXL.Utilities
             catch (OperationCanceledException) { }
         }
 
-        [Theory]
-        [InlineData(true)]
-        [InlineData(true)]
-        public async Task SafeWhenAllPropagatesBothExceptions(bool wrapSingleException)
+        [Fact]
+        public async Task SafeWhenAllPropagatesBothExceptions()
         {
             var task1 = Task.Run(() => throw new ApplicationException("1"));
             var task2 = Task.Run(() => throw new ApplicationException("2"));
 
             try
             {
-                await TaskUtilities.SafeWhenAll(new[] {task1, task2}, wrapSingleException);
+                await TaskUtilities.SafeWhenAll(new[] { task1, task2 });
                 Assert.True(false, "The method should fail");
             }
             catch (AggregateException e)
@@ -113,13 +122,12 @@ namespace Test.BuildXL.Utilities
         }
 
         [Fact]
-        public async Task SafeWhenAllPropagatesSingleExceptionIfWrapSingleExceptionIsFalse()
+        public Task SafeWhenAllWrapsSingleExceptionInAggregateException()
         {
             var task1 = Task.Run(() => throw new ApplicationException("1"));
 
             var task2 = Task.CompletedTask;
-            await XAssert.ThrowsAnyAsync<AggregateException>(async() => await TaskUtilities.SafeWhenAll(new[] { task1, task2 }, wrapSingleException: true));
-            await XAssert.ThrowsAnyAsync<ApplicationException>(async () => await TaskUtilities.SafeWhenAll(new[] { task1, task2 }, wrapSingleException: false));
+            return XAssert.ThrowsAnyAsync<AggregateException>(async () => await TaskUtilities.SafeWhenAll(new[] { task1, task2 }));
         }
 
         [Fact]
@@ -161,7 +169,7 @@ namespace Test.BuildXL.Utilities
             var task = TaskUtilities.WithTimeoutAsync(
                 async token =>
                 {
-                    token.Register(() => { cancellationRequested = true; });
+                    using var registration = token.Register(() => { cancellationRequested = true; });
                     await Task.Delay(/* milliseconds */200000);
 
                     return 42;

@@ -3,9 +3,10 @@
 
 using System;
 using System.Collections.Generic;
+using BuildXL.Cache.ContentStore.Distributed.NuCache.CopyScheduling;
 using BuildXL.Cache.ContentStore.Distributed.Sessions;
 using BuildXL.Cache.ContentStore.Interfaces.Distributed;
-using BuildXL.Cache.ContentStore.Interfaces.Utils;
+using ContentStore.Grpc;
 
 namespace BuildXL.Cache.ContentStore.Distributed.Stores
 {
@@ -18,19 +19,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// Default value for <see cref="ParallelCopyFilesLimit"/>
         /// </summary>
         public const int DefaultParallelCopyFilesLimit = 8;
-
-        /// <summary>
-        /// Default buffer size for file transfer of small files via FsServer in CopyToAsync.
-        /// 4KB was selected because it is the default buffer size for a FileStream.
-        /// </summary>
-        public const int DefaultSmallBufferSize = 4096;
-
-        /// <summary>
-        /// Default buffer size for file transfer of large files via FsServer in CopyToAsync.
-        /// 64KB was selected because it is significantly larger than 4KB (the original default buffer size), is a power of 2,
-        /// and below the boundary for being placed in the large object heap (80KB).
-        /// </summary>
-        public const int DefaultLargeBufferSize = 64 * 1024;
 
         /// <summary>
         /// Delays for retries for file copies
@@ -51,35 +39,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
             TimeSpan.FromSeconds(60),
             TimeSpan.FromSeconds(120),
         };
-
-        /// <summary>
-        /// For file existence check, perform a quick check initially that allows iteration
-        /// over multiple replicas first.
-        /// </summary>
-        public static readonly TimeSpan FileExistenceTimeoutFastPath = TimeSpan.FromSeconds(2);
-
-        /// <summary>
-        /// following a failure in a fast file existence check, allow the client
-        /// to wait longer for file existences.
-        /// </summary>
-        public static readonly TimeSpan FileExistenceTimeoutSlowPath = TimeSpan.FromSeconds(20);
-
-        /// <summary>
-        /// The maximum time to spend doing verifications of content location records for one hash.
-        /// </summary>
-        public static readonly TimeSpan VerifyTimeout = FileExistenceTimeoutSlowPath;
-
-        private int? _proactiveReplicationParallelism = null;
-        //    PinConfiguration pinConfiguration = null,
-
-        /// <summary>
-        /// File copy replication parallelism.
-        /// </summary>
-        public int ProactiveReplicationParallelism
-        {
-            get => _proactiveReplicationParallelism.GetValueOrDefault(Environment.ProcessorCount);
-            set => _proactiveReplicationParallelism = value;
-        }
 
         /// <summary>
         /// Files smaller than this should use the untrusted hash.
@@ -105,24 +64,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public long ParallelHashingFileSizeBoundary { get; set; }
 
         /// <summary>
-        /// Maximum number of concurrent distributed copies.
+        /// <see cref="CopySchedulerConfiguration"/>
         /// </summary>
-        public int MaxConcurrentCopyOperations { get; set; } = 512;
-
-        /// <summary>
-        /// Order for copies within the IO gate.
-        /// </summary>
-        public SemaphoreOrder OrderForCopies { get; set; } = SemaphoreOrder.NonDeterministic;
-
-        /// <summary>
-        /// Maximum number of concurrent proactive copies.
-        /// </summary>
-        public int MaxConcurrentProactiveCopyOperations { get; set; } = 512;
-
-        /// <summary>
-        /// Order for proactive copies within the IO gate.
-        /// </summary>
-        public SemaphoreOrder OrderForProactiveCopies { get; set; } = SemaphoreOrder.NonDeterministic;
+        public CopySchedulerConfiguration CopyScheduler { get; set; } = new CopySchedulerConfiguration();
 
         /// <summary>
         /// Maximum number of files to copy locally in parallel for a given operation
@@ -200,11 +144,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         public int RestrictedCopyReplicaCount { get; set; } = 3;
 
         /// <summary>
-        /// Time before the IO Gate stops waiting and throws a TimeoutException.
-        /// </summary>
-        public TimeSpan ProactiveCopyIOGateTimeout { get; set; } = TimeSpan.FromMinutes(15);
-
-        /// <summary>
         /// Whether to enable proactive replication
         /// </summary>
         public bool EnableProactiveReplication { get; set; } = false;
@@ -223,7 +162,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// The maximum amount of copies allowed per proactive replication invocation.
         /// </summary>
         public int ProactiveReplicationCopyLimit { get; set; } = 5;
-        
+
         /// <summary>
         /// The amount of time for nagling GetBulk (locations) for proactive copy operations
         /// </summary>
@@ -287,5 +226,20 @@ namespace BuildXL.Cache.ContentStore.Distributed.Stores
         /// Returns true if Redis can be used for storing small files.
         /// </summary>
         public bool AreBlobsSupported { get; set; }
-    }    
+
+        /// <summary>
+        /// Minimum size to start compressing gRPC transfers
+        /// </summary>
+        public long? GrpcCopyCompressionSizeThreshold { get; set; }
+
+        /// <summary>
+        /// Algorithm to use when a gRPC transfer is to be compressed
+        /// </summary>
+        public CopyCompression GrpcCopyCompressionAlgorithm { get; set; } = CopyCompression.Gzip;
+
+        /// <summary>
+        /// If true, then the in-ring machines are used as the candidates for file copies.
+        /// </summary>
+        public bool UseInRingMachinesForCopies { get; set; }
+    }
 }

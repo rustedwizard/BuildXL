@@ -3,7 +3,6 @@
 
 using System;
 using System.IO;
-using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Distributed.Stores;
 using BuildXL.Cache.ContentStore.Hashing;
@@ -172,7 +171,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Sessions
                 // Since the rest of the operation is done asynchronously, create new context to stop cancelling operation prematurely.
                 var proactiveCopyTask = WithStoreCancellationAsync(
                     context,
-                    operationContext => ProactiveCopyIfNeededAsync(operationContext, result.ContentHash, tryBuildRing: true, CopyReason.Put)
+                    operationContext => ProactiveCopyIfNeededAsync(operationContext, result.ContentHash, tryBuildRing: true, CopyReason.ProactiveCopyOnPut)
                 );
 
                 if (Settings.InlineOperationsForTests)

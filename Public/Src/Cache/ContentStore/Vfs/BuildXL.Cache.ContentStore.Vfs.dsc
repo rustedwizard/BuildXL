@@ -4,6 +4,8 @@ import * as ManagedSdk from "Sdk.Managed";
 import { NetFx } from "Sdk.BuildXL";
 
 namespace VfsLibrary {
+    export declare const qualifier: BuildXLSdk.DefaultQualifierWithNet472AndNetStandard20;
+    
     @@public
     export const dll = BuildXLSdk.library({
         assemblyName: "BuildXL.Cache.ContentStore.Vfs",
@@ -15,7 +17,9 @@ namespace VfsLibrary {
             Hashing.dll,
             Library.dll,
             Interfaces.dll,
-            importFrom("Microsoft.Windows.ProjFS").pkg,
+            qualifier.targetFramework === "netstandard2.0" ?
+                importFrom("Microsoft.Windows.ProjFS").withQualifier({ targetFramework: "net461" }).pkg 
+                : importFrom("Microsoft.Windows.ProjFS").pkg,
             importFrom("BuildXL.Utilities").dll,
             importFrom("BuildXL.Utilities").Branding.dll,
             importFrom("BuildXL.Utilities").Collections.dll,
@@ -26,7 +30,8 @@ namespace VfsLibrary {
 
             ...getGrpcPackages(true),
 
-            ManagedSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
+            importFrom("BuildXL.Cache.MemoizationStore").Library.dll,
+            importFrom("BuildXL.Cache.MemoizationStore").Interfaces.dll,
         ],
         internalsVisibleTo: [
             "BuildXL.Cache.ContentStore.Vfs.Test",

@@ -3,4 +3,7 @@
 
 #pragma once
 
-int ValidateResolvedPathCache();
+int CallDetoursResolvedPathCacheTests();
+int CallDetoursResolvedPathPreservingLastSegmentCacheTests();
+int CallDetoursResolvedPathCacheDealsWithUnicode();
+int CallDeleteDirectorySymlinkThroughDifferentPath();

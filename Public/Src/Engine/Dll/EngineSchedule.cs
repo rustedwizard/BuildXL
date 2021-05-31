@@ -23,6 +23,7 @@ using BuildXL.Processes.Sideband;
 using BuildXL.Scheduler;
 using BuildXL.Scheduler.Artifacts;
 using BuildXL.Scheduler.Cache;
+using BuildXL.Scheduler.Distribution;
 using BuildXL.Scheduler.Fingerprints;
 using BuildXL.Scheduler.Graph;
 using BuildXL.Scheduler.Performance;
@@ -104,7 +105,10 @@ namespace BuildXL.Engine
 
         private readonly ConfigFileState m_configFileState;
 
-        private readonly FileContentTable m_fileContentTable;
+        /// <summary>
+        /// File content table
+        /// </summary>
+        public readonly FileContentTable FileContentTable;
 
         /// <summary>
         /// Even on a 24 core machine, it seems that 1 thread is sufficient to keep up with the serialization tasks.
@@ -148,7 +152,7 @@ namespace BuildXL.Engine
             PipTable = pipTable;
             SchedulingQueue = schedulingQueue;
             Context = context;
-            m_fileContentTable = fileContentTable;
+            FileContentTable = fileContentTable;
             MountPathExpander = mountPathExpander;
             m_tempCleaner = tempCleaner;
             m_configFileState = configFileState;
@@ -788,9 +792,18 @@ namespace BuildXL.Engine
                 // If that directory is deleted, then incremental scheduling will mark those pips dirty, although it is not
                 // the user who deleted the directory.
                 //
+                // Similar situation happens with temporary directories. Pip specifies Out\D1\D2 as a temp directory. 
+                // Pip probes Out\D1 during execution. After execution, our temp cleaner deletes Out\D1\D2, but (of course) not Out\D1. 
+                // In the next build, the scrubber deletes Out\D1 because it is not in the graph, and is not an output directory. 
+                // Unfortunately, the probe of Out\D1 is recorded in incremental scheduling state, and thus the deletion makes the pip dirty.
+                // Some customers' no-op (dev) builds can go from 1s to 5-6s because of this invalidation.
+                //
                 // Another alternative is to make incremental scheduling use FileSystemView for existence checking
                 // during journal scanning. This alternative requires more plumbing; see Task 1241786.
-                outputDirectories = scheduler.PipGraph.AllDirectoriesContainingOutputs().Select(d => d.ToString(scheduler.Context.PathTable)).ToList();
+                outputDirectories = scheduler.PipGraph.AllDirectoriesContainingOutputs()
+                    .Concat(scheduler.PipGraph.AllParentsOfTemporaryPaths())
+                    .Select(d => d.ToString(scheduler.Context.PathTable))
+                    .ToList();
             }
 
             var scrubber = new DirectoryScrubber(
@@ -1012,7 +1025,7 @@ namespace BuildXL.Engine
             }
 
             var initStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            bool initResult = Scheduler.InitForMaster(loggingContext, filter, schedulerState);
+            bool initResult = Scheduler.InitForOrchestrator(loggingContext, filter, schedulerState);
             enginePerformanceInfo.SchedulerInitDurationMs = initStopwatch.ElapsedMilliseconds;
 
             return initResult;
@@ -1249,7 +1262,6 @@ namespace BuildXL.Engine
         /// <summary>
         /// Handles reporting end of build status and persisting some state. Returns 'false' on failure (error already logged).
         /// </summary>
-        [SuppressMessage("AsyncUsage", "AsyncFixer02:MissingAsyncOpportunity")]
         public async Task<bool> ProcessPostExecutionTasksAsync(
             LoggingContext loggingContext,
             EngineContext context,
@@ -1416,7 +1428,13 @@ namespace BuildXL.Engine
             LogDiskFreeSpace(loggingContext, executionStart: true);
 
             m_schedulerStartTime = TimestampUtilities.Timestamp;
-            workerService?.Start(this);
+
+            if (workerService != null)
+            {
+                var serializer = new ExecutionResultSerializer(MaxSerializedAbsolutePath, Scheduler.Context);
+                workerService.Start(this, serializer);
+            }
+
             Scheduler.Start(loggingContext);
 
             bool success = true;
@@ -1820,12 +1838,12 @@ namespace BuildXL.Engine
             }
             else
             {
-                engineState = previousEngineState;
-
-                // Even though there is a graph hit, we update the scheduler state every time
-                // because the developer might pass a different filter.
-                // There is no need to check whether developers used the same filter or not because the operation below is quite lightweight.
-                engineState.UpdateSchedulerState(Scheduler);
+                // Create the new one from the previous state
+                // We update the scheduler state every time because the developer might pass a different filter
+                // and the file content table with the new instance that was created this run.
+                engineState = previousEngineState
+                    .WithUpdatedSchedulerState(Scheduler)
+                    .WithUpdatedFileContentTable(FileContentTable);
             }
 
             bool isPipTableTransferred = TransferPipTableOwnership(engineState.PipTable);
@@ -2007,7 +2025,7 @@ namespace BuildXL.Engine
                 descriptorOut.Value = descriptor;
             }
 
-            var cachedGraphProvider = new CachedGraphProvider(loggingContext, Context, m_cache, m_fileContentTable, m_maxDegreeOfParallelism);
+            var cachedGraphProvider = new CachedGraphProvider(loggingContext, Context, m_cache, FileContentTable, m_maxDegreeOfParallelism);
 
             var storedDescriptor = await cachedGraphProvider.TryStorePipGraphCacheDescriptorAsync(
                 tracker,

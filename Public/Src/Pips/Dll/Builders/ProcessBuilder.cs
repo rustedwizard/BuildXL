@@ -91,6 +91,9 @@ namespace BuildXL.Pips.Builders
         /// <nodoc />
         public ReadOnlyArray<int> RetryExitCodes { get; set; } = ReadOnlyArray<int>.Empty;
 
+        /// <nodoc />
+        public ReadOnlyArray<int> SucceedFastExitCodes { get; set; } = ReadOnlyArray<int>.Empty;
+
         private Dictionary<StringId, ProcessSemaphoreInfo> m_semaphores;
 
         /// <summary>
@@ -161,6 +164,8 @@ namespace BuildXL.Pips.Builders
         /// <nodoc />
         public ReadOnlyArray<PipId> FinalizationPipIds { get; set; } = ReadOnlyArray<PipId>.Empty;
 
+        private StringId m_serviceTrackableTag;
+        private StringId m_serviceTrackableTagDisplayName;
 
         // temp & untracked
 
@@ -555,6 +560,12 @@ namespace BuildXL.Pips.Builders
             m_retryAttemptEnvironmentVariable = environmentVariableName;
         }
 
+        /// <nodoc/>
+        public void SetServiceTrackableTag(StringId tag, StringId displayName)
+        {
+            m_serviceTrackableTag = tag;
+            m_serviceTrackableTagDisplayName = displayName;
+        }
 
         private PipData FinishArgumentsAndCreateResponseFileIfNeeded(DirectoryArtifact defaultDirectory)
         {
@@ -657,7 +668,9 @@ namespace BuildXL.Pips.Builders
                        kind: ServiceKind,
                        shutdownProcessPipId: ShutDownProcessPipId,
                        servicePipDependencies: ReadOnlyArray<PipId>.From(m_servicePipDependencies.Instance),
-                       finalizationPipIds: FinalizationPipIds);
+                       finalizationPipIds: FinalizationPipIds,
+                       tagToTrack: m_serviceTrackableTag,
+                       displayNameForTag: m_serviceTrackableTagDisplayName);
 
             processOutputs = new ProcessOutputs(
                 outputFileMap,
@@ -708,6 +721,7 @@ namespace BuildXL.Pips.Builders
 
                 successExitCodes: SuccessExitCodes,
                 retryExitCodes: RetryExitCodes,
+                succeedFastExitCodes: SucceedFastExitCodes,
                 semaphores: m_semaphores != null ? ReadOnlyArray<ProcessSemaphoreInfo>.From(m_semaphores.Values) : ReadOnlyArray<ProcessSemaphoreInfo>.Empty,
                 warningTimeout: WarningTimeout,
                 timeout: Timeout,

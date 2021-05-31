@@ -3,9 +3,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 
 namespace BuildXL.Cache.ContentStore.Interfaces.Results
@@ -15,6 +17,8 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
     /// </summary>
     public static class ResultsExtensions
     {
+        private static readonly string Component = nameof(ResultsExtensions);
+
         /// <nodoc />
         public static string GetDiagnosticsMessageForTracing(this ResultBase result, string prefix = " ")
         {
@@ -27,17 +31,26 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         }
 
         /// <summary>
-        /// Awaits for the <paramref name="task"/> to finish and logs the error if the result is not successful.
+        /// Gets tracing status from result instance
         /// </summary>
-        public static async Task<ObjectResult<TResult>> TraceIfFailure<TResult>(this Task<ObjectResult<TResult>> task, Context context, [CallerMemberName]string? operationName = null) where TResult : class
+        public static OperationStatus GetStatus(this ResultBase resultBase)
         {
-            var result = await task;
-            if (!result)
+            if (resultBase.IsCriticalFailure)
             {
-                context.Warning($"Operation '{operationName}' failed with an error={result}", operation: operationName);
+                return OperationStatus.CriticalFailure;
             }
-
-            return result;
+            else if (resultBase.IsCancelled)
+            {
+                return OperationStatus.Cancelled;
+            }
+            else if (!resultBase.Succeeded)
+            {
+                return OperationStatus.Failure;
+            }
+            else
+            {
+                return OperationStatus.Success;
+            }
         }
 
         /// <summary>
@@ -59,7 +72,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         {
             if (!result.Succeeded)
             {
-                context.Warning($"Operation '{operationName}' failed with an error={result}", operation: operationName);
+                context.Warning($"Operation '{operationName}' failed with an error={result}", Component, operation: operationName);
             }
 
             return result;
@@ -91,6 +104,20 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
             if (result.Succeeded)
             {
                 return selector(result.Value!);
+            }
+
+            return new ErrorResult(result).AsResult<TResult>();
+        }
+
+        /// <summary>
+        /// Maps result into different result type or propagates error to result type
+        /// </summary>
+        public static TResult Then<T, TResult>(this Result<T> result, Func<T, TimeSpan, TResult> selector)
+            where TResult : ResultBase
+        {
+            if (result.Succeeded)
+            {
+                return selector(result.Value!, result.Duration);
             }
 
             return new ErrorResult(result).AsResult<TResult>();
@@ -171,6 +198,15 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         }
 
         /// <summary>
+        /// Awaits the task and throws <see cref="ResultPropagationException"/> if the result is not successful but only when <paramref name="throwOnFailure"/> is true.
+        /// </summary>
+        public static Task<T> ThrowIfNeededAsync<T>(this Task<T> task, bool throwOnFailure)
+            where T : ResultBase
+        {
+            return throwOnFailure ? task.ThrowIfFailure() : task;
+        }
+
+        /// <summary>
         /// Throws <see cref="ResultPropagationException"/> if result is not successful.
         /// </summary>
         public static void ThrowIfFailure<TResult>(this IEnumerable<TResult> results) where TResult : ResultBase
@@ -184,10 +220,12 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
         /// <summary>
         /// Throws <see cref="ResultPropagationException"/> if result is not successful.
         /// </summary>
-        public static async Task ThrowIfFailureAsync<TResult>(this Task<TResult> task) where TResult : ResultBase
+        public static async Task<TResult> ThrowIfFailureAsync<TResult>(this Task<TResult> task) where TResult : ResultBase
         {
             var result = await task;
             result.ThrowIfFailure();
+
+            return result;
         }
 
         /// <summary>
@@ -248,38 +286,6 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Results
             }
 
             return result.Value!;
-        }
-
-        /// <summary>
-        /// Gets the value from <paramref name="result"/> if operation succeeded or throws <see cref="ResultPropagationException"/> otherwise.
-        /// </summary>
-        /// <remarks>
-        /// Unlike <see cref="StructResult{T}.Data"/>, this method will not throw contract violation if the result is not successful.
-        /// </remarks>
-        public static T GetValueOrThrow<T>(this StructResult<T> result) where T : struct
-        {
-            if (!result)
-            {
-                throw new ResultPropagationException(result);
-            }
-
-            return result.Data!;
-        }
-
-        /// <summary>
-        /// Gets the value from <paramref name="result"/> if operation succeeded or throws <see cref="ResultPropagationException"/> otherwise.
-        /// </summary>
-        /// <remarks>
-        /// Unlike <see cref="ObjectResult{T}.Data"/>, this method will not throw contract violation if the result is not successful.
-        /// </remarks>
-        public static T? GetValueOrThrow<T>(this ObjectResult<T> result) where T : class
-        {
-            if (!result)
-            {
-                throw new ResultPropagationException(result);
-            }
-
-            return result.Data!;
         }
 
         /// <summary>

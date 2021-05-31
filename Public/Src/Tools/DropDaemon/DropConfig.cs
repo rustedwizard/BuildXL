@@ -80,7 +80,12 @@ namespace Tool.DropDaemon
         /// <summary>
         ///     Build Manifest generation flag.
         /// </summary>
-        public bool EnableBuildManifestCreation { get; }
+        public bool GenerateBuildManifest { get; }
+
+        /// <summary>
+        ///     Build Manifest Signing flag.
+        /// </summary>
+        public bool SignBuildManifest { get; }
 
         /// <summary>
         ///     Repo path of the code being build
@@ -101,6 +106,21 @@ namespace Tool.DropDaemon
         ///     Represents the RelativeActivityId specific to the cloud build environment
         /// </summary>
         public string CloudBuildId { get; }
+
+        /// <summary>
+        ///     Represents the BuildSessionInfo: bsi.json file path.
+        /// </summary>
+        public string BsiFileLocation { get; }
+
+        /// <summary>
+        ///     Represents the Path to makecat.exe for Build Manifest Catalog generation.
+        /// </summary>
+        public string MakeCatToolPath { get; }
+
+        /// <summary>
+        ///     Represents the Path to EsrpManifestSign.exe for Build Manifest Catalog Signing.
+        /// </summary>
+        public string EsrpManifestSignToolPath { get; }
         #endregion
 
         #region Defaults
@@ -133,7 +153,14 @@ namespace Tool.DropDaemon
         public static bool DefaultEnableChunkDedup { get; } = false;
 
         /// <nodoc/>
-        public static bool DefaultEnableBuildManifestCreation { get; } = false;
+        // TODO: Remove after CB side changes have been merged: https://dev.azure.com/mseng/Domino/_git/CloudBuild/pullrequest/615034
+        public static bool DefaultGenerateSignedManifest { get; } = false;
+
+        /// <nodoc/>
+        public static bool DefaultGenerateBuildManifest { get; } = false;
+
+        /// <nodoc/>
+        public static bool DefaultSignBuildManifest { get; } = false;
         #endregion
 
         // ==================================================================================================
@@ -154,11 +181,15 @@ namespace Tool.DropDaemon
             string artifactLogName = null,
             int? batchSize = null,
             byte? dropDomainId = null,
-            bool? enableBuildManifestCreation = null,
+            bool? generateBuildManifest = null,
+            bool? signBuildManifest = null,
             string repo = null,
             string branch = null,
             string commitId = null,
-            string cloudBuildId = null)
+            string cloudBuildId = null,
+            string bsiFileLocation = null,
+            string makeCatToolPath = null,
+            string esrpManifestSignToolPath = null)
         {
             Name = dropName;
             Service = serviceEndpoint;
@@ -172,11 +203,15 @@ namespace Tool.DropDaemon
             ArtifactLogName = artifactLogName;
             BatchSize = batchSize ?? DefaultBatchSizeForAssociate;
             DomainId = dropDomainId;
-            EnableBuildManifestCreation = enableBuildManifestCreation ?? DefaultEnableBuildManifestCreation;
+            GenerateBuildManifest = generateBuildManifest ?? DefaultGenerateBuildManifest;
+            SignBuildManifest = signBuildManifest ?? DefaultSignBuildManifest;
             Repo = repo ?? string.Empty;
             Branch = branch ?? string.Empty;
             CommitId = commitId ?? string.Empty;
             CloudBuildId = cloudBuildId ?? string.Empty;
+            BsiFileLocation = bsiFileLocation ?? string.Empty;
+            MakeCatToolPath = makeCatToolPath ?? string.Empty;
+            EsrpManifestSignToolPath = esrpManifestSignToolPath ?? string.Empty;
         }
     }
 }

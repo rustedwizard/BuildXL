@@ -27,7 +27,7 @@ using BuildXL.Cache.ContentStore.UtilitiesCore;
 namespace ContentStoreTest.Stores
 {
     public abstract class ContentStoreInternalTests<TStore> : TestBase
-        where TStore : class, IContentStoreInternal
+        where TStore :  FileSystemContentStoreInternal
     {
         private const HashType ContentHashType = HashType.Vso0;
         protected const int ValueSize = 100;
@@ -287,7 +287,7 @@ namespace ContentStoreTest.Stores
         }
 
         [Fact]
-        public Task PlaceReadOnly()
+        public virtual Task PlaceReadOnly()
         {
             var context = new Context(Logger);
             return TestStoreWithRandomContent(context, async (store, contentHash, bytes) =>
@@ -440,7 +440,7 @@ namespace ContentStoreTest.Stores
         }
 
         [Fact]
-        public Task PlaceCopyOverwriteReadOnly()
+        public virtual Task PlaceCopyOverwriteReadOnly()
         {
             var context = new Context(Logger);
             return TestStoreWithRandomContent(context, async (store, contentHash, bytes) =>
@@ -512,7 +512,7 @@ namespace ContentStoreTest.Stores
         }
 
         [Fact]
-        public async Task OverwriteTests()
+        public virtual async Task OverwriteTests()
         {
             foreach (Tuple<FileRealizationMode, FileAccessMode> firstMode in GetModes())
             {
@@ -765,7 +765,7 @@ namespace ContentStoreTest.Stores
             });
         }
 
-        private async Task TestSuccessfulPutStreamAndGet(IContentStoreInternal store, byte[] content)
+        private async Task TestSuccessfulPutStreamAndGet(FileSystemContentStoreInternal store, byte[] content)
         {
             ContentHash actualContentHash = content.CalculateHash(ContentHashType);
 
@@ -792,7 +792,7 @@ namespace ContentStoreTest.Stores
             }
         }
 
-        private async Task TestSuccessfulPutAbsolutePathAndGet(IContentStoreInternal store, byte[] content, FileRealizationMode ingressModes)
+        private async Task TestSuccessfulPutAbsolutePathAndGet(FileSystemContentStoreInternal store, byte[] content, FileRealizationMode ingressModes)
         {
             using (var tempDirectory = new DisposableDirectory(FileSystem))
             {
@@ -800,7 +800,7 @@ namespace ContentStoreTest.Stores
 
                 using (var contentStream = new MemoryStream(content))
                 {
-                    ContentHash actualContentHash = await contentStream.HasLength().CalculateHashAsync(ContentHashType);
+                    ContentHash actualContentHash = await contentStream.WithLength().CalculateHashAsync(ContentHashType);
 
                     var context = new Context(Logger);
                     var result = await store.PutFileAsync(context, pathToFile, ingressModes, ContentHashType);

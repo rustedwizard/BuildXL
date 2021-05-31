@@ -38,6 +38,13 @@ namespace BuildXL.Utilities.Configuration.Mutable
             CustomCommands = resolverSettings.CustomCommands;
             Exports = resolverSettings.Exports;
             WritingToStandardErrorFailsExecution = resolverSettings.WritingToStandardErrorFailsExecution;
+            DoubleWritePolicy = resolverSettings.DoubleWritePolicy;
+            CustomScheduling = resolverSettings.CustomScheduling;
+            ChildProcessesToBreakawayFromSandbox = resolverSettings.ChildProcessesToBreakawayFromSandbox;
+            CustomScripts = resolverSettings.CustomScripts;
+            SuccessExitCodes = resolverSettings.SuccessExitCodes;
+            RetryExitCodes = resolverSettings.RetryExitCodes;
+            ProcessRetries = resolverSettings.ProcessRetries;
         }
 
         /// <inheritdoc/>
@@ -68,7 +75,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public IReadOnlyList<DiscriminatingUnion<AbsolutePath, RelativePath>> AdditionalOutputDirectories { get; set; }
 
         /// <inheritdoc/>
-        public IReadOnlyList<DiscriminatingUnion<string, IJavaScriptCommand>> Execute { get; set; }
+        public IReadOnlyList<DiscriminatingUnion<string, IJavaScriptCommand, IJavaScriptCommandGroupWithDependencies, IJavaScriptCommandGroup>> Execute { get; set; }
 
         /// <inheritdoc/>
         public IReadOnlyList<IExtraArgumentsJavaScript> CustomCommands { get; set; }
@@ -84,5 +91,26 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public IReadOnlyList<RelativePath> UntrackedGlobalDirectoryScopes { get; set; }
+
+        /// <inheritdoc />
+        public RewritePolicy? DoubleWritePolicy { get; set; }
+
+        /// <inheritdoc />
+        public ICustomSchedulingCallback CustomScheduling { get; set; }
+
+        /// <inheritdoc />
+        public IReadOnlyList<PathAtom> ChildProcessesToBreakawayFromSandbox { get; set; }
+
+        /// <inheritdoc />
+        public object CustomScripts { get; set; }
+
+        /// <inheritdoc/>
+        public IReadOnlyList<int> SuccessExitCodes { get; set; }
+
+        /// <inheritdoc/>
+        public IReadOnlyList<int> RetryExitCodes { get; set; }
+
+        /// <inheritdoc/>
+        public int? ProcessRetries { get; set; }
     }
 }

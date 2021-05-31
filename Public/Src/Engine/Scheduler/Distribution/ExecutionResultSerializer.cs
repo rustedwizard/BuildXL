@@ -115,11 +115,8 @@ namespace BuildXL.Scheduler.Distribution
             var outputContent = ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.FromWithoutCopy(ReadOutputContent(reader));
             var directoryOutputs = ReadOnlyArray<(DirectoryArtifact, ReadOnlyArray<FileArtifactWithAttributes>)>.FromWithoutCopy(ReadDirectoryOutputs(reader));
             var mustBeConsideredPerpetuallyDirty = reader.ReadBoolean();
-            var dynamicallyObservedFiles = reader.ReadReadOnlyArray(ReadAbsolutePath);
-            var dynamicallyProbedFiles = reader.ReadReadOnlyArray(ReadAbsolutePath);
-            var dynamicallyObservedEnumerations = reader.ReadReadOnlyArray(ReadAbsolutePath);
+            var dynamicObservations = reader.ReadReadOnlyArray(ReadDynamicObservation);
             var allowedUndeclaredSourceReads = reader.ReadReadOnlySet(ReadAbsolutePath);
-            var absentPathProbesUnderOutputDirectories = reader.ReadReadOnlySet(ReadAbsolutePath);
 
             ReportedFileAccess[] fileAccessViolationsNotAllowlisted;
             ReportedFileAccess[] allowlistedFileAccessViolations;
@@ -157,6 +154,7 @@ namespace BuildXL.Scheduler.Distribution
 
             var pipProperties = ReadPipProperties(reader);
             var hasUserRetries = reader.ReadBoolean();
+            var exitCode = reader.ReadInt32Compact();
 
             RetryInfo pipRetryInfo = null;
             if (reader.ReadBoolean())
@@ -176,11 +174,8 @@ namespace BuildXL.Scheduler.Distribution
                 fileAccessViolationsNotAllowlisted,
                 allowlistedFileAccessViolations,
                 mustBeConsideredPerpetuallyDirty,
-                dynamicallyObservedFiles,
-                dynamicallyProbedFiles,
-                dynamicallyObservedEnumerations,
+                dynamicObservations,
                 allowedUndeclaredSourceReads,
-                absentPathProbesUnderOutputDirectories,
                 twoPhaseCachingInfo,
                 cacheDescriptor,
                 converged,
@@ -188,6 +183,7 @@ namespace BuildXL.Scheduler.Distribution
                 cacheLookupCounters,
                 pipProperties,
                 hasUserRetries,
+                exitCode,
                 createdDirectories,
                 pipRetryInfo);
 
@@ -221,11 +217,8 @@ namespace BuildXL.Scheduler.Distribution
             WriteOutputContent(writer, result.OutputContent);
             WriteDirectoryOutputs(writer, result.DirectoryOutputs);
             writer.Write(result.MustBeConsideredPerpetuallyDirty);
-            writer.Write(result.DynamicallyObservedFiles, WriteAbsolutePath);
-            writer.Write(result.DynamicallyProbedFiles, WriteAbsolutePath);
-            writer.Write(result.DynamicallyObservedEnumerations, WriteAbsolutePath);
+            writer.Write(result.DynamicObservations, WriteDynamicObservation);
             writer.Write(result.AllowedUndeclaredReads, WriteAbsolutePath);
-            writer.Write(result.AbsentPathProbesUnderOutputDirectories, WriteAbsolutePath);
             WriteReportedProcessesAndFileAccesses(
                 writer,
                 result.FileAccessViolationsNotAllowlisted,
@@ -252,6 +245,7 @@ namespace BuildXL.Scheduler.Distribution
 
             WritePipProperties(writer, result.PipProperties);
             writer.Write(result.HasUserRetries);
+            writer.WriteCompact(result.ExitCode);
 
             writer.Write(result.RetryInfo, (w, ri) => ri.Serialize(w));
             writer.Write(result.CreatedDirectories, WriteAbsolutePath);
@@ -625,6 +619,40 @@ namespace BuildXL.Scheduler.Distribution
                 writer.Write(false);
                 writer.Write(path.ToString(m_executionContext.PathTable));
             }
+        }
+
+        [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "To be used when implementing arbitrary path serialization.")]
+        private (AbsolutePath, DynamicObservationKind) ReadDynamicObservation(BuildXLReader reader)
+        {
+            AbsolutePath path;
+            if (reader.ReadBoolean())
+            {
+                 path = reader.ReadAbsolutePath();
+            }
+            else
+            {
+                path = AbsolutePath.Create(m_executionContext.PathTable, reader.ReadString());
+            }
+
+
+            return (path, (DynamicObservationKind)reader.ReadInt32());
+        }
+
+        [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "To be used when implementing arbitrary path serialization.")]
+        private void WriteDynamicObservation(BuildXLWriter writer, (AbsolutePath Path, DynamicObservationKind Kind) observation)
+        {
+            if (observation.Path.Value.Index <= m_maxSerializableAbsolutePathIndex)
+            {
+                writer.Write(true);
+                writer.Write(observation.Path);
+            }
+            else
+            {
+                writer.Write(false);
+                writer.Write(observation.Path.ToString(m_executionContext.PathTable));
+            }
+
+            writer.Write((int)observation.Kind);
         }
 
         private FileArtifact ReadFileArtifact(BuildXLReader reader)

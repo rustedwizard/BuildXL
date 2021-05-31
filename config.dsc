@@ -65,7 +65,7 @@ config({
 
             packages: [
 
-                { id: "NLog", version: "4.6.8" },
+                { id: "NLog", version: "4.7.7" },
 
                 { id: "Bond.Core.CSharp", version: "8.0.0" },
                 { id: "Bond.CSharp", version: "8.0.0" },
@@ -74,19 +74,20 @@ config({
                 { id: "CLAP", version: "4.6" },
                 { id: "CLAP-DotNetCore", version: "4.6" },
 
-                { id: "RuntimeContracts", version: "0.3.0" },
+                { id: "RuntimeContracts", version: "0.3.0" }, // Be very careful with updating this version, because CloudBuild and other repository needs to be updated as wwell
+                { id: "RuntimeContracts.Analyzer", version: "0.3.2" }, // The versions are different because the analyzer has higher version for now.
 
-                { id: "Microsoft.NETFramework.ReferenceAssemblies.net451", version: "1.0.0-alpha-5", osSkip: [ "macOS", "unix" ] },
-                { id: "Microsoft.NETFramework.ReferenceAssemblies.net461", version: "1.0.0-alpha-5", osSkip: [ "macOS", "unix" ] },
-                { id: "Microsoft.NETFramework.ReferenceAssemblies.net462", version: "1.0.0-alpha-5" },
-                { id: "Microsoft.NETFramework.ReferenceAssemblies.net472", version: "1.0.0-alpha-5" },
+                { id: "Microsoft.NETFramework.ReferenceAssemblies.net451", version: "1.0.0", osSkip: [ "macOS", "unix" ] },
+                { id: "Microsoft.NETFramework.ReferenceAssemblies.net461", version: "1.0.0", osSkip: [ "macOS", "unix" ] },
+                { id: "Microsoft.NETFramework.ReferenceAssemblies.net462", version: "1.0.0" },
+                { id: "Microsoft.NETFramework.ReferenceAssemblies.net472", version: "1.0.0" },
 
                 { id: "System.Diagnostics.DiagnosticSource", version: "4.5.0" },
                 { id: "System.Diagnostics.DiagnosticSource", version: "4.0.0-beta-23516", alias: "System.Diagnostics.DiagnosticsSource.ForEventHub"},
 
                 // Roslyn
-                { id: "Microsoft.Net.Compilers", version: "3.5.0" }, // Update Public/Src/Engine/UnitTests/Engine/Test.BuildXL.Engine.dsc if you change the version of Microsoft.Net.Compilers.
-                { id: "Microsoft.NETCore.Compilers", version: "3.5.0" },
+                { id: "Microsoft.Net.Compilers", version: "3.8.0" }, // Update Public/Src/Engine/UnitTests/Engine/Test.BuildXL.Engine.dsc if you change the version of Microsoft.Net.Compilers.
+                { id: "Microsoft.NETCore.Compilers", version: "3.8.0" },
                 { id: "Microsoft.CodeAnalysis.Common", version: "3.5.0" },
                 { id: "Microsoft.CodeAnalysis.CSharp", version: "3.5.0" },
                 { id: "Microsoft.CodeAnalysis.VisualBasic", version: "3.5.0" },
@@ -95,6 +96,23 @@ config({
                     dependentPackageIdsToIgnore: ["SQLitePCLRaw.bundle_green", "System.Composition"],
                 },
                 { id: "Microsoft.CodeAnalysis.CSharp.Workspaces", version: "3.5.0" },
+
+                // VBCSCompilerLogger needs the latest version (.net 5), but we haven't completed the migration to net 5 for
+                // the rest of the codebase yet
+                // Note: if any of the CodeAnalysis packages get upgraded, any new
+                // switch introduced in the compiler command line argument supported by
+                // the new version needs to be evaluated and incorporated into VBCSCompilerLogger.cs
+                { id: "Microsoft.CodeAnalysis.Common", version: "3.8.0", alias: "Microsoft.CodeAnalysis.Common.ForVBCS"},
+                { id: "Microsoft.CodeAnalysis.CSharp", version: "3.8.0", alias: "Microsoft.CodeAnalysis.CSharp.ForVBCS",
+                    dependentPackageIdsToSkip: ["Microsoft.CodeAnalysis.Common"] },
+                { id: "Microsoft.CodeAnalysis.VisualBasic", version: "3.8.0", alias: "Microsoft.CodeAnalysis.VisualBasic.ForVBCS",
+                    dependentPackageIdsToSkip: ["Microsoft.CodeAnalysis.Common"]},
+                { id: "Microsoft.CodeAnalysis.Workspaces.Common", version: "3.8.0", alias: "Microsoft.CodeAnalysis.Workspaces.Common.ForVBCS",
+                    dependentPackageIdsToSkip: ["SQLitePCLRaw.bundle_green", "System.Composition"],
+                    dependentPackageIdsToIgnore: ["SQLitePCLRaw.bundle_green", "System.Composition"],
+                },
+                { id: "Microsoft.CodeAnalysis.CSharp.Workspaces", version: "3.8.0", alias: "Microsoft.CodeAnalysis.CSharp.Workspaces.ForVBCS" },
+                { id: "Humanizer.Core", version: "2.2.0" },
 
                 // Old code analysis libraries, for tests only
                 { id: "Microsoft.CodeAnalysis.Common", version: "2.10.0", alias: "Microsoft.CodeAnalysis.Common.Old" },
@@ -108,9 +126,12 @@ config({
                 { id: "Microsoft.NetFramework.Analyzers", version: "2.3.0-beta1" },
                 { id: "Microsoft.NetCore.Analyzers", version: "2.3.0-beta1" },
 
-                { id: "AsyncFixer", version: "1.3.0" },
-                { id: "ErrorProne.NET.CoreAnalyzers", version: "0.1.2" },
-                { id: "RuntimeContracts.Analyzer", version: "0.3.0" },
+                { id: "AsyncFixer", version: "1.5.1" },
+                { id: "ErrorProne.NET.CoreAnalyzers", version: "0.3.1-beta.2" },
+                { id: "protobuf-net.BuildTools", version: "3.0.101"},
+                { id: "Microsoft.VisualStudio.Threading.Analyzers", version: "16.9.60"},
+                { id: "StructRecordGenerator", version: "0.4.0"},
+                
                 { id: "StyleCop.Analyzers", version: "1.1.0-beta004" },
                 { id: "Text.Analyzers", version: "2.3.0-beta1" },
 
@@ -136,6 +157,7 @@ config({
                 { id: "Newtonsoft.Json.Bson", version: "1.0.1" },
                 { id: "System.Data.SQLite.Core", version: "1.0.109.2" },
                 { id: "System.Reflection.Metadata", version: "1.6.0" },
+                { id: "System.Reflection.Metadata", version: "5.0.0", alias: "System.Reflection.Metadata.ForVBCS" },
                 { id: "System.Threading.Tasks.Dataflow", version: "4.9.0" },
 
                 // Nuget
@@ -150,8 +172,11 @@ config({
                 { id: "Microsoft.Windows.ProjFS", version: "1.2.19351.1" },
 
                 // RocksDb
-                { id: "RocksDbSharp", version: "6.10.2-b20200625.3", alias: "RocksDbSharpSigned" },
-                { id: "RocksDbNative", version: "6.10.2-b20200625.3" },
+                { id: "RocksDbSharp", version: "6.10.2-b20210421.3", alias: "RocksDbSharpSigned", 
+                    dependentPackageIdsToSkip: [ "System.Memory" ],
+                    dependentPackageIdsToIgnore: [ "System.Memory" ]
+                },
+                { id: "RocksDbNative", version: "6.10.2-b20210421.3" },
 
                 { id: "JsonDiffPatch.Net", version: "2.1.0" },
 
@@ -170,6 +195,7 @@ config({
 
                 // Key Vault
                 { id: "Azure.Security.KeyVault.Secrets", version: "4.0.3" },
+                { id: "Azure.Security.KeyVault.Certificates", version: "4.0.3" },
                 { id: "Azure.Identity", version: "1.1.1" },
                 { id: "Microsoft.Identity.Client", version: "4.16.1" },
                 { id: "Azure.Core", version: "1.3.0" },
@@ -213,17 +239,19 @@ config({
                 { id: "DeduplicationSigned", version: "1.0.14" },
                 { id: "Microsoft.Bcl", version: "1.1.10" },
                 { id: "Microsoft.Bcl.Async", version: "1.0.168" },
-                { id: "Microsoft.Bcl.AsyncInterfaces", version: "1.1.0", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
+                { id: "Microsoft.Bcl.AsyncInterfaces", version: "5.0.0", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
                 { id: "Microsoft.Bcl.Build", version: "1.0.14" },
-                { id: "StackExchange.Redis", version: "2.1.30",
-                    dependentPackageIdsToSkip: ["System.IO.Pipelines", "System.Threading.Channels", "Microsoft.Bcl.AsyncInterfaces", "Pipelines.Sockets.Unofficial"] },
-                { id: "Pipelines.Sockets.Unofficial", version: "2.1.6",
+                
+                { id: "StackExchange.Redis", version: "2.2.4",
+                    dependentPackageIdsToSkip: ["System.IO.Pipelines", "System.Threading.Channels", "Pipelines.Sockets.Unofficial"] },
+                { id: "Pipelines.Sockets.Unofficial", version: "2.2.0",
                     dependentPackageIdsToSkip: ["System.IO.Pipelines", "System.Runtime.CompilerServices.Unsafe", "Microsoft.Bcl.AsyncInterfaces"] },
-                { id: "System.Diagnostics.PerformanceCounter", version: "4.7.0" },
-                { id: "System.Threading.Channels", version: "4.7.0",
-                    dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
+                { id: "System.Diagnostics.PerformanceCounter", version: "5.0.0" },
+                { id: "System.Threading.Channels", version: "5.0.0", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
+
                 { id: "System.Linq.Async", version: "4.0.0"},
-                { id: "TransientFaultHandling.Core", version: "5.1.1209.1" },
+                { id: "Polly", version: "7.2.1" },
+                { id: "Polly.Contrib.WaitAndRetry", version: "1.1.1" },
                 { id: "Redis-64", version: "3.0.503", osSkip: [ "macOS", "unix" ] },
                 { id: "Redis-osx-x64", version: "1.0.0", osSkip: importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal
                     ? [ "win" ]
@@ -244,7 +272,7 @@ config({
                 { id: "Microsoft.ApplicationInsights.WindowsServer", version: "2.3.0" },
                 { id: "Microsoft.ApplicationInsights.WindowsServer.TelemetryChannel", version: "2.3.0" },
                 { id: "System.Security.Cryptography.Xml", version: "4.5.0" },
-                { id: "System.Text.Encodings.Web", version: "4.7.0" },
+                { id: "System.Text.Encodings.Web", version: "4.7.2" },
                 { id: "System.Security.Permissions", version: "4.5.0" },
                 { id: "System.Security.Cryptography.Pkcs", version: "4.5.0" },
 
@@ -265,25 +293,26 @@ config({
                 { id: "Microsoft.TeamFoundation.DistributedTask.Common.Contracts", version: "16.137.0-preview"},
 
                 // MSBuild. These should be used for compile references only, as at runtime one can only practically use MSBuilds from Visual Studio / dotnet CLI
-                { id: "Microsoft.Build", version: "16.4.0-preview-19516-02",
+                { id: "Microsoft.Build", version: "16.5.0",
                     dependentPackageIdsToSkip: ["System.Threading.Tasks.Dataflow", "System.Memory"], // These are overwritten in the deployment by DataflowForMSBuild and SystemMemoryForMSBuild since it doesn't work with the versions we use in larger buildxl.
                 },
-                { id: "Microsoft.Build.Runtime", version: "16.4.0-preview-19516-02",
+                { id: "Microsoft.Build.Runtime", version: "16.5.0",
                     dependentPackageIdsToSkip: ["System.Threading.Tasks.Dataflow"],
                 },
-                { id: "Microsoft.Build.Tasks.Core", version: "16.4.0-preview-19516-02",
+                { id: "Microsoft.Build.Tasks.Core", version: "16.5.0",
                     dependentPackageIdsToSkip: ["System.Threading.Tasks.Dataflow"],
                 },
-                { id: "Microsoft.Build.Utilities.Core", version: "16.4.0-preview-19516-02"},
-                { id: "Microsoft.Build.Framework", version: "16.4.0-preview-19516-02"},
+                { id: "Microsoft.Build.Utilities.Core", version: "16.5.0"},
+                { id: "Microsoft.Build.Framework", version: "16.5.0"},
                 { id: "System.Resources.Extensions", version: "4.6.0-preview9.19411.4",
                     dependentPackageIdsToSkip: ["System.Memory"]},
 
                 // Buffers and Memory
                 { id: "System.Buffers", version: "4.5.1" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */ // A different version, because StackExchange.Redis uses it.
                 { id: "System.Memory", version: "4.5.4", dependentPackageIdsToSkip: ["System.Runtime.CompilerServices.Unsafe", "System.Numerics.Vectors"] }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
-                { id: "System.Runtime.CompilerServices.Unsafe", version: "4.7.0" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
-                { id: "System.IO.Pipelines", version: "4.7.2", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
+                { id: "System.Runtime.CompilerServices.Unsafe", version: "5.0.0" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
+                //{ id: "System.IO.Pipelines", version: "4.7.2", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
+                { id: "System.IO.Pipelines", version: "5.0.0", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },// alias: "System.IO.Pipelines.v5.0.0" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
                 { id: "System.Numerics.Vectors", version: "4.5.0" }, /* Change Sync: BuildXLSdk.cacheBindingRedirects() */
 
                 // Extra dependencies to make MSBuild work
@@ -302,10 +331,6 @@ config({
                 // Ninja JSON graph generation helper
                 { id: "BuildXL.Tools.Ninjson", version: "0.0.6" },
                 { id: "BuildXL.Tools.AppHostPatcher", version: "1.0.0" },
-
-                // CoreRT
-                { id: "runtime.osx-x64.Microsoft.DotNet.ILCompiler", version: "1.0.0-alpha-27527-01", osSkip: [ "win", "unix" ] },
-                { id: "runtime.win-x64.Microsoft.DotNet.ILCompiler", version: "1.0.0-alpha-27527-01", osSkip: [ "macOS", "unix" ] },
 
                 // Kusto SDK (for netstandard)
                 { id: "Microsoft.Azure.Kusto.Cloud.Platform.Azure.NETStandard", version: "6.1.8",
@@ -365,6 +390,11 @@ config({
                 { id: "Microsoft.Azure.Management.Monitor.Fluent", version: "1.33.0" },
                 { id: "Microsoft.Azure.Management.Monitor", version: "0.25.0-preview" },
 
+                // Build Manifest generation and validation packages
+                { id: "Microsoft.Bcl.HashCode", version: "1.1.0"},
+                { id: "Microsoft.ManifestInterface", version: "1.0.0"},
+                { id: "Microsoft.ManifestGenerator", version: "0.1.4", dependentPackageIdsToIgnore: ["Newtonsoft.Json"]},
+
                 // FsCheck
                 { id: "FsCheck", version: "2.14.3" },
                 { id: "FSharp.Core", version: "4.2.3" },
@@ -375,11 +405,14 @@ config({
                 // Runtime dependencies for Linux
                 {
                     id: "runtime.linux-x64.BuildXL",
-                    version: "0.0.41",
+                    version: "0.0.47",
                     osSkip: importFile(f`config.microsoftInternal.dsc`).isMicrosoftInternal
                         ? []
                         : [ "win", "macOS", "unix" ]
-                }
+                },
+
+                // For C++ testing
+                { id: "boost", version: "1.71.0.0" }
             ],
 
             doNotEnforceDependencyVersions: true,
@@ -390,6 +423,10 @@ config({
         {
             kind: "SourceResolver",
             modules: [f`Public\Sdk\SelfHost\Libraries\Dotnet-Runtime-External\module.config.dsc`],
+        },
+        {
+            kind: "SourceResolver",
+            modules: [f`Public\Sdk\SelfHost\Libraries\Dotnet-Runtime-5-External\module.config.dsc`],
         },
         {
             kind: "Download",
@@ -422,7 +459,27 @@ config({
                     archiveType: "tgz",
                 },
 
-                // DotNet Core Runtime
+                // DotNet Core Runtime 5.0
+                {
+                    moduleName: "DotNet-Runtime.win-x64.5.0.100",
+                    url: "https://download.visualstudio.microsoft.com/download/pr/4c86f8a0-8f0b-454f-9419-081c2f21b348/52a1d3c12effa2bc1b552a4fd9f53d20/dotnet-runtime-5.0.0-win-x64.zip",
+                    hash: "VSO0:401A023634910E6B80414B4D541BB7D11C710D8D24C0C8B0712EFA80C1D33B1A00",
+                    archiveType: "zip",
+                },
+                {
+                    moduleName: "DotNet-Runtime.osx-x64.5.0.100",
+                    url: "https://download.visualstudio.microsoft.com/download/pr/112291a5-e3e0-4741-9c66-c9cea6231f3f/3ebd75dfda0492fcbf50c6f939762c46/dotnet-runtime-5.0.0-osx-x64.tar.gz",
+                    hash: "VSO0:FA5B6AD52AB940BD56BFAE1A1D841885071EE82A356C8D7EA82FCCAE562920FB00",
+                    archiveType: "tgz",
+                },
+                {
+                    moduleName: "DotNet-Runtime.linux-x64.5.0.100",
+                    url: "https://download.visualstudio.microsoft.com/download/pr/c84d49aa-200c-4400-a517-87cce5b7516d/94c89b00380eb212e19538b05f8cb968/dotnet-runtime-5.0.0-linux-x64.tar.gz",
+                    hash: "VSO0:92E66F1C7562AFBEBBFD93CC98EB54279A65A81F2013492BC64177BB116E3A6000",
+                    archiveType: "tgz",
+                },
+
+                // DotNet Core Runtime 3.1
                 {
                     moduleName: "DotNet-Runtime.win-x64.3.1.6",
                     url: "https://download.visualstudio.microsoft.com/download/pr/f01755a3-b9cf-4d63-acdd-e331337548d6/ab5385bc8a555e741bc093b3459015b7/dotnet-runtime-3.1.6-win-x64.zip",
@@ -441,6 +498,7 @@ config({
                     hash: "VSO0:713CA0FE106D1EEE837E4595312F4771CDD429147DA2E1CB66F85E2603DD9BA900",
                     archiveType: "tgz",
                 },
+                
                 // The following are needed for dotnet core MSBuild test deployments
                 {
                     moduleName: "DotNet-Runtime.win-x64.2.2.2",
@@ -451,33 +509,20 @@ config({
                 // NodeJs
                 {
                     moduleName: "NodeJs.win-x64",
-                    url: "https://nodejs.org/dist/v14.10.0/node-v14.10.0-win-x64.zip",
-                    hash: "VSO0:5497357F4FAE626A8C9FF7D7357E1E2306B7474F7C0E1B43FE40F607D06C920600",
+                    url: "https://nodejs.org/dist/v15.2.1/node-v15.2.1-win-x64.zip",
+                    hash: "VSO0:89495668CD87C565889C9439275D232DF4456E1A4AA1F6F587D3674A1BCE3CAD00",
                     archiveType: "zip",
                 },
                 {
                     moduleName: "NodeJs.osx-x64",
-                    url: "https://nodejs.org/dist/v14.10.0/node-v14.10.0-darwin-x64.tar.gz",
-                    hash: "VSO0:7C30F46229712426F277F0A0C218746DE89C55F8A6F118C478309C7D3F6BFDA600",
+                    url: "https://nodejs.org/dist/v15.2.1/node-v15.2.1-darwin-x64.tar.gz",
+                    hash: "VSO0:E5019A97DF2947725E17A6CEB9E2F92EAA490902A51A46A91F4EC37ECFF18A7F00",
                     archiveType: "tgz",
                 },
                 {
                     moduleName: "NodeJs.linux-x64",
-                    url: "https://nodejs.org/dist/v14.10.0/node-v14.10.0-linux-x64.tar.gz",
-                    hash: "VSO0:8A920F82F3AE829194EEE5212DF41146971C2277D95ABB3F9D7DB70A4D0089DA00",
-                    archiveType: "tgz",
-                },
-                // Rush tests need an LTS (older) version of NodeJs
-                {
-                    moduleName: "NodeJs.ForRush.win-x64",
-                    url: "https://nodejs.org/dist/v12.16.1/node-v12.16.1-win-x64.zip",
-                    hash: "VSO0:B65327703FB1775A7ABD637D44816CDE13DFE01BD98FF2B1B1DE8DAC46D1567800",
-                    archiveType: "zip",
-                },
-                {
-                    moduleName: "NodeJs.ForRush.osx-x64",
-                    url: "https://nodejs.org/dist/v12.16.1/node-v12.16.1-darwin-x64.tar.gz",
-                    hash: "VSO0:A3DEEC9D7C133120F255195146072452C6D06D24E7F97754F342627C53A5008000",
+                    url: "https://nodejs.org/dist/v15.2.1/node-v15.2.1-linux-x64.tar.gz",
+                    hash: "VSO0:038EB56ECF4C3FEC397E149A91F32DDD0E91E9FB61E7BA064FB9E5E5C0A3779800",
                     archiveType: "tgz",
                 }
             ],
@@ -487,6 +532,7 @@ config({
     qualifiers: {
         defaultQualifier: {
             configuration: "debug",
+            // Ones the migration to net5 is done the next line needs to be changed to net5.0
             targetFramework: "netcoreapp3.1",
             targetRuntime:
                 Context.getCurrentHost().os === "win" ? "win-x64" :
@@ -506,6 +552,11 @@ config({
             DebugDotNetCore: {
                 configuration: "debug",
                 targetFramework: "netcoreapp3.1",
+                targetRuntime: "win-x64",
+            },
+            DebugDotNet5: {
+                configuration: "debug",
+                targetFramework: "net5.0",
                 targetRuntime: "win-x64",
             },
             DebugDotNetCoreMac: {
@@ -535,6 +586,11 @@ config({
                 targetFramework: "netcoreapp3.1",
                 targetRuntime: "win-x64",
             },
+            ReleaseDotNet5: {
+                configuration: "release",
+                targetFramework: "net5.0",
+                targetRuntime: "win-x64",
+            },            
             ReleaseDotNetCoreMac: {
                 configuration: "release",
                 targetFramework: "netcoreapp3.1",

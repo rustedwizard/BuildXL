@@ -59,11 +59,11 @@ namespace BuildXL.Cache.ContentStore.Service
             int grpcPort,
             string? grpcPortFileName = null,
             int? bufferSizeForGrpcCopies = null,
-            int? gzipBarrierSizeForGrpcCopies = null,
             int? proactivePushCountLimit = null,
             TimeSpan? logIncrementalStatsInterval = null,
             TimeSpan? logMachineStatsInterval = null,
-            string[]? logIncrementalStatsCounterNames = null
+            string[]? logIncrementalStatsCounterNames = null,
+            TimeSpan? asyncSessionShutdownTimeout = null
             )
         {
             Contract.Requires(namedCacheRoots != null);
@@ -75,12 +75,12 @@ namespace BuildXL.Cache.ContentStore.Service
             GrpcPort = (uint)grpcPort;
             GrpcPortFileName = grpcPortFileName;
             BufferSizeForGrpcCopies = bufferSizeForGrpcCopies;
-            GzipBarrierSizeForGrpcCopies = gzipBarrierSizeForGrpcCopies;
             ProactivePushCountLimit = proactivePushCountLimit;
             LogMachineStatsInterval = logMachineStatsInterval;
             LogIncrementalStatsInterval = logIncrementalStatsInterval;
             _namedCacheRoots = new Dictionary<string, AbsolutePath>();
             IncrementalStatsCounterNames = logIncrementalStatsCounterNames?? new string[0];
+            AsyncSessionShutdownTimeout = asyncSessionShutdownTimeout;
             Initialize();
         }
 
@@ -146,10 +146,9 @@ namespace BuildXL.Cache.ContentStore.Service
         public int? ProactivePushCountLimit { get; set; }
 
         /// <summary>
-        /// Files greater than this size will be compressed via GZip when GZip is enabled.
+        /// The max number of copy operations that can happen at the same time from this machine.
         /// </summary>
-        [DataMember]
-        public int? GzipBarrierSizeForGrpcCopies { get; set; }
+        public int? CopyRequestHandlingCountLimit { get; set; }
 
         /// <summary>
         ///     Gets the named cache roots.
@@ -191,9 +190,15 @@ namespace BuildXL.Cache.ContentStore.Service
 
         /// <inheritdoc cref="LocalServerConfiguration.TraceGrpcOperations"/>
         public bool TraceGrpcOperation { get; set; }
-        
+
+        /// <inheritdoc cref="LocalServerConfiguration.DoNotShutdownSessionsInUse"/>
+        public bool DoNotShutdownSessionsInUse { get; set; }
+
         /// <inheritdoc cref="LocalServerConfiguration.IncrementalStatsCounterNames"/>
         public string[] IncrementalStatsCounterNames { get; set; }
+
+        /// <inheritdoc cref="LocalServerConfiguration.AsyncSessionShutdownTimeout"/>
+        public TimeSpan? AsyncSessionShutdownTimeout { get; set; }
 
         /// <summary>
         /// Gets the verb on ContentStoreApp.exe to use.
@@ -299,7 +304,6 @@ namespace BuildXL.Cache.ContentStore.Service
             sb.AppendFormat(", GrpcPort={0}", GrpcPort);
             sb.AppendFormat(", GrcpPortFileName={0}", GrpcPortFileName);
             sb.AppendFormat(", BufferSizeForGrpcCopies={0}", BufferSizeForGrpcCopies);
-            sb.AppendFormat(", GzipBarrierSizeForGrpcCopies={0}", GzipBarrierSizeForGrpcCopies);
 
             return sb.ToString();
         }

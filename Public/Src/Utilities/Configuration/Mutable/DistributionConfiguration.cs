@@ -18,7 +18,6 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
             // Local worker is always connected.
             MinimumWorkers = 1;
-
             EarlyWorkerReleaseMultiplier = 0.5;
             EarlyWorkerRelease = true;
         }
@@ -31,11 +30,11 @@ namespace BuildXL.Utilities.Configuration.Mutable
             BuildRole = template.BuildRole;
             BuildServicePort = template.BuildServicePort;
             ValidateDistribution = template.ValidateDistribution;
-            EnableSourceFileMaterialization = template.EnableSourceFileMaterialization;
             ReplicateOutputsToWorkers = template.ReplicateOutputsToWorkers;
             BuildWorkers = new List<IDistributionServiceLocation>(template.BuildWorkers.Select(location => new DistributionServiceLocation(location)));
             DistributeCacheLookups = template.DistributeCacheLookups;
             MinimumWorkers = template.MinimumWorkers;
+            LowWorkersWarningThreshold = template.LowWorkersWarningThreshold;
             EarlyWorkerRelease = template.EarlyWorkerRelease;
             EarlyWorkerReleaseMultiplier = template.EarlyWorkerReleaseMultiplier;
             FireForgetMaterializeOutput = template.FireForgetMaterializeOutput;
@@ -50,9 +49,6 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inhertidoc />
         public bool? ReplicateOutputsToWorkers { get; set; }
-
-        /// <inhertidoc />
-        public bool EnableSourceFileMaterialization { get; set; }
 
         /// <nodoc />
         [SuppressMessage("Microsoft.Usage", "CA2227:CollectionPropertiesShouldBeReadOnly")]
@@ -69,6 +65,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inhertidoc />
         public int MinimumWorkers { get; set; }
+
+        /// <inhertidoc />
+        public int? LowWorkersWarningThreshold { get; set; }
 
         /// <inheritdoc />
         public bool EarlyWorkerRelease { get; set; }

@@ -3,6 +3,9 @@
 
 import {Artifact, Cmd, Transformer} from "Sdk.Transformers";
 
+@@public
+export const daemonTag = "materialization-daemon-pip";
+
 // for internal use
 interface CombinedArguments extends ServiceStartArguments, ServiceStartResult {
     ipcServerMoniker?: IpcMoniker;
@@ -42,7 +45,7 @@ function startService(args: CombinedArguments, startCommand: string, shutdownCmd
         finalizationCmdName, 
         connectArgs, 
         ipcArgs => ipcArgs.merge<Transformer.IpcSendArguments>({
-            mustRunOnMaster: true
+            mustRunOnOrchestrator: true
         }));
 
     const result = Transformer.createService(
@@ -52,6 +55,8 @@ function startService(args: CombinedArguments, startCommand: string, shutdownCmd
             unsafe: {
                 hasUntrackedChildProcesses: true,
             },
+            serviceTrackableTag: daemonTag,
+            serviceTrackableTagDisplayName: "MaterializationDaemonTrackerOverhangMs"
         })
     );
     
@@ -94,7 +99,7 @@ function registerManifest(startResult: ServiceStartResult, args : ConnectionArgu
                 ...directories.map(d => d.directory),
             ],
             // The daemon is about materialization on the orchestrator machine, so naturually, all the IPC pips run there.
-            mustRunOnMaster: true
+            mustRunOnOrchestrator: true
         })
     );
 }
@@ -132,7 +137,7 @@ function materializeDirectories(startResult: ServiceStartResult, args : Connecti
                 ...directories.map(d => d.directory),
             ],
             // The daemon is about materialization on the orchestrator machine, so naturually, all the IPC pips run there.
-            mustRunOnMaster: true
+            mustRunOnOrchestrator: true
         })
     );
 }
@@ -178,6 +183,7 @@ function getExecuteArguments(command: string, args: CombinedArguments): Transfor
         tool: overrideToolArguments(selectedTool, args),
         workingDirectory: outDir,
         tags: [
+            daemonTag,
             nametag,
             ...(args.tags || []),
         ],

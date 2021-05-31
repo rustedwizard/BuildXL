@@ -3,12 +3,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.Threading;
 using BuildXL.Cache.ContentStore.Distributed.NuCache;
 using BuildXL.Cache.ContentStore.Distributed.NuCache.EventStreaming;
+using BuildXL.Cache.ContentStore.Distributed.Redis;
+using BuildXL.Cache.ContentStore.Interfaces.Distributed;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
-using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Secrets;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Utilities.Collections;
@@ -35,7 +37,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
     /// <summary>
     /// Configuration properties for <see cref="LocalLocationStore"/>
     /// </summary>
-    public class LocalLocationStoreConfiguration
+    public record LocalLocationStoreConfiguration
     {
         /// <summary>
         /// Indicates whether LLS operates in read-only mode where no writes are performed
@@ -81,6 +83,27 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public ContentLocationDatabaseConfiguration? Database { get; set; }
 
         /// <summary>
+        /// Configuration object for the content metadata store
+        /// </summary>
+        public ContentMetadataStoreConfiguration? MetadataStore { get; set; }
+
+        /// <summary>
+        /// A helper method that provides extra information to the compiler regarding whether some properties are null or not.
+        /// </summary>
+        [MemberNotNullWhen(true, nameof(Database))]
+        [MemberNotNullWhen(true, nameof(EventStore))]
+        [MemberNotNullWhen(true, nameof(Checkpoint))]
+        [MemberNotNullWhen(true, nameof(CentralStore))]
+        public bool IsValidForLls()
+        {
+            Contract.Assert(Database != null, "Database must be provided.");
+            Contract.Assert(EventStore != null, "Event store must be provided.");
+            Contract.Assert(Checkpoint != null, "Checkpointing must be provided.");
+            Contract.Assert(CentralStore != null, "Central store must be provided.");
+            return true;
+        }
+
+        /// <summary>
         /// Configuration object for a content location event store.
         /// </summary>
         public ContentLocationEventStoreConfiguration? EventStore { get; set; } = null;
@@ -105,25 +128,13 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// </summary>
         public string? RedisGlobalStoreConnectionString { get; set; }
 
-        /// <summary>
-        /// Gets or sets the flag to enable thread theft prevention feature.
-        /// </summary>
-        /// <remarks>
-        /// See this article about thread theft: https://stackexchange.github.io/StackExchange.Redis/ThreadTheft
-        /// Basically, this feature forces all the continuations running asynchronously, i.e. all the user code is detached from the redis library's code.
-        /// </remarks>
-        public bool UsePreventThreadTheftFeature { get; set; } = false;
+        /// <nodoc />
+        public RedisConnectionMultiplexerConfiguration RedisConnectionMultiplexerConfiguration { get; set; } = new RedisConnectionMultiplexerConfiguration();
 
         /// <summary>
         /// Gets the connection string used by the redis global store.
         /// </summary>
         public string? RedisGlobalStoreSecondaryConnectionString { get; set; }
-
-        /// <summary>
-        /// The Redis.StackExchange library performs its own internal logging. If the flag is not null, we pipe the
-        /// library's logging out through our own logger, at the specified severity.
-        /// </summary>
-        public Severity? RedisInternalLogSeverity { get; set; }
 
         /// <summary>
         /// Configuration of reputation tracker.
@@ -186,15 +197,21 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public TimeSpan TouchFrequency { get; set; } = TimeSpan.FromHours(2);
 
         /// <summary>
+        /// Amount of time we mark sent reconcile events as recent, and prevent sending them again.
+        /// </summary>
+        public TimeSpan ReconcileCacheLifetime { get; set; } = TimeSpan.FromMinutes(30);
+
+        /// <summary>
+        /// We check whether max processing delay is below this limit to call reconcile per checkpoint
+        /// If not set, we do not check processing delay before reconciling
+        /// </summary>
+        public TimeSpan? MaxProcessingDelayToReconcile { get; set; } = null;
+
+        /// <summary>
         /// The threshold of machine locations over which additions are not sent to the global store but instead.
         /// only sent to event store
         /// </summary>
         public int SafeToLazilyUpdateMachineCountThreshold { get; set; } = 8;
-
-        /// <summary>
-        /// Indicates if redundant registrations of a content locations to be sent (i.e. location is already present in local db).
-        /// </summary>
-        public bool SkipRedundantContentLocationAdd { get; set; } = true;
 
         /// <summary>
         /// Indicates whether content is reconciled between local machine and local db once a checkpoint is restored.
@@ -202,7 +219,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// <remarks>
         /// Reconciliation is a very critical feature and disabling it can cause build failures because machine's state can be out of sync with LLS's data.
         /// </remarks>
-        public bool EnableReconciliation { get; set; } = true;
+        public ReconciliationMode ReconcileMode { get; set; } = ReconciliationMode.Once;
 
         /// <summary>
         /// Indicates whether post-initialization steps (like reconciliation or processing state from the central store) are inlined during initialization. If false, operation is executed asynchronously and not awaited.
@@ -245,6 +262,21 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// Defaults to 0 if <see cref="ReconciliationMaxRemoveHashesCycleSize"/> is enabled but this isn't
         /// </summary>
         public double? ReconciliationMaxRemoveHashesAddPercentage { get; set; } = null;
+
+        /// <summary>
+        /// Maximum adds for local content without a record in a reconciliation cycle when <see cref="ReconcileMode"/> is checkpoint mode
+        /// </summary>
+        public int? ReconciliationAddLimit { get; set; } = null;
+
+        /// <summary>
+        /// Maximum removes for records without local content in a reconciliation cycle when <see cref="ReconcileMode"/> is checkpoint mode
+        /// </summary>
+        public int? ReconciliationRemoveLimit { get; set; } = null;
+
+        /// <summary>
+        /// Limit to the number of reconciled hashes to be logged
+        /// </summary>
+        public int ReconcileHashesLogLimit { get; set; } = 0;
 
         /// <summary>
         /// Threshold under which proactive replication will be activated.
@@ -304,7 +336,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// <summary>
         /// The minimum age a candidate for eviction must be older than to be evicted. If the candidate's age is not older
         /// then we simply ignore it for eviction and trace information to help us determine why the candidate is nominated for eviction
-        /// with such a younge age.
+        /// with such a young age.
         /// <remarks>
         /// Default to zero time to allow all candidates to pass, when we want to test for eviction min age we can configure for it.
         /// </remarks>
@@ -402,7 +434,7 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// <summary>
         /// The maximum number of gigabytes to retain in CAS
         /// </summary>
-        public int MaxRetentionGb { get; set; } = 20;
+        public double MaxRetentionGb { get; set; } = 20;
 
         /// <summary>
         /// Defines the target maximum number of simultaneous copies
@@ -421,10 +453,14 @@ namespace BuildXL.Cache.ContentStore.Distributed
         public SelfCheckSettings? SelfCheckSettings { get; set; }
 
         /// <summary>
-        /// When enabled, we will use our knowledge of which checkpointed files are immutable or not to optimize copy
-        /// operations into hardlinks.
+        /// Whether to proactively copy checkpoint files to another machine.
         /// </summary>
-        public bool ImmutabilityOptimizations { get; set; }
+        public bool ProactiveCopyCheckpointFiles { get; set; } = false;
+
+        /// <summary>
+        /// Whether to inline proactive copies done for checkpoint files or to do them asynchronously.
+        /// </summary>
+        public bool InlineCheckpointProactiveCopies { get; set; } = false;
     }
 
     /// <summary>
@@ -503,11 +539,6 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// The working directory used by checkpoint manager for staging checkpoints before upload and restore.
         /// </summary>
         public AbsolutePath WorkingDirectory { get; }
-
-        /// <summary>
-        /// Indicates whether incremental checkpointing is used
-        /// </summary>
-        public bool UseIncrementalCheckpointing { get; set; }
 
         /// <nodoc />
         public int IncrementalCheckpointDegreeOfParallelism { get; set; } = 1;

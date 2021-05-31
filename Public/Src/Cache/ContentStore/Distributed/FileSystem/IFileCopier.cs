@@ -29,11 +29,6 @@ namespace BuildXL.Cache.ContentStore.Distributed
         MachineLocation GetLocalMachineLocation(AbsolutePath cacheRoot);
 
         /// <summary>
-        /// Checks that the file represented by <paramref name="sourceLocation"/> exists.
-        /// </summary>
-        Task<FileExistenceResult> CheckFileExistsAsync(OperationContext context, ContentLocation sourceLocation);
-
-        /// <summary>
         /// Copies a file represented by the path into the stream specified.
         /// </summary>
         Task<CopyFileResult> CopyToAsync(OperationContext context, ContentLocation sourceLocation, Stream destinationStream, CopyOptions options);
@@ -42,7 +37,8 @@ namespace BuildXL.Cache.ContentStore.Distributed
     /// <summary>
     /// Represents a location of content on a machine
     /// </summary>
-    public struct ContentLocation
+    [StructGenerators.StructRecord]
+    public readonly partial struct ContentLocation
     {
         /// <nodoc />
         public MachineLocation Machine { get; }
@@ -50,12 +46,27 @@ namespace BuildXL.Cache.ContentStore.Distributed
         /// <nodoc />
         public ContentHash Hash { get; }
 
+        /// <summary>
+        /// If true, then the location is not a real location obtained from the local or the global store, but just a machine from the build ring.
+        /// </summary>
+        public bool FromRing { get; }
+
+        /// <summary>
+        /// Optional length size of the content.
+        /// </summary>
+        public long? Size { get; }
+
         /// <nodoc />
-        public ContentLocation(MachineLocation machine, ContentHash hash)
+        public ContentLocation(MachineLocation machine, ContentHash hash, long? size, bool fromRing = false)
         {
             Machine = machine;
             Hash = hash;
+            Size = size;
+            FromRing = fromRing;
         }
+
+        /// <inheritdoc />
+        public override string ToString() => Machine.ToString();
     }
 
     /// <summary>

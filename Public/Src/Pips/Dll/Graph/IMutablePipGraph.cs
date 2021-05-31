@@ -144,5 +144,18 @@ namespace BuildXL.Pips.Graph
         /// Attempts to return the kind of a directory artifact. Succeeds if the directory has already been added to the graph.
         /// </summary>
         bool TryGetSealDirectoryKind(DirectoryArtifact directoryArtifact, out SealDirectoryKind kind);
+
+        /// <summary>
+        /// Hydrates a pip from a <see cref="PipId"/>
+        /// </summary>
+        Pip GetPipFromPipId(PipId pipId);
+
+        /// <summary>
+        /// Asserts that a given output path is going to be present in an opaque directory
+        /// </summary>
+        /// <remarks>
+        /// The existence of the specified output is checked during pip execution
+        /// </remarks>
+        bool TryAssertOutputExistenceInOpaqueDirectory(DirectoryArtifact outputDirectoryArtifact, AbsolutePath outputInOpaque, out FileArtifact fileArtifact);
     }
 }

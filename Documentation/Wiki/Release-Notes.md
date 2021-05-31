@@ -1,6 +1,153 @@
 This page is a curated list of the release notes for releases after 0.20170619.4.0 and a manual copy of notable changes from each build before that. See the repo's commit history full details for what is included in each build.
 
 =======
+# 0.1.0-20210521.7.1 (Release [108460](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=108460)) Released 5/26/2021
+-	Perf improvement on detours reparse point resolution logic
+-	Expanded capacity of StringTable to deal with overflows
+-	JavaScript SourceMap symbol support added to Symbol Daemon
+-	Enable source verification across workers
+-	Usability improvements for Guardian under BuildXL
+
+# 0.1.0-20210507.6 (Release [106582](https://dev.azure.com/mseng/domino/_releaseProgress?_a=release-pipeline-progress&releaseId=106582)) Released 5/12/2021
+- [Dump pip Lite] Fixed minor issues in the output file
+- [MS Guardian] Add DScript SDK and documentation
+- Fixed an overflow in HistoricPerfDataTable
+- Various fixes and improvements
+
+# 0.1.0-20210430.2 (Release [105633](https://dev.azure.com/mseng/domino/_releaseProgress?_a=release-pipeline-progress&releaseId=105633)) Released 5/6/2021
+-	[JavaScript] Allow configuring process exit/retry codes and max number of retries in JavaScript resolvers.
+- Update the calculation of orchestrator's slots in the distributed builds.
+
+# 0.1.0-20210423.8 (Release [104915](https://dev.azure.com/mseng/domino/_releaseProgress?_a=release-pipeline-progress&releaseId=104915)) Released 4/28/2021
+-	Rename “master” to “orchestrator” in distribution code.
+-	Fixes to path combination and normalization logic in Detours.
+-	Fix to delete present directories before materializing reparse points.
+-	Build manifest performance and file materialization race fixes.
+-	Add distribution testing.
+-	Update default process retries to 3 and honour global untracked scopes for JS builds.
+-	Various bug fixes to memory management.
+
+# 0.1.0-20210416.5 (Release [104096](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=104096)) Released 4/21/2021
+- Dump Pip Lite - Track observed file accesses for failed pips 
+- Build Manifest: XLG event batching
+-	Track the size of the associated files in the drop
+- Bug fixes for grpc communication layer.
+
+# 0.1.0-20210409.1.1 (Release [103647](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=103647)) Released 4/15/2021
+- Implement a file descriptor table in the Linux sandbox
+- [AnyBuild] Ensure deterministic output of DLLs for native builders
+- Improved logging in substitute shim, drop daemon and memory management
+- [Drop] Support for long path names
+- [AnyBuild + BuildXL] Various improvements
+- Improvements in distributed builds
+- Improvements in DumpPipLite and PipExecutionPerformance analyzers
+- Added option to log all outputs of cached pips
+- Added support for long file names in drop
+- Minor adjustments for AnyBuild usage
+- Various bug fixes
+
+# 0.1.0-20210319.2 (Release [101111](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=101111)) Released 3/24/2021
+- Fix reparse point cache invalidation logic
+- Add azure artifacts credential helper support
+- Ignore events sent to orchestrator when pip results marked as complete
+- Invalidate reparse point creations on directories
+- Fix MachineReimagesRule with empty stamp
+- Other bug fixes, auth fixes and unit test improvements.
+
+# 0.1.0-20210312.6 (Release [100149](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=100149)) Released 3/17/2021
+- Improve early worker release logic
+
+# 0.1.0-20210308.3 (Release [99402](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=99402)) Released 3/10/2021
+- [JavaScript] Add Yarn/Rush/Npm install to JavaScript SDK
+- [Build manifest] Generate and upload signed catalog file
+- Configurable critical commit level
+- Increase BuildXL API server concurrency to handle multiple daemons from service pips
+- Various bug fixes
+
+# 0.1.0-20210226.4.1 (Release [98790](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=98790)) Released 3/04/2021
+-	Fix allowed same content source rewrite on convergence.
+-	Warn on writes declared outside mounts. 
+-	[Frontend] Add a method for getting a subdir of a shared opaque
+-	[Build Manifest] Improve perf and logging, and add additional counter.
+-	Add Azure Artifacts Credential Provider
+-	Correct successfully attached workers count
+-	Fix a crash in DumpPip analyzer
+
+# 0.1.0-20210205.3.1  (Release [96124](https://dev.azure.com/mseng/Domino/_releaseProgress?releaseId=96124&_a=release-pipeline-progress)) Released 2/10/2021
+-	Added Dump pip lite analyzer
+-	Improved synchronization for detoured processes
+-	Better handling of connection timeouts on workers
+-	Various bug fixes and perf improvements
+
+
+# 0.1.0-20210129.4 (Release [94335](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=94335)) Released 2/3/2021
+- Added handler for XLG event for failed pips
+- Improvements to Redis autoscaler
+- Upgrade AsyncFixer to v1.5.1 and fix the new async cases
+- QTest: Add LogUploadMode option and update nuget to change parser name
+- Various bug fixes and documentation improvements
+
+# 0.1.0-20210122.8 (Release [93209](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=93209)) Released 1/27/2021
+- Add breakaway process option in JS resolvers
+- [Detours] Fix symlink traversal for CreateFileW and NtCreateFile
+- Add the ability for DScript modules to define mounts
+- Various fixes and improvements
+
+# 0.1.0-20210118.0 (Release [92598](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=92598)) Released 1/20/2021
+- Process remoting via AnyBuild.
+- Added JavaScript SDK
+- Added Array.find ambient.
+- Extend process timeout when a process get suspended.
+- Various updates on documentations.
+- Various bug fixes.
+
+# 0.1.0-20210107.0 (Release [91421](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=91421)) Released 1/13/2021
+- Added implicit DScript resolver to automatically reference build-in SDKs
+- Added getdirectories DScript function to return all directories output by a pip
+- Misc crash and bug fixes
+
+# 0.1.0-20201211.3.1 (Release [89756](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=89756)) Released 12/16/2020
+- Updated QTest nuget version
+- Verifying VolatileSet before sending reconcile events
+- Re-enable ChangingColumnFamilies KeyValueStoreTest
+- Expanding the full framework compatible support in the NuGet resolver
+- Made DropPipTracker track any service pip
+- Detect connectivity issues between VM and Host (Improved VM retry logic)
+- Some code clean-up. Removed some features that were unused for a long time.
+
+# 0.1.0-20201204.5.1 (Release [88993](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=88993)) Released 12/9/2020
+- Added succeed fast pips
+- Better handling of frontend errors
+- [QTest] Update QTest SDK to facilitate JavaScript integration
+- Various fixes and improvements
+
+# 0.1.0-20201125.2 (Release [87786](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=87786)) Released 12/02/2020
+- File content table in server process
+- Engine state becoming immutable.
+- Exit-early-on-new-graph feature.
+- Temp cleaner becomes best effort to avoid excessive retries.
+- [QTest] QTestProcDump folder in QTest final outputs.
+- [JS Frontend] Support for customizing scheduling to enable Qtest into JavaScript frontend.
+- [LinuxSandbox] Report new process when libDetours.so is dynamically loaded
+
+# 0.1.0-20201107.0 (Release [85798](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=85798)) Released 11/11/2020
+- Don't delete parents of temp directories during scrubbing
+- Enable GRPC keepalive by default
+- Extra counters for Symbol Daemon
+- Extra counters for file materialization
+- Provide a knob to control "storing outputs to cache" concurrency
+- Add "Build Session Info" file (bsi.json) to drop as part of build manifest
+- Fix overflow exception during ChooseWorkerCpu
+- Fix Detours resolution cache
+- Make directory enumeration fingerprint more stable
+
+# 0.1.0-20201030.5 (Release [84823](https://mseng.visualstudio.com/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=84823)) Released 11/04/2020
+-	[JavaScript] Support grouping script commands into a single pip
+-	Handle duplicate file registration with different content in drop
+-	Build manifest uploads from master to drop
+-	Extra telemetry
+-	Various bug fixes
+
 # 0.1.0-20201023.7.4 (Release [84361](https://dev.azure.com/mseng/Domino/_releaseProgress?_a=release-pipeline-progress&releaseId=84361)) Released 10/28/2020
 - Expose a DScript flag to control full reparse point resolving
 - Detours Reparse Point Resolver Improvements

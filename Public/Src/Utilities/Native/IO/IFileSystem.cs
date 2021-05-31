@@ -589,8 +589,9 @@ namespace BuildXL.Native.IO
         /// </summary>
         /// <remarks>
         /// Supports paths greater than MAX_PATH.
+        /// On existence, indicates whether the path is a reparse point
         /// </remarks>
-        Possible<PathExistence, NativeFailure> TryProbePathExistence(string path, bool followSymlink);
+        Possible<PathExistence, NativeFailure> TryProbePathExistence(string path, bool followSymlink, out bool isReparsePoint);
 
         /// <summary>
         /// Whether the provided path matches the pattern (e.g. "*.cs")
@@ -646,6 +647,11 @@ namespace BuildXL.Native.IO
         /// Flag indicating if the enlistment volume supports copy on write.
         /// </summary>
         bool IsCopyOnWriteSupportedByEnlistmentVolume { get; set; }
+
+        /// <summary>
+        /// Flag indicating if the operating system supports in-kernel file copying.
+        /// </summary>
+        bool IsInKernelCopyingSupportedByHostSystem { get; }
 
         /// <summary>
         /// Checks if a path is a directory symlink or a junction.

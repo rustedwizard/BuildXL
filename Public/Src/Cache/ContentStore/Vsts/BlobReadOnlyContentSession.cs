@@ -32,10 +32,8 @@ using Microsoft.VisualStudio.Services.Content.Common;
 using Microsoft.VisualStudio.Services.WebApi;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
-using BlobIdentifier = BuildXL.Cache.ContentStore.Hashing.BlobIdentifier;
 using ByteArrayPool = Microsoft.VisualStudio.Services.BlobStore.Common.ByteArrayPool;
 using OperationContext = BuildXL.Cache.ContentStore.Tracing.Internal.OperationContext;
-using VstsBlobIdentifier = Microsoft.VisualStudio.Services.BlobStore.Common.BlobIdentifier;
 
 #nullable enable
 
@@ -313,15 +311,10 @@ namespace BuildXL.Cache.ContentStore.Vsts
         protected override Task<IEnumerable<Task<Indexed<PlaceFileResult>>>> PlaceFileCoreAsync(OperationContext context, IReadOnlyList<ContentHashWithPath> hashesWithPaths, FileAccessMode accessMode, FileReplacementMode replacementMode, FileRealizationMode realizationMode, UrgencyHint urgencyHint, Counter retryCounter)
             => throw new NotImplementedException();
 
-        /// <summary>
-        /// Converts a ContentStore blob id to an artifact BlobId
-        /// </summary>
-        protected static VstsBlobIdentifier ToVstsBlobIdentifier(BlobIdentifier blobIdentifier) => new VstsBlobIdentifier(blobIdentifier.Bytes);
-
         private async Task<IEnumerable<Task<Indexed<PinResult>>>> UpdateBlobStoreAsync(OperationContext context, IReadOnlyList<ContentHash> contentHashes, DateTime endDateTime)
         {
             // Convert missing content hashes to blob Ids
-            var blobIds = contentHashes.Select(c => ToVstsBlobIdentifier(c.ToBlobIdentifier())).ToList();
+            var blobIds = contentHashes.Select(contentHash => contentHash.ToBlobIdentifier()).ToList();
 
             // Call TryReference on the blob ids
             var references = blobIds.Distinct().ToDictionary(
@@ -395,11 +388,11 @@ namespace BuildXL.Cache.ContentStore.Vsts
             return DownloadUsingAzureBlobsAsync(context, contentHash, path, fileMode);
         }
 
-        private async Task<long?> DownloadUsingAzureBlobsAsync(
+        private Task<long?> DownloadUsingAzureBlobsAsync(
             OperationContext context, ContentHash contentHash, string path, FileMode fileMode)
         {
 
-            return await AsyncHttpRetryHelper<long?>.InvokeAsync(
+            return AsyncHttpRetryHelper<long?>.InvokeAsync(
                 async () =>
                 {
                     StreamWithRange? httpStream = null;
@@ -417,7 +410,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                             var success = DownloadUriCache.Instance.TryGetDownloadUri(contentHash, out var preauthUri);
                             uri = success ? preauthUri.NotNullUri : new Uri("http://empty.com");
 
-                            Directory.CreateDirectory(Directory.GetParent(path).FullName);
+                            Directory.CreateDirectory(Directory.GetParent(path)!.FullName);
 
                             // TODO: Investigate using ManagedParallelBlobDownloader instead (bug 1365340)
                             await ParallelHttpDownload.Download(
@@ -463,7 +456,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                     }
                     catch (StorageException storageEx) when (storageEx.InnerException is WebException webEx)
                     {
-                        if (((HttpWebResponse)webEx.Response).StatusCode == HttpStatusCode.NotFound)
+                        if (((HttpWebResponse?)webEx.Response)?.StatusCode == HttpStatusCode.NotFound)
                         {
                             return null;
                         }
@@ -500,7 +493,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                 },
                 cancellationToken: context.Token,
                 continueOnCapturedContext: false,
-                context: context.TracingContext.Id.ToString());
+                context: context.TracingContext.TraceId);
         }
 
 #if PLATFORM_WIN
@@ -545,12 +538,12 @@ namespace BuildXL.Cache.ContentStore.Vsts
                     context,
                     "GetStreamInternal",
                     innerCts => BlobStoreHttpClient.GetDownloadUrisAsync(
-                        new[] { ToVstsBlobIdentifier(blobId) },
+                        new[] { blobId },
                         EdgeCache.NotAllowed,
                         cancellationToken: innerCts),
                     context.Token).ConfigureAwait(false);
 
-                if (mappings == null || !mappings.TryGetValue(ToVstsBlobIdentifier(blobId), out uri))
+                if (mappings == null || !mappings.TryGetValue(blobId, out uri))
                 {
                     return null;
                 }
@@ -595,7 +588,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
             string errorMessage = $"{operation} failed. ContentHash=[{hash.ToShortString()}], BaseAddress=[{BlobStoreHttpClient.BaseAddress}], BlobUri=[{getBlobUri(azureBlobUri)}]";
 
             // Explicitly trace all the failures here to simplify errors analysis.
-            context.TraceDebug($"{errorMessage}. Error=[{e}]");
+            Tracer.Debug(context, $"{errorMessage}. Error=[{e}]");
 
             static string getBlobUri(Uri? uri)
             {

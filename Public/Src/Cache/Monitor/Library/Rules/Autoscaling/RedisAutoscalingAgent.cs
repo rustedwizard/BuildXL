@@ -5,7 +5,6 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
-using Microsoft.Azure.Management.Monitor;
 using Microsoft.Azure.Management.Monitor.Models;
 using System.Diagnostics.ContractsLight;
 using System.Collections.Generic;
@@ -22,6 +21,10 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
         public double MinimumAllowedClusterRps { get; internal set; }
 
         public long? MaximumAllowedClusterMemoryMb { get; internal set; }
+
+        public long? MinimumNumberOfShardsAllowed { get; internal set; }
+
+        public bool DisallowChangingNumberOfShards { get; internal set; }
     }
 
     internal class ModelOutput
@@ -43,7 +46,7 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
         }
     }
 
-    internal sealed class RedisAutoscalingAgent
+    internal class RedisAutoscalingAgent
     {
         public class Configuration
         {
@@ -53,26 +56,43 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
 
             public double MinimumExtraMemoryAvailable { get; set; } = 0.3;
 
-            public TimeSpan WorkloadLookback { get; set; } = TimeSpan.FromDays(2);
+            public long? MaximumClusterMemoryAllowedMb { get; set; } = null;
+
+            public TimeSpan WorkloadLookback { get; set; } = TimeSpan.FromHours(6);
 
             public TimeSpan WorkloadAggregationInterval { get; set; } = TimeSpan.FromMinutes(5);
 
             public double MinimumWorkloadExtraPct { get; set; } = 0.3;
 
-            public long? MaximumClusterMemoryAllowedMb { get; set; } = null;
+            public TimeSpan ServerLoadLookback { get; set; } = TimeSpan.FromHours(6);
+
+            public TimeSpan ServerLoadAggregationInterval { get; set; } = TimeSpan.FromMinutes(5);
+
+            /// <summary>
+            /// The minimum amount of money a downscale needs to save in order to be allowed to happen
+            /// </summary>
+            /// <remarks>
+            /// This is just set based on looking at what worthless autoscales the monitor does. Concretely, we're
+            /// looking to avoid autoscales that save like 10 USD.
+            /// </remarks>
+            public double? MinimumCostSavingForDownScalingUsd { get; set; } = 100;
+
+            public double MediumServerLoadPct { get; set; } = 60;
+
+            public double HighServerLoadPct { get; set; } = 80;
         }
 
         private readonly Configuration _configuration;
-        private readonly IMonitorManagementClient _monitorManagementClient;
+        private readonly IAzureMetricsClient _azureMetricsClient;
 
-        public RedisAutoscalingAgent(Configuration configuration, IMonitorManagementClient monitorManagementClient)
+        public RedisAutoscalingAgent(Configuration configuration, IAzureMetricsClient azureMetricsClient)
         {
             Contract.Requires(configuration.UsedMemoryAggregationInterval < configuration.UsedMemoryLookback);
             Contract.Requires(configuration.UsedMemoryLookback <= TimeSpan.FromDays(30));
             Contract.Requires(configuration.MinimumExtraMemoryAvailable > 0);
 
             _configuration = configuration;
-            _monitorManagementClient = monitorManagementClient;
+            _azureMetricsClient = azureMetricsClient;
         }
 
         public async Task<Result<ModelOutput>> EstimateBestClusterSizeAsync(OperationContext context, IRedisInstance redisInstance)
@@ -85,13 +105,8 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
             return Predict(currentClusterSize, modelContext);
         }
 
-        private static Result<ModelOutput> Predict(RedisClusterSize currentClusterSize, ModelContext modelContext)
+        private Result<ModelOutput> Predict(RedisClusterSize currentClusterSize, ModelContext modelContext)
         {
-            // TODO: autoscaler should consider the server load percentage as well. If a shard had a very high load
-            // percentage, it means that it is for some reason receiving an uneven load. Hence, adding shards helps in
-            // this situation. There is no easy way to add that to the current model. Ideas:
-            //  - If any server reached a load >70% at any time in the period analyzed, we need to guarantee that
-            //    there's at least as many shards as there were before (i.e. no downscales are allowed).
             var shortestPaths = ComputeAllowedPaths(currentClusterSize, modelContext);
 
             var eligibleClusterSizes = shortestPaths
@@ -137,6 +152,16 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
             Func<RedisClusterSize, IEnumerable<RedisClusterSize>> neighbors =
                 currentClusterSize => currentClusterSize.ScaleEligibleSizes.Where(targetClusterSize =>
                 {
+                    if (modelContext.DisallowChangingNumberOfShards && targetClusterSize.Shards != currentClusterSize.Shards)
+                    {
+                        return false;
+                    }
+
+                    if (modelContext.MinimumNumberOfShardsAllowed != null && targetClusterSize.Shards < modelContext.MinimumNumberOfShardsAllowed.Value)
+                    {
+                        return false;
+                    }
+
                     // Constrain paths to downscale at most one shard at the time. This only makes paths longer, so it
                     // is safe. The reason behind this is that the service doesn't really tolerate big reductions.
                     if (targetClusterSize.Shards < currentClusterSize.Shards)
@@ -178,36 +203,17 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
             var modelContext = new ModelContext();
 
             await Task.WhenAll(
-                    ComputeMemoryRelatedFeaturesAsync(context, now, redisAzureId, currentClusterSize, modelContext),
-                    ComputeWorkloadRelatedFeaturesAsync(context, now, redisAzureId, currentClusterSize, modelContext)
+                    ComputeMemoryFeaturesAsync(context, now, redisAzureId, modelContext),
+                    ComputeWorkloadFeaturesAsync(context, now, redisAzureId, modelContext),
+                    ComputeServerLoadFeaturesAsync(context, now, redisAzureId, modelContext, currentClusterSize)
                 );
 
             return modelContext;
         }
 
-        private async Task ComputeWorkloadRelatedFeaturesAsync(OperationContext context, DateTime now, string redisAzureId, RedisClusterSize currentClusterSize, ModelContext modelContext)
+        private async Task ComputeWorkloadFeaturesAsync(OperationContext context, DateTime now, string redisAzureId, ModelContext modelContext)
         {
-            var startTimeUtc = now - _configuration.WorkloadLookback;
-            var endTimeUtc = now;
-
-            var operationsPerSecond = await _monitorManagementClient.GetMetricsWithDimensionAsync(
-                redisAzureId,
-                new[] { AzureRedisShardMetric.OperationsPerSecond.ToMetricName() },
-                "ShardId",
-                startTimeUtc,
-                endTimeUtc,
-                _configuration.WorkloadAggregationInterval,
-                aggregations: new[] { AggregationType.Maximum },
-                context.Token);
-
-            // NOTE: Measurement values may be null if we are querying for data that is not present (i.e. a shard that
-            // has disappeared, or such).
-            var groupedMetrics = operationsPerSecond
-                .SelectMany(kvp => kvp.Value.Select((measurement, index) => (measurement, index)))
-                .GroupBy(entry => entry.index)
-                .OrderBy(group => group.Key)
-                .Select(group => group.Sum(entry => entry.measurement.Maximum ?? 0))
-                .ToList();
+            var groupedMetrics = await FetchOperationsPerSecondPerShardAsync(context, now, redisAzureId);
 
             if (groupedMetrics.Count == 0)
             {
@@ -222,12 +228,49 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
             modelContext.MinimumAllowedClusterRps = (1 + _configuration.MinimumWorkloadExtraPct) * expectedClusterRps;
         }
 
-        private async Task ComputeMemoryRelatedFeaturesAsync(OperationContext context, DateTime now, string redisAzureId, RedisClusterSize currentClusterSize, ModelContext modelContext)
+        protected virtual async Task<List<double>> FetchOperationsPerSecondPerShardAsync(OperationContext context, DateTime now, string redisAzureId)
+        {
+            var startTimeUtc = now - _configuration.WorkloadLookback;
+            var endTimeUtc = now;
+
+            var operationsPerSecond = await _azureMetricsClient.GetMetricsWithDimensionAsync(
+                redisAzureId,
+                new[] { AzureRedisShardMetric.OperationsPerSecond.ToMetricName() },
+                "ShardId",
+                startTimeUtc,
+                endTimeUtc,
+                _configuration.WorkloadAggregationInterval,
+                aggregations: new[] { AggregationType.Maximum },
+                context.Token);
+
+            // NOTE: Measurement values may be null if we are querying for data that is not present (i.e. a shard that
+            // has disappeared, or such).
+            return operationsPerSecond
+                .SelectMany(kvp => kvp.Value.Select((measurement, index) => (measurement, index)))
+                .GroupBy(entry => entry.index)
+                .OrderBy(group => group.Key)
+                .Select(group => group.Sum(entry => entry.measurement.Maximum ?? 0))
+                .ToList();
+        }
+
+        private async Task ComputeMemoryFeaturesAsync(OperationContext context, DateTime now, string redisAzureId, ModelContext modelContext)
+        {
+            var groupedMetrics = await FetchMemoryUsedPerShardAsync(context, now, redisAzureId);
+
+            // Metric is reported in bytes, we use megabytes for everything
+            var expectedClusterMemoryUsageMb = groupedMetrics.Max() / 1e+6;
+
+            modelContext.MinimumAllowedClusterMemoryMb = (1 + _configuration.MinimumExtraMemoryAvailable) * expectedClusterMemoryUsageMb;
+
+            modelContext.MaximumAllowedClusterMemoryMb = _configuration.MaximumClusterMemoryAllowedMb;
+        }
+
+        protected virtual async Task<List<double>> FetchMemoryUsedPerShardAsync(OperationContext context, DateTime now, string redisAzureId)
         {
             var startTimeUtc = now - _configuration.UsedMemoryLookback;
             var endTimeUtc = now;
 
-            var usedMemoryBytes = await _monitorManagementClient.GetMetricsWithDimensionAsync(
+            var usedMemoryBytes = await _azureMetricsClient.GetMetricsWithDimensionAsync(
                 redisAzureId,
                 new[] { AzureRedisShardMetric.UsedMemory.ToMetricName() },
                 "ShardId",
@@ -239,19 +282,60 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
 
             // NOTE: Measurement values may be null if we are querying for data that is not present (i.e. a shard that
             // has disappeared, or such).
-            var groupedMetrics = usedMemoryBytes
+            return usedMemoryBytes
                 .SelectMany(kvp => kvp.Value.Select((measurement, index) => (measurement, index)))
                 .GroupBy(entry => entry.index)
                 .OrderBy(group => group.Key)
                 .Select(group => group.Sum(entry => entry.measurement.Maximum ?? 0))
                 .ToList();
+        }
 
-            // Metric is reported in bytes, we use megabytes for everything
-            var expectedClusterMemoryUsageMb = groupedMetrics.Max() / 1e+6;
 
-            modelContext.MinimumAllowedClusterMemoryMb = (1 + _configuration.MinimumExtraMemoryAvailable) * expectedClusterMemoryUsageMb;
+        private async Task ComputeServerLoadFeaturesAsync(OperationContext context, DateTime now, string redisAzureId, ModelContext modelContext, RedisClusterSize currentClusterSize)
+        {
+            var maximumServerLoadAcrossShardsList = await FetchMaximumServerLoadAcrossShardsAsync(context, now, redisAzureId);
 
-            modelContext.MaximumAllowedClusterMemoryMb = _configuration.MaximumClusterMemoryAllowedMb;
+            // Patch in case the list happens to be empty (might only ever happen in tests)
+            var maximumServerLoadAcrossShards = maximumServerLoadAcrossShardsList.Any() ? maximumServerLoadAcrossShardsList.Max() : 0;
+            
+            if (maximumServerLoadAcrossShards < _configuration.MediumServerLoadPct)
+            {
+                return;
+            }
+
+            modelContext.MinimumNumberOfShardsAllowed = currentClusterSize.Shards;
+
+            if (maximumServerLoadAcrossShards < _configuration.HighServerLoadPct)
+            {
+                return;
+            }
+
+            modelContext.DisallowChangingNumberOfShards = true;
+        }
+
+        protected virtual async Task<List<double>> FetchMaximumServerLoadAcrossShardsAsync(OperationContext context, DateTime now, string redisAzureId)
+        {
+            var startTimeUtc = now - _configuration.ServerLoadLookback;
+            var endTimeUtc = now;
+
+            var serverLoadPct = await _azureMetricsClient.GetMetricsWithDimensionAsync(
+                redisAzureId,
+                new[] { AzureRedisShardMetric.ServerLoad.ToMetricName() },
+                "ShardId",
+                startTimeUtc,
+                endTimeUtc,
+                _configuration.ServerLoadAggregationInterval,
+                aggregations: new[] { AggregationType.Maximum },
+                context.Token);
+
+            // NOTE: Measurement values may be null if we are querying for data that is not present (i.e. a shard that
+            // has disappeared, or such).
+            return serverLoadPct
+                .SelectMany(kvp => kvp.Value.Select((measurement, index) => (measurement, index)))
+                .GroupBy(entry => entry.index)
+                .OrderBy(group => group.Key)
+                .Select(group => group.Max(entry => entry.measurement.Maximum ?? 0))
+                .ToList();
         }
 
         /// <summary>
@@ -261,30 +345,53 @@ namespace BuildXL.Cache.Monitor.Library.Rules.Autoscaling
         ///
         /// The autoscaler will figure out how to reach the desired plan.
         /// </summary>
-        private static bool IsScalingAllowed(
-            RedisClusterSize current,
-            RedisClusterSize target,
+        private bool IsScalingAllowed(
+            RedisClusterSize currentClusterSize,
+            RedisClusterSize targetClusterSize,
             ModelContext modelContext)
         {
+            // WARNING: order matters in the following if statements. Please be careful.
+
             // Cluster must be able to handle the amount of data we'll give it, with some overhead in case of
             // production issues. Notice we don't introduce a per-shard restriction; reason for this is that the shards
             // distribute keys evenly.
-            if (target.ClusterMemorySizeMb < modelContext.MinimumAllowedClusterMemoryMb)
+            if (targetClusterSize.ClusterMemorySizeMb < modelContext.MinimumAllowedClusterMemoryMb)
             {
                 return false;
             }
 
             // Cluster must be able to handle the amount of operations needed. Notice we don't introduce a per-shard
             // restriction; reason for this is that the shards distribute keys evenly.
-            if (target.EstimatedRequestsPerSecond < modelContext.MinimumAllowedClusterRps)
+            if (targetClusterSize.EstimatedRequestsPerSecond < modelContext.MinimumAllowedClusterRps)
             {
                 return false;
             }
 
             // Disallow going over the maximum allowed cluster memory
-            if (modelContext.MaximumAllowedClusterMemoryMb != null && target.ClusterMemorySizeMb > modelContext.MaximumAllowedClusterMemoryMb.Value)
+            // NOTE: we only constrain on the target not being over the allowed size, rather than all nodes in the
+            // path. The reason for this is that our ability to reach all nodes is based on being able to scale above
+            // any specific memory threshold.
+            if (modelContext.MaximumAllowedClusterMemoryMb != null && targetClusterSize.ClusterMemorySizeMb > modelContext.MaximumAllowedClusterMemoryMb.Value)
             {
                 return false;
+            }
+
+            // Always allow not doing anything if it's available.
+            // NOTE: this is here because in downscale situations we always want to ensure we have the "status quo"
+            // action available.
+            if (currentClusterSize.Equals(targetClusterSize))
+            {
+                return true;
+            }
+
+            // Disallow downscales that don't improve cost significantly
+            if (_configuration.MinimumCostSavingForDownScalingUsd != null)
+            {
+                var monthlyCostDelta = targetClusterSize.MonthlyCostUsd - currentClusterSize.MonthlyCostUsd;
+                if (RedisScalingUtilities.IsDownScale(currentClusterSize, targetClusterSize) && monthlyCostDelta <= 0 && -monthlyCostDelta < _configuration.MinimumCostSavingForDownScalingUsd)
+                {
+                    return false;
+                }
             }
 
             return true;

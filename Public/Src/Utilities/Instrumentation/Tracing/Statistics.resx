@@ -150,21 +150,6 @@
   <data name="DiskAvailableMBExecutionStart" xml:space="preserve">
     <value>DiskAvailableMBExecutionStart</value>
   </data>
-  <data name="ApiTotalMaterializeFileCalls" xml:space="preserve">
-    <value>BuildXLApiTotalMaterializeFileCalls</value>
-  </data>
-    <data name="ApiTotalRegisterBuildManifestHashCalls" xml:space="preserve">
-    <value>BuildXLApiTotalRegisterBuildManifestHashCalls</value>
-  </data>
-    <data name="ApiTotalGenerateBuildManifestFileCalls" xml:space="preserve">
-    <value>BuildXLApiTotalGenerateBuildManifestFileCalls</value>
-  </data>
-  <data name="ApiTotalReportStatisticsCalls" xml:space="preserve">
-    <value>BuildXLApiTotalReportStatisticsCalls</value>
-  </data>
-  <data name="ApiTotalGetSealedDirectoryContentCalls" xml:space="preserve">
-    <value>BuildXLApiTotalGetSealedDirectoryContentCalls</value>
-  </data>
   <data name="DropTrackerOverhangMs" xml:space="preserve">
     <value>DropTrackerOverhangMs</value>
   </data>
@@ -252,6 +237,9 @@
   <data name="ErrorWasLogged" xml:space="preserve">
     <value>ErrorWasLogged</value>
   </data>
+  <data name="SucceededFast" xml:space="preserve">
+    <value>SucceedFast</value>
+  </data>
   <data name="TimeToEngineRunCompleteMs" xml:space="preserve">
     <value>TimeToEngineRunCompleteMs</value>
   </data>
@@ -290,9 +278,6 @@
   </data>
   <data name="AppHostInitializationDurationMs" xml:space="preserve">
     <value>AppHostInitializationDurationMs</value>
-  </data>
-  <data name="ApiTotalLogMessageCalls" xml:space="preserve">
-    <value>BuildXLApiTotalLogMessageCalls</value>
   </data>
   <data name="TotalMaterializedInputsSize" xml:space="preserve">
     <value>TotalMaterializedInputsSize</value>
@@ -335,5 +320,11 @@
   </data>
   <data name="TotalApiServerMaterializedOutputsCount" xml:space="preserve">
     <value>TotalApiServerMaterializedOutputsCount</value>
+  </data>
+  <data name="Counter_JobObjectAverageCPUTime" xml:space="preserve">
+    <value>JobObjectAverageCPUTime</value>
+  </data>
+  <data name="Counter_MachineAverageCPUWMITime" xml:space="preserve">
+    <value>MachineAverageCPUWMITime</value>
   </data>
 </root>

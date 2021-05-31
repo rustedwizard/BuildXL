@@ -1,4 +1,5 @@
-﻿using System.ComponentModel;
+﻿using System.Collections.Generic;
+using System.ComponentModel;
 
 namespace BuildXL.Cache.ContentStore.Hashing
 {
@@ -67,6 +68,20 @@ namespace BuildXL.Cache.ContentStore.Hashing
                     return true;
                 default:
                     throw new InvalidEnumArgumentException($"Unsupported algorithm id {algorithmId} of enum type: {nameof(NodeAlgorithmId)} encountered.");
+            }
+        }
+
+        /// <nodoc />
+        public static IContentHasher GetContentHasher(this NodeAlgorithmId algorithmId)
+        {
+            switch (algorithmId)
+            {
+                case NodeAlgorithmId.Node1024K:
+                    return Dedup1024KHashInfo.Instance.CreateContentHasher();
+                case NodeAlgorithmId.Node64K:
+                    return DedupNode64KHashInfo.Instance.CreateContentHasher();
+                default:
+                    throw new InvalidEnumArgumentException($"No hasher found for unsupported {nameof(NodeAlgorithmId)} : {algorithmId}.");
             }
         }
     }

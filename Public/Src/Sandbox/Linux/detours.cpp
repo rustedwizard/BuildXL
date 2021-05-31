@@ -71,7 +71,7 @@ INTERPOSE(int, clone, int (*fn)(void *), void *child_stack, int flags, void *arg
 })
 
 INTERPOSE(int, fexecve, int fd, char *const argv[], char *const envp[])({
-    bxl->report_access_fd(__func__, ES_EVENT_TYPE_NOTIFY_EXEC, fd);    
+    bxl->report_access_fd(__func__, ES_EVENT_TYPE_NOTIFY_EXEC, fd);
     return bxl->fwd_fexecve(fd, argv, bxl->ensureEnvs(envp)).restore();
 })
 
@@ -213,11 +213,17 @@ INTERPOSE(int, faccessat, int dirfd, const char *pathname, int mode, int flags)(
     return bxl->check_and_fwd_faccessat(check, ERROR_RETURN_VALUE, dirfd, pathname, mode, flags);
 })
 
+// report "Create" if path does not exist and O_CREAT or O_TRUNC is specified
+// report "Write" if path exists and O_CREAT or O_TRUNC is specified (because this truncates the file regardless of its content)
+// otherwise, report "Read"
 static AccessCheckResult ReportFileOpen(BxlObserver *bxl, string &pathStr, int oflag)
 {
     mode_t pathMode = bxl->get_mode(pathStr.c_str());
+    bool pathExists = pathMode != 0;
+    bool isCreate = !pathExists && (oflag & (O_CREAT|O_TRUNC));
+    bool isWrite = pathExists && (oflag & (O_CREAT|O_TRUNC) && (oflag & O_WRONLY));
     IOEvent event(
-        pathMode == 0 && (oflag & (O_CREAT|O_TRUNC)) ? ES_EVENT_TYPE_NOTIFY_CREATE : ES_EVENT_TYPE_NOTIFY_OPEN,
+        isCreate ? ES_EVENT_TYPE_NOTIFY_CREATE : isWrite ? ES_EVENT_TYPE_NOTIFY_WRITE : ES_EVENT_TYPE_NOTIFY_OPEN,
         ES_ACTION_TYPE_NOTIFY,
         pathStr, bxl->GetProgramPath(), pathMode, false);
     return bxl->report_access(__func__, event);
@@ -396,7 +402,24 @@ INTERPOSE(int, symlinkat, const char *target, int dirfd, const char *linkPath)({
     return bxl->check_and_fwd_symlinkat(check, ERROR_RETURN_VALUE, target, dirfd, linkPath);
 })
 
-INTERPOSE(ssize_t, readlink, const char *path, char *buf, size_t bufsize)({
+INTERPOSE_SOMETIMES(
+    ssize_t,
+    readlink,
+    // rustc uses jemalloc
+    // During it's initialization, jemalloc grabs a lock and then calls readlink on "/etc/malloc.conf"
+    // libDomino hooks readlink
+    // libDomino's readlink hook calls dlsym
+    // dlsym calls calloc
+    // calloc calls jemalloc
+    // jemalloc tries to grab the lock, but this same thread already holds it.
+    // To break this deadlock, we ideally would route this to real_readlink, but it is not initialized yet.
+    // As a stopgap, we just assume it doesn't exist.
+    if (path != NULL && (strcmp(path, "/etc/malloc.conf") == 0)) {
+        errno = ENOENT;
+        return -1;
+    }, 
+    const char *path, char *buf, size_t bufsize)(
+{
     auto check = bxl->report_access(__func__, ES_EVENT_TYPE_NOTIFY_READLINK, path, O_NOFOLLOW);
     return bxl->check_and_fwd_readlink(check, (ssize_t)ERROR_RETURN_VALUE, path, buf, bufsize);
 })
@@ -583,14 +606,24 @@ INTERPOSE(int, name_to_handle_at, int dirfd, const char *pathname, struct file_h
     return bxl->check_and_fwd_name_to_handle_at(check, ERROR_RETURN_VALUE, dirfd, pathname, handle, mount_id, flags);
 })
 
+INTERPOSE(int, close, int fd) ({ 
+    bxl->reset_fd_table_entry(fd);
+    return bxl->fwd_close(fd).restore();
+})
+
 static void report_exit(int exitCode, void *args)
 {
     BxlObserver::GetInstance()->report_access("on_exit", ES_EVENT_TYPE_NOTIFY_EXIT, std::string(""), std::string(""));
 }
 
+// invoked by the loader when our shared library is dynamically loaded into a new host process
 void __attribute__ ((constructor)) _bxl_linux_sandbox_init(void)
 {
-   on_exit(report_exit, NULL);
+    // set up an on-exit handler
+    on_exit(report_exit, NULL);
+
+    // report that a new process has been created 
+    BxlObserver::GetInstance()->report_access("__init__", ES_EVENT_TYPE_NOTIFY_EXEC, __progname);
 }
 
 // ==========================
@@ -604,7 +637,6 @@ int main(int argc, char **argv)
 
 /* ============ Sometimes useful (for debugging) to interpose without access checking
 
-INTERPOSE(int, close, int fd)             ({ return bxl->fwd_close(fd).restore(); })
 INTERPOSE(int, fclose, FILE *f)           ({ return bxl->fwd_fclose(f).restore(); })
 INTERPOSE(int, dup, int fd)               ({ return bxl->fwd_dup(fd).restore(); })
 INTERPOSE(int, dup2, int oldfd, int newfd)({ return bxl->fwd_dup2(oldfd, newfd).restore(); })

@@ -27,6 +27,7 @@ export const exe = !BuildXLSdk.isSymbolToolingEnabled ? undefined : BuildXLSdk.e
         importFrom("BuildXL.Utilities").Ipc.dll,
         importFrom("BuildXL.Utilities").Native.dll,
         importFrom("BuildXL.Utilities").Storage.dll,
+        importFrom("BuildXL.Utilities").Collections.dll,
         importFrom("BuildXL.Tools").ServicePipDaemon.dll,
 
         importFrom("ItemStore.Shared").pkg,
@@ -48,8 +49,12 @@ export const exe = !BuildXLSdk.isSymbolToolingEnabled ? undefined : BuildXLSdk.e
         ...addIf(BuildXLSdk.isFullFramework,
                 NetFx.System.Net.Http.dll
             ),
+        ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
     ],
-    runtimeContent: symstoreX64Libs    
+    runtimeContent: symstoreX64Libs,
+    internalsVisibleTo: [
+        "Test.Tool.SymbolDaemon",
+    ]
 });
 
 function getSymstoreX64Libs() : File[] {

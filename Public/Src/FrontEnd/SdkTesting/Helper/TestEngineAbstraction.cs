@@ -71,9 +71,7 @@ namespace BuildXL.FrontEnd.Script.Testing.Helper
             if (TryGetFrontEndFile(path, "dummyFrontEnd", out stream))
             {
                 var result = await FileContent.ReadFromAsync(stream);
-#pragma warning disable AsyncFixer02
                 stream?.Dispose();
-#pragma warning restore AsyncFixer02
                 return result;
             }
 
@@ -222,5 +220,11 @@ namespace BuildXL.FrontEnd.Script.Testing.Helper
         {
             return EnumerateEntriesHelper(m_pathTable, path, pattern, recursive, directories, m_fileSystem);
         }
+
+        /// <inheritdoc />
+        public override bool CompleteMountInitialization() => true;
+
+        /// <inheritdoc />
+        public override void AddResolvedModuleDefinedMount(IMount mount, LocationData? mountLocation = null) => m_mounts.Add(mount.Name.ToString(m_stringTable), mount);
     }
 }

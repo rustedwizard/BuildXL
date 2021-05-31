@@ -373,6 +373,30 @@ namespace BuildXL.Processes.Tracing
             string message);
 
         [GeneratedEvent(
+            (int)LogEventId.LogRemotingDebugMessage,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.PipExecutor,
+            Message = "[Pip{pipSemiStableHash:X16}] Remoting debug: {message}")]
+        public abstract void LogRemotingDebugMessage(
+            LoggingContext context,
+            long pipSemiStableHash,
+            string message);
+
+        [GeneratedEvent(
+            (int)LogEventId.LogRemotingErrorMessage,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.PipExecutor,
+            Message = "[Pip{pipSemiStableHash:X16}] Remoting error: {message}")]
+        public abstract void LogRemotingErrorMessage(
+            LoggingContext context,
+            long pipSemiStableHash,
+            string message);
+
+        [GeneratedEvent(
             (int)LogEventId.LogMacKextFailure,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
@@ -847,7 +871,7 @@ namespace BuildXL.Processes.Tracing
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
-            Message = EventConstants.PipSpecPrefix + "Failed to preserve output directory '{directory}' because '{file}' cannot be made private, contents of the directory will be deleted")]
+            Message = EventConstants.PipPrefix + "Failed to preserve output directory '{directory}' because '{file}' cannot be made private, contents of the directory will be deleted")]
         public abstract void PipProcessPreserveOutputDirectoryFailedToMakeFilePrivate(
             LoggingContext context,
             long pipSemiStableHash,
@@ -856,12 +880,25 @@ namespace BuildXL.Processes.Tracing
             string file);
 
         [GeneratedEvent(
+            (int)LogEventId.PipProcessPreserveOutputDirectorySkipMakeFilesPrivate,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.PipExecutor,
+            Message = EventConstants.PipPrefix + "Output directory '{directory}' is not preserved because /unsafe_IgnorePreserveOutputsPrivatization. This can cause failure in pip execution.")]
+        public abstract void PipProcessPreserveOutputDirectorySkipMakeFilesPrivate(
+            LoggingContext context,
+            long pipSemiStableHash,
+            string pipDescription,
+            string directory);
+
+        [GeneratedEvent(
             (int)LogEventId.PipProcessChangeAffectedInputsWrittenFileCreationFailed,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (int)Tasks.PipExecutor,
-            Message = EventConstants.PipSpecPrefix + "File containing change affected inputs could not be prepared, path '{2}', error code {3:X8}: {4}")]
+            Message = EventConstants.PipPrefix + "File containing change affected inputs could not be prepared, path '{path}', error code {errorCode:X8}: {message}")]
         public abstract void PipProcessChangeAffectedInputsWrittenFileCreationFailed(
             LoggingContext context,
             long pipSemiStableHash,
@@ -950,6 +987,24 @@ namespace BuildXL.Processes.Tracing
             EventTask = (int)Tasks.PipExecutor,
             Message = EventConstants.PipPrefix + "Process execution via external tool finished with the tool's exit code {exitCode}:{stdOut}{stdErr}")]
         public abstract void PipProcessFinishedExternalTool(LoggingContext context, long pipSemiStableHash, string pipDescription, int exitCode, string stdOut, string stdErr);
+
+        [GeneratedEvent(
+            (int)LogEventId.PipProcessStartRemoteExecution,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.PipExecutor,
+            Message = EventConstants.PipPrefix + "Remoting process execution via '{tool}' starts")]
+        public abstract void PipProcessStartRemoteExecution(LoggingContext context, long pipSemiStableHash, string pipDescription, string tool);
+
+        [GeneratedEvent(
+            (int)LogEventId.PipProcessFinishedRemoteExecution,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.PipExecutor,
+            Message = EventConstants.PipPrefix + "Remoting process execution via external tool finished with the tool's exit code {exitCode}:{stdOut}{stdErr}")]
+        public abstract void PipProcessFinishedRemoteExecution(LoggingContext context, long pipSemiStableHash, string pipDescription, int exitCode, string stdOut, string stdErr);
 
         [GeneratedEvent(
             (int)LogEventId.PipProcessStartExternalVm,
@@ -1050,6 +1105,15 @@ namespace BuildXL.Processes.Tracing
         public abstract void ResumeOrSuspendProcessError(LoggingContext context, string pipSemiStableHash, string failedOperation, int errorCode);
 
         [GeneratedEvent(
+            (int)LogEventId.ResumeOrSuspendException,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            EventTask = (ushort)Tasks.SandboxedProcessExecutor,
+            Keywords = (int)((Keywords.UserMessage) | Keywords.Diagnostics),
+            Message = "{operation} attempt failed with exception. {exception}")]
+        public abstract void ResumeOrSuspendException(LoggingContext context, string operation, string exception);
+
+        [GeneratedEvent(
             (ushort)LogEventId.CannotProbeOutputUnderSharedOpaque,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
@@ -1057,5 +1121,23 @@ namespace BuildXL.Processes.Tracing
             EventTask = (int)Tasks.Engine,
             Message = "[{pipDescription}] Failed to probe '{path}' under a shared opaque directory : {details}")]
         public abstract void CannotProbeOutputUnderSharedOpaque(LoggingContext context, string pipDescription, string path, string details);
+
+        [GeneratedEvent(
+            (int)LogEventId.DumpSurvivingPipProcessChildrenStatus,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.PipExecutor,
+            Message = EventConstants.PipPrefix + "Failure during dumping unexpected surviving child processes for Process: '{processName}'. Status: {status}")]
+        public abstract void DumpSurvivingPipProcessChildrenStatus(LoggingContext context, string processName, string status);
+
+        [GeneratedEvent(
+            (int)LogEventId.ExistenceAssertionUnderOutputDirectoryFailed,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.PipExecutor,
+            Message = "[{pipDescription}] The output file '{assertedOutput}' existence was asserted under output directory root '{outputDirectoryRoot}' but the file was not produced by the pip.")]
+        public abstract void ExistenceAssertionUnderOutputDirectoryFailed(LoggingContext context, string pipDescription, string assertedOutput, string outputDirectoryRoot);
     }
 }

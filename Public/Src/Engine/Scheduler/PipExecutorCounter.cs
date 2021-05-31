@@ -50,7 +50,7 @@ namespace BuildXL.Scheduler
         /// </summary>
         /// <remarks>
         /// In distributed builds, this counter only includes processes executed on one machine, even if the machine
-        /// was acting as master for that build
+        /// was acting as orchestrator for that build
         /// </remarks>
         [CounterType(CounterType.Stopwatch)]
         ExecuteProcessDuration,
@@ -499,6 +499,19 @@ namespace BuildXL.Scheduler
         FileContentManagerHostTryMaterializeDuration,
 
         /// <summary>
+        /// The amount of time FileContentManager spent hydrating virtual file content (excluding waiting
+        /// on materialization semaphore)
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        FileContentManagerHydrateDuration,
+
+        /// <summary>
+        /// The amount of time FileContentManager spent deleting directories
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        FileContentManagerGetHydrateFilesDuration,
+
+        /// <summary>
         /// The amount of time FileContentManager spent materializing content (including waiting
         /// on materialization semaphore)
         /// </summary>
@@ -530,10 +543,28 @@ namespace BuildXL.Scheduler
         FileContentManagerDeleteDirectoriesPathParsingDuration,
 
         /// <summary>
-        /// The amount of time FileContentManager spent materializing content (excluding pinning content)
+        /// The amount of time FileContentManager spent materializing output content
         /// </summary>
         [CounterType(CounterType.Stopwatch)]
-        FileContentManagerPlaceFilesDuration,
+        FileContentManagerPlaceFilesOutputsDuration,
+
+        /// <summary>
+        /// The amount of time FileContentManager spent materializing input content
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        FileContentManagerPlaceFilesInputsDuration,
+
+        /// <summary>
+        /// The amount of time FileContentManager spent materializing Api Server content
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        FileContentManagerPlaceFilesApiServerDuration,
+
+        /// <summary>
+        /// The amount of time FileContentManager spent materializing files when verifying pin operations
+        /// </summary>
+        [CounterType(CounterType.Stopwatch)]
+        FileContentManagerPlaceFilesVerifiedPinDuration,
 
         /// <summary>
         /// The time pips spent in the running state
@@ -722,16 +753,6 @@ namespace BuildXL.Scheduler
         /// Counts the number of Ipc pips executed on remote workers
         /// </summary>
         IpcPipsExecutedRemotely,
-
-        /// <summary>
-        /// The size of the ExecutionResult sent over Bond for process pips
-        /// </summary>
-        ProcessExecutionResultSize,
-
-        /// <summary>
-        /// The size of the ExecutionResult sent over Bond for ipc pips
-        /// </summary>
-        IpcExecutionResultSize,
 
         /// <summary>
         /// Counts the number of process pips failed on remote workers
@@ -1069,7 +1090,7 @@ namespace BuildXL.Scheduler
         AnalyzeFileAccessViolationsDuration,
 
         /// <summary>
-        /// The time spent to report metadata and pathset on master
+        /// The time spent to report metadata and pathset on orchestrator
         /// </summary>
         [CounterType(CounterType.Stopwatch)]
         ReportRemoteMetadataAndPathSetDuration,
@@ -1283,7 +1304,7 @@ namespace BuildXL.Scheduler
     /// Select counters that are aggregated for a group of pips that match a specified criteria.
     /// </summary>
     /// <remarks>
-    /// In distributed builds, these counters on the master will include pips executed on workers.
+    /// In distributed builds, these counters on the orchestrator will include pips executed on workers.
     /// </remarks>
     public enum PipCountersByGroup
     {

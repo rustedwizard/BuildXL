@@ -19,6 +19,13 @@ namespace BuildXL.Engine.Distribution.Grpc
     /// <nodoc/>
     internal sealed class ClientConnectionManager
     {
+        public class ConnectionTimeoutEventArgs : EventArgs
+        {
+            public string Details { get; init; }
+
+            public ConnectionTimeoutEventArgs(string details) => Details = details;
+        }
+
         /// <summary>
         /// Default channel options for clients/servers to send/receive unlimited messages.
         /// </summary>
@@ -29,12 +36,12 @@ namespace BuildXL.Engine.Distribution.Grpc
 
         internal readonly Channel Channel;
         private readonly LoggingContext m_loggingContext;
-        private readonly string m_buildId;
+        private readonly DistributedBuildId m_buildId;
         private readonly Task m_monitorConnectionTask;
-        public event EventHandler OnConnectionTimeOutAsync;
+        public event EventHandler<ConnectionTimeoutEventArgs> OnConnectionTimeOutAsync;
         private volatile bool m_isShutdownInitiated;
         private volatile bool m_isExitCalledForServer;
-
+        
         private string GenerateLog(string traceId, string status, uint numTry, string description)
         {
             // example: [SELF -> MW1AAP45DD9145A::89] e709c667-ef88-464c-8557-232b02463976 Call#1. Description 
@@ -45,10 +52,10 @@ namespace BuildXL.Engine.Distribution.Grpc
 
         private string GenerateFailLog(string traceId, uint numTry, long duration, string failureMessage)
         {
-            return GenerateLog(traceId.ToString(), "Fail", numTry, $"Duration: {duration}ms. Failure: {failureMessage}. ChannelState: {Channel.State}.");
+            return GenerateLog(traceId.ToString(), "Fail", numTry, $"Duration: {duration}ms. Failure: {failureMessage}. ChannelState: {Channel.State}");
         }
 
-        public ClientConnectionManager(LoggingContext loggingContext, string ipAddress, int port, string buildId)
+        public ClientConnectionManager(LoggingContext loggingContext, string ipAddress, int port, DistributedBuildId buildId)
         {
             m_buildId = buildId;
             m_loggingContext = loggingContext;
@@ -96,13 +103,47 @@ namespace BuildXL.Engine.Distribution.Grpc
             await Task.Yield();
 
             ChannelState state = ChannelState.Idle;
+            var transientFailureTimer = new Stopwatch();
             while (state != ChannelState.Shutdown)
             {
-                await Channel.WaitForStateChangedAsync(state);
+                try
+                {
+                    await Channel.TryWaitForStateChangedAsync(state);
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The channel has been already shutdown and handle was disposed
+                    // (https://github.com/grpc/grpc/blob/master/src/csharp/Grpc.Core/Channel.cs#L160)
+                    // We shouldn't fail or leave this unobserved, instead we just stop monitoring
+                    Logger.Log.GrpcTrace(m_loggingContext, $"[{Channel.Target}] Channel state: {state} -> Disposed. Assuming shutdown was requested");
+                    break;
+                }
 
                 Logger.Log.GrpcTrace(m_loggingContext, $"[{Channel.Target}] Channel state: {state} -> {Channel.State}");
 
                 state = Channel.State;
+
+                // Check if we're stuck in transient failure
+                // In this situation, the state will alternate between "Connecting" and "TransientFailure"
+                if (state == ChannelState.TransientFailure)
+                {
+                    if (!transientFailureTimer.IsRunning)
+                    {
+                        transientFailureTimer.Start();
+                    }
+
+                    if (transientFailureTimer.Elapsed >= EngineEnvironmentSettings.DistributionConnectTimeout)
+                    {
+                        OnConnectionTimeOutAsync?.Invoke(this, new ConnectionTimeoutEventArgs($"Timed out trying to recover from the TRANSIENT_FAILURE channel state. Timeout: {EngineEnvironmentSettings.DistributionConnectTimeout.Value.TotalMinutes} minutes"));
+                        break;
+                    }
+                }
+                else if (state != ChannelState.Connecting)
+                {
+                    // We assume we are out of the "transient failure" situation
+                    // if the state is no longer TransientFailure or Connecting
+                    transientFailureTimer.Reset();
+                }
 
                 // If we requested 'exit' for the server, the channel can go to 'Idle' state.
                 // We should not reconnect the channel again in that case.
@@ -111,7 +152,7 @@ namespace BuildXL.Engine.Distribution.Grpc
                     bool isReconnected = await TryReconnectAsync();
                     if (!isReconnected)
                     {
-                        OnConnectionTimeOutAsync?.Invoke(this, EventArgs.Empty);
+                        OnConnectionTimeOutAsync?.Invoke(this, new ConnectionTimeoutEventArgs("Reconnection attempts failed"));
                         break;
                     }
                 }
@@ -190,7 +231,8 @@ namespace BuildXL.Engine.Distribution.Grpc
             Guid traceId = Guid.NewGuid();
             var headers = new Metadata();
             headers.Add(GrpcSettings.TraceIdKey, traceId.ToByteArray());
-            headers.Add(GrpcSettings.BuildIdKey, m_buildId);
+            headers.Add(GrpcSettings.RelatedActivityIdKey, m_buildId.RelatedActivityId);
+            headers.Add(GrpcSettings.EnvironmentKey, m_buildId.Environment);
             headers.Add(GrpcSettings.SenderKey, DistributionHelpers.MachineName);
 
             RpcCallResultState state = RpcCallResultState.Succeeded;

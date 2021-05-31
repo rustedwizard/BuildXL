@@ -331,6 +331,16 @@ namespace BuildXL.Engine.Tracing
         public abstract void EngineContextHeuristicOutcomeSkip(LoggingContext context, int generation, string reason);
 
         [GeneratedEvent(
+            (ushort)LogEventId.ExitOnNewGraph,
+            EventGenerators = EventGenerators.LocalOnly,
+            Message = "New graph was created, graceful exit requested.",
+            EventLevel = Level.Informational,
+            EventTask = (ushort)Tasks.Engine,
+            EventOpcode = (byte)EventOpcode.Info,
+            Keywords = (int)(Keywords.UserMessage | Keywords.Diagnostics))]
+        public abstract void ExitOnNewGraph(LoggingContext context);
+
+        [GeneratedEvent(
             (ushort)LogEventId.StartSerializingPipGraph,
             EventGenerators = EventGenerators.LocalOnly,
             Message = EventConstants.PhasePrefix + "Serializing pip graph for future reuse",
@@ -448,7 +458,7 @@ namespace BuildXL.Engine.Tracing
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Scheduler,
-            Message = "{worker} could not send available ram to master. Master used the default limit in MB: {defaultRamMb}. Available Commit in MB: {commitMb}")]
+            Message = "{worker} could not send available ram to orchestrator. Orchestrator used the default limit in MB: {defaultRamMb}. Available Commit in MB: {commitMb}")]
         public abstract void WorkerTotalRamMb(LoggingContext context, string worker, int defaultRamMb, int commitMb);
 
         [GeneratedEvent(
@@ -511,13 +521,13 @@ namespace BuildXL.Engine.Tracing
             string errorMessage);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionCallMasterCodeException,
+            (ushort)LogEventId.DistributionCallOrchestratorCodeException,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Call to master raised exception: Function='{function}' Failure='{errorMessage}'")]
-        public abstract void DistributionCallMasterCodeException(
+            Message = "Call to orchestrator raised exception: Function='{function}' Failure='{errorMessage}'")]
+        public abstract void DistributionCallOrchestratorCodeException(
             LoggingContext context,
             string function,
             string errorMessage);
@@ -538,10 +548,10 @@ namespace BuildXL.Engine.Tracing
             (ushort)LogEventId.DistributionFailedToStoreValidationContentToWorkerCacheWithException,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
-            // This error is not forwarded to the master because doing so would cause the master to log an error when
+            // This error is not forwarded to the orchestrator because doing so would cause the orchestrator to log an error when
             // no pip fails in the build from its perspective. The worker must still log this as an error because it
             // did fail.
-            Keywords = (int)(Keywords.UserMessage | Keywords.NotForwardedToMaster),
+            Keywords = (int)(Keywords.UserMessage | Keywords.NotForwardedToOrchestrator),
             EventTask = (ushort)Tasks.Distribution,
             Message = "Could not load store content with hash '{contentHash}'."
             + " This may indicate that worker cache is incorrectly configured or is not properly shared.\n"
@@ -593,45 +603,45 @@ namespace BuildXL.Engine.Tracing
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Attach completion notification from worker {name} is taking longer than expected ({time}). Ensure worker can connect to master.")]
+            Message = "Attach completion notification from worker {name} is taking longer than expected ({time}). Ensure worker can connect to orchestrator.")]
         public abstract void DistributionWorkerAttachTooSlow(LoggingContext context, string name, string time);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionFailedToCallMaster,
+            (ushort)LogEventId.DistributionFailedToCallOrchestrator,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Failed call to master: Function='{function}' Failure='{errorMessage}'")]
-        public abstract void DistributionFailedToCallMaster(LoggingContext context, string function, string errorMessage);
+            Message = "Failed call to orchestrator: Function='{function}' Failure='{errorMessage}'")]
+        public abstract void DistributionFailedToCallOrchestrator(LoggingContext context, string function, string errorMessage);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionSuccessfulRetryCallToMaster,
+            (ushort)LogEventId.DistributionSuccessfulRetryCallToOrchestrator,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Warning,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Retried call to master succeeded: Function='{function}'")]
-        public abstract void DistributionSuccessfulRetryCallToMaster(LoggingContext context, string function);
+            Message = "Retried call to orchestrator succeeded: Function='{function}'")]
+        public abstract void DistributionSuccessfulRetryCallToOchestrator(LoggingContext context, string function);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionInactiveMaster,
+            (ushort)LogEventId.DistributionInactiveOrchestrator,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
-            // Treat this as a user error instead of an internal error. The master may very well still succeed when this happens.
+            // Treat this as a user error instead of an internal error. The orchestrator may very well still succeed when this happens.
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (ushort)Tasks.Distribution,
-            Message = "There were no calls from master in the last {timeinMin} minutes. Assuming it is dead and exiting.")]
-        public abstract void DistributionInactiveMaster(LoggingContext context, int timeinMin);
+            Message = "There were no calls from orchestrator in the last {timeinMin} minutes. Assuming it is dead and exiting.")]
+        public abstract void DistributionInactiveOrchestrator(LoggingContext context, int timeinMin);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionWaitingForMasterAttached,
+            (ushort)LogEventId.DistributionWaitingForOrchestratorAttached,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)(Keywords.UserMessage | Keywords.Progress),
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Waiting for master to attach")]
-        public abstract void DistributionWaitingForMasterAttached(LoggingContext context);
+            Message = "Waiting for orchestrator to attach")]
+        public abstract void DistributionWaitingForOrchestratorAttached(LoggingContext context);
 
         [GeneratedEvent(
             (ushort)LogEventId.DistributionDisableServiceProxyInactive,
@@ -675,8 +685,8 @@ namespace BuildXL.Engine.Tracing
             EventLevel = Level.Verbose,
             Keywords = (int)(Keywords.UserMessage | Keywords.Progress),
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Received attach request from the master. New session identifier: {sessionId}. Master Name: {masterName}.")]
-        public abstract void DistributionAttachReceived(LoggingContext context, string sessionId, string masterName);
+            Message = "Received attach request from the orchestrator. New session identifier: {sessionId}. Orchestrator Name: {orchestratorName}.")]
+        public abstract void DistributionAttachReceived(LoggingContext context, string sessionId, string orchestratorName);
 
         [GeneratedEvent(
             (ushort)LogEventId.DistributionExitReceived,
@@ -684,7 +694,7 @@ namespace BuildXL.Engine.Tracing
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Received exit request from the master. Shutting down...")]
+            Message = "Received exit request from the orchestrator. Shutting down...")]
         public abstract void DistributionExitReceived(LoggingContext context);
 
         [GeneratedEvent(
@@ -707,8 +717,17 @@ namespace BuildXL.Engine.Tracing
             EventLevel = Level.Error,
             Keywords = (int)(Keywords.UserMessage | Keywords.UserError),
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Timed out waiting for attach request from master")]
+            Message = "Timed out waiting for attach request from orchestrator")]
         public abstract void DistributionWorkerTimeoutFailure(LoggingContext context);
+
+        [GeneratedEvent(
+        (ushort)LogEventId.DistributionConnectionTimeout,
+        EventGenerators = EventGenerators.LocalOnly,
+        EventLevel = Level.Verbose,
+        Keywords = (int)(Keywords.UserMessage),
+        EventTask = (ushort)Tasks.Distribution,
+        Message = "Connection with {name} timed out. Details: {details}.")]
+        public abstract void DistributionConnectionTimeout(LoggingContext context, string name, string details);
 
         [GeneratedEvent(
             (ushort)LogEventId.DistributionTryMaterializeInputsFailedRetry,
@@ -769,6 +788,16 @@ namespace BuildXL.Engine.Tracing
             EventOpcode = (byte)EventOpcode.Info,
             Keywords = (int)(Keywords.UserMessage | Keywords.Diagnostics | Keywords.UserError))]
         public abstract void DistributionWorkerForwardedError(LoggingContext context, WorkerForwardedEvent workerForwardedEvent);
+
+        [GeneratedEvent(
+            (ushort)SharedLogEventId.StoppedDistributionWorkerForwardedError,
+            EventGenerators = EventGenerators.LocalOnly,
+            Message = "Worker {workerForwardedEvent.WorkerName} logged an error, which was received after the worker was stopped. Error message:\n{workerForwardedEvent.Text},",
+            EventLevel = Level.Verbose,
+            EventTask = (ushort)Tasks.Distribution,
+            EventOpcode = (byte)EventOpcode.Info,
+            Keywords = (int)(Keywords.UserMessage | Keywords.Diagnostics | Keywords.UserError))]
+        public abstract void StoppedDistributionWorkerForwardedError(LoggingContext context, WorkerForwardedEvent workerForwardedEvent);
 
         [GeneratedEvent(
             (ushort)SharedLogEventId.DistributionWorkerForwardedWarning,
@@ -832,7 +861,7 @@ namespace BuildXL.Engine.Tracing
         [GeneratedEvent(
             (ushort)LogEventId.DistributionWorkerPipOutputContent,
             EventGenerators = EventGenerators.LocalOnly,
-            Message = "[{pipDescription}] Pip output '{filePath}' with hash '{hash}' reported to master.",
+            Message = "[{pipDescription}] Pip output '{filePath}' with hash '{hash}' reported to orchestrator.",
             EventLevel = Level.Verbose,
             EventTask = (ushort)Tasks.Distribution,
             Keywords = (int)(Keywords.UserMessage | Keywords.Diagnostics))]
@@ -855,14 +884,14 @@ namespace BuildXL.Engine.Tracing
             int pipsReported);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionMasterStatus,
+            (ushort)LogEventId.DistributionOrchestratorStatus,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)(Keywords.UserMessage | Keywords.Progress),
             EventTask = (ushort)Tasks.Distribution,
             Message = "{pipsCompleted} completed, {pipsReported} reported, {pipsSent} sent, {pipsLocal} local, {pipsSending} sending,\n\t" +
             "{pipsLocatingInputs} locating inputs, {pipComputingContent} computing content,  {pipsAssigned} assigned, {pipsUnassigned} unassigned")]
-        internal abstract void DistributionMasterStatus(
+        internal abstract void DistributionOrchestratorStatus(
             LoggingContext loggingContext,
             int pipsUnassigned,
             int pipsAssigned,
@@ -884,13 +913,13 @@ namespace BuildXL.Engine.Tracing
         internal abstract void DistributionDebugMessage(LoggingContext loggingContext, string message);
 
         [GeneratedEvent(
-            (ushort)LogEventId.DistributionWorkerUnexpectedFailureAfterMasterExits,
+            (ushort)LogEventId.DistributionWorkerUnexpectedFailureAfterOrchestratorExits,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Distribution,
-            Message = "After we received an exit request from the master, worker exits with an unexpected reason due to a failure in one of the master-related calls (e.g., attach, notify).")]
-        public abstract void DistributionWorkerUnexpectedFailureAfterMasterExits(LoggingContext context);
+            Message = "After we received an exit request from the orchestrator, worker exits with an unexpected reason due to a failure in one of the orchestrator-related calls (e.g., attach, notify).")]
+        public abstract void DistributionWorkerUnexpectedFailureAfterOrchestratorExits(LoggingContext context);
 
         #endregion
 
@@ -1307,6 +1336,15 @@ If you can't update and need this feature after July 2018 please reach out to th
             EventTask = (int)Tasks.Engine,
             Message = "Detected engine cache drive does have a seek penalty. Engine Cache data will preferably be loaded into memory.")]
         public abstract void EngineCachePrefersLoadingInMemoryForSeekPenalty(LoggingContext context);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.EngineLoadedFileContentTable,
+            EventGenerators = EventGenerators.LocalAndTelemetry,
+            EventLevel = Level.Verbose,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "Load file content table. Source: '{source}'. Loading time: {loadingTime}ms")]
+        public abstract void EngineLoadedFileContentTable(LoggingContext context, string source, long loadingTime);
 
         [GeneratedEvent(
             (ushort)LogEventId.EngineErrorSavingFileContentTable,
@@ -2735,8 +2773,8 @@ If you can't update and need this feature after July 2018 please reach out to th
             EventLevel = Level.Verbose,
             Keywords = (int)Keywords.UserMessage,
             EventTask = (ushort)Tasks.Distribution,
-            Message = "Grpc settings: ThreadPoolSize {threadPoolSize}, HandlerInlining {handlerInlining}, CallTimeoutMin {callTimeoutMin}, InactiveTimeoutMin {inactiveTimeoutMin}")]
-        internal abstract void GrpcSettings(LoggingContext context, int threadPoolSize, bool handlerInlining, int callTimeoutMin, int inactiveTimeoutMin);
+            Message = "Grpc settings: CallTimeoutMin {callTimeoutMin}, InactiveTimeoutMin {inactiveTimeoutMin}")]
+        internal abstract void GrpcSettings(LoggingContext context, int callTimeoutMin, int inactiveTimeoutMin);
 
         [GeneratedEvent(
             (ushort)LogEventId.ChosenABTesting,
@@ -2809,6 +2847,24 @@ If you can't update and need this feature after July 2018 please reach out to th
             EventTask = (int)Tasks.Engine,
             Message = "/unsafe_SkipFlaggingSharedOpaqueOutputs enabled: Shared opaque outputs won't be flagged. Subsequent builds will fail at identifying them as outputs and they won't be deleted before pips run.")]
         public abstract void ConfigUnsafeSkipFlaggingSharedOpaqueOutputs(LoggingContext context);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.ConfigUnsafeIgnorePreserveOutputsPrivatization,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "/unsafe_IgnorePreserveOutputsPrivatization enabled: {ShortProductName} is configured not to make preserved outputs private. This might unexpectedly modify cache content and might fail the build because pips need the outputs to be writable.")]
+        public abstract void ConfigUnsafeIgnorePreserveOutputsPrivatization(LoggingContext context);
+
+        [GeneratedEvent(
+            (ushort)LogEventId.ConfigIncompatibleOptionIgnorePreserveOutputsPrivatization,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Error,
+            Keywords = (int)Keywords.UserMessage,
+            EventTask = (int)Tasks.Engine,
+            Message = "Preserve output mode is enabled with /unsafe_IgnorePreserveOutputsPrivatization and /storeOutputsToCache: Build can fail because pips are not able to make their existing outputs private before execution.")]
+        public abstract void ConfigIncompatibleOptionIgnorePreserveOutputsPrivatization(LoggingContext context);
     }
 
     /// <summary>
@@ -2980,8 +3036,8 @@ If you can't update and need this feature after July 2018 please reach out to th
                         return "Previous run information was corrupt and could not be used.";
                     case GraphCacheMissReason.NotChecked:
                         return "Not checked";
-                    case GraphCacheMissReason.NoFingerprintFromMaster:
-                        return "Was not able to get a fingerprint from the master";
+                    case GraphCacheMissReason.NoFingerprintFromOrchestrator:
+                        return "Was not able to get a fingerprint from the orchestrator";
                     case GraphCacheMissReason.ForcedMiss:
                         return "Miss was forced for debugging via environment variable: " + InputTracker.ForceInvalidateCachedGraphVariable;
                     case GraphCacheMissReason.NotAllDirectoryEnumerationsAreAccounted:
@@ -3068,9 +3124,9 @@ If you can't update and need this feature after July 2018 please reach out to th
         SpecFileChanges,
 
         /// <summary>
-        /// The worker machine failed to fetch a graph fingerprint from the master machine
+        /// The worker machine failed to fetch a graph fingerprint from the orchestrator machine
         /// </summary>
-        NoFingerprintFromMaster,
+        NoFingerprintFromOrchestrator,
 
         /// <summary>
         /// A miss was forced. Used for debugging

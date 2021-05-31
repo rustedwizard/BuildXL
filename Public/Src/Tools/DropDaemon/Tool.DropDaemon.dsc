@@ -14,6 +14,7 @@ export namespace DropDaemon {
         assemblyName: "DropDaemon",
         rootNamespace: "Tool.DropDaemon",
         appConfig: f`DropDaemon.exe.config`,
+        assemblyBindingRedirects: BuildXLSdk.cacheBindingRedirects(),
         sources: globR(d`.`, "*.cs"),
         embeddedResources: [
             {
@@ -25,6 +26,7 @@ export namespace DropDaemon {
             importFrom("BuildXL.Utilities.Instrumentation").Common.dll,
             importFrom("BuildXL.Utilities.Instrumentation").Tracing.dll,
             importFrom("BuildXL.Utilities").dll,
+            importFrom("BuildXL.Utilities").Collections.dll,
             importFrom("BuildXL.Utilities").Ipc.dll,
             importFrom("BuildXL.Utilities").Native.dll,
             importFrom("BuildXL.Utilities").Storage.dll,
@@ -49,6 +51,14 @@ export namespace DropDaemon {
             // because of the way that runtime assemblies are loaded into memory.
             importFrom("Microsoft.VisualStudio.Services.BlobStore.Client.Cache").pkg, 
             ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
+            
+            importFrom("Microsoft.Bcl.HashCode").pkg,
+            importFrom("Microsoft.ManifestInterface").pkg,
+            importFrom("Microsoft.ManifestGenerator").pkg,
+            ...addIf(
+                BuildXLSdk.isFullFramework,
+                NetFx.Netstandard.dll
+            )
         ],
         internalsVisibleTo: [
             "Test.Tool.DropDaemon",

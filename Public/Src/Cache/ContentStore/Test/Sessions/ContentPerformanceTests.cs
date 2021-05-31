@@ -19,17 +19,19 @@ using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.UtilitiesCore;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest.Results;
-using ContentStoreTest.Performance;
 using ContentStoreTest.Test;
 using FluentAssertions;
 using Xunit;
 using Xunit.Abstractions;
 using FileInfo = BuildXL.Cache.ContentStore.Interfaces.FileSystem.FileInfo;
+using BuildXL.Cache.ContentStore.Tracing;
 
 namespace ContentStoreTest.Performance.Sessions
 {
     public abstract class ContentPerformanceTests : TestBase
     {
+        private static readonly Tracer _tracer = new Tracer(nameof(ContentPerformanceTests));
+
         private const string CacheName = "test";
         private const long MaxSizeInMegabytes = 5 * 1024;
         private const long MaxSize = MaxSizeInMegabytes * 1024 * 1024;
@@ -77,7 +79,7 @@ namespace ContentStoreTest.Performance.Sessions
 
             var itemCountEnvironmentVariable = Environment.GetEnvironmentVariable(ItemCountEnvironmentVariableName);
             _itemCount = itemCountEnvironmentVariable == null ? ItemCountDefault : int.Parse(itemCountEnvironmentVariable);
-            _context.Debug($"Using itemCount=[{_itemCount}]");
+            _tracer.Debug(_context, $"Using itemCount=[{_itemCount}]");
 
             _prePopulatedRootPath = FileSystem.GetTempPath() / "CloudStore" / "ContentPerformanceTestsPrePopulated";
         }
@@ -158,10 +160,7 @@ namespace ContentStoreTest.Performance.Sessions
 
             results.All(r => r.Succeeded).Should().BeTrue();
             results.All(r => r.Stream != null).Should().BeTrue();
-            results.ForEach(r =>
-#pragma warning disable AsyncFixer02
-                    r.Stream.Dispose());
-#pragma warning restore AsyncFixer02
+            results.ForEach(r => r.Stream.Dispose());
         }
 
         private async Task OpenStreamAsync(
@@ -254,10 +253,7 @@ namespace ContentStoreTest.Performance.Sessions
                 session => Task.FromResult(0),
                 session => PutStreamAsync(session, streams, results));
 
-            streams.ForEach(s =>
-#pragma warning disable AsyncFixer02
-                s.Dispose());
-#pragma warning restore AsyncFixer02
+            streams.ForEach(s => s.Dispose());
             results.All(r => r.Succeeded).Should().BeTrue();
         }
 
@@ -320,7 +316,7 @@ namespace ContentStoreTest.Performance.Sessions
             {
                 if (_initialSize == InitialSize.Full)
                 {
-                    _context.Debug("Starting with a full writable store");
+                    _tracer.Debug(_context, "Starting with a full writable store");
 
                     await CreatePrepopulatedIfMissing();
                     await CopyPrepopulatedTo(testDirectory);
@@ -330,7 +326,7 @@ namespace ContentStoreTest.Performance.Sessions
                 }
                 else
                 {
-                    _context.Debug("Starting with an empty writable store");
+                    _tracer.Debug(_context, "Starting with an empty writable store");
 
                     // Test runs against an empty test directory.
                     rootPath = testDirectory.Path;
@@ -340,7 +336,7 @@ namespace ContentStoreTest.Performance.Sessions
             {
                 if (_initialSize == InitialSize.Full)
                 {
-                    _context.Debug("Starting with a full read-only store");
+                    _tracer.Debug(_context, "Starting with a full read-only store");
 
                     await CreatePrepopulatedIfMissing();
 
@@ -349,7 +345,7 @@ namespace ContentStoreTest.Performance.Sessions
                 }
                 else
                 {
-                    _context.Debug("Starting with an empty read-only store");
+                    _tracer.Debug(_context, "Starting with an empty read-only store");
 
                     // Test runs against an empty test directory.
                     rootPath = testDirectory.Path;
@@ -366,7 +362,7 @@ namespace ContentStoreTest.Performance.Sessions
                 return;
             }
 
-            _context.Always($"Create prepopulated content store at root=[{_prePopulatedRootPath}]");
+            _tracer.Always(_context, $"Create prepopulated content store at root=[{_prePopulatedRootPath}]");
             FileSystem.CreateDirectory(_prePopulatedRootPath);
             await RunStore(
                 _prePopulatedRootPath,

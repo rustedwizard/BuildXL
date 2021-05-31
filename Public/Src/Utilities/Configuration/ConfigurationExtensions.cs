@@ -36,11 +36,19 @@ namespace BuildXL.Utilities.Configuration
         }
 
         /// <summary>
+        /// False unless specified otherwise
+        /// </summary>
+        public static bool DisableInBoxSdkSourceResolver(this IConfiguration configuration)
+        {
+            return configuration.DisableInBoxSdkSourceResolver ?? false;
+        }
+
+        /// <summary>
         /// Whether this build should store fingerprints
         /// </summary>
         public static bool FingerprintStoreEnabled(this IConfiguration configuration)
         {
-            // Distributed workers send their execution events back to master,
+            // Distributed workers send their execution events back to orchestrator,
             // to reduce storage needed on workers, workers do not need a fingerprint store
 
             return configuration.Logging.StoreFingerprints.HasValue

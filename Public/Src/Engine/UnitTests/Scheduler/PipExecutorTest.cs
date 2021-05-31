@@ -39,6 +39,7 @@ using Xunit;
 using Xunit.Abstractions;
 using static BuildXL.Utilities.FormattableStringEx;
 using Process = BuildXL.Pips.Operations.Process;
+using WriteFilePip = BuildXL.Pips.Operations.WriteFile;
 using ProcessesLogEventId = BuildXL.Processes.Tracing.LogEventId;
 
 namespace Test.BuildXL.Scheduler
@@ -62,9 +63,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task WriteFile()
+        public Task WriteFile()
         {
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string destination = GetFullPath("dest");
@@ -83,9 +84,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task WriteFileSkippedIfUpToDate()
+        public Task WriteFileSkippedIfUpToDate()
         {
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string destination = GetFullPath("dest");
@@ -129,9 +130,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task CopyFile()
+        public Task CopyFile()
         {
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string source = GetFullPath("source");
@@ -190,9 +191,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task CopyFileWhenSourceIsIntermediate()
+        public Task CopyFileWhenSourceIsIntermediate()
         {
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string source = GetFullPath("source");
@@ -251,11 +252,11 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task CopyFileSkippedIfUpToDate()
+        public Task CopyFileSkippedIfUpToDate()
         {
             const string Contents = "Matches!";
 
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string source = GetFullPath("source");
@@ -282,11 +283,11 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task CopyFileSkippedIfUpToDateViaPreviousCopy()
+        public Task CopyFileSkippedIfUpToDateViaPreviousCopy()
         {
             const string Contents = "Matches!";
 
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string source = GetFullPath("source");
@@ -314,14 +315,14 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task CopyFileProceedsIfMismatched()
+        public Task CopyFileProceedsIfMismatched()
         {
             const string Contents = "Matches!";
 
             // It's important that BadContents is longer to make sure truncation occurs.
             const string BadContents = "Anti-Matches!";
 
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string source = GetFullPath("source");
@@ -345,11 +346,11 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task CopyFileStoreNoOutputToCacheMaterializeDestination()
+        public Task CopyFileStoreNoOutputToCacheMaterializeDestination()
         {
             const string Contents = nameof(CopyFileStoreNoOutputToCacheMaterializeDestination);
 
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 act: async env =>
                 {
                     string source = GetFullPath("source");
@@ -380,12 +381,12 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task ProcessWithoutCache()
+        public Task ProcessWithoutCache()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string source = GetFullPath("source");
@@ -410,9 +411,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task TestServicePipReceivesAggregatedPermissions()
+        public Task TestServicePipReceivesAggregatedPermissions()
         {
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     string source = GetFullPath("source");
@@ -454,11 +455,11 @@ namespace Test.BuildXL.Scheduler
             return TestIpcPip(ipcProvider, false);
         }
 
-        private async Task TestIpcPip(IIpcProvider ipcProvider, bool expectedToSucceed)
+        private Task TestIpcPip(IIpcProvider ipcProvider, bool expectedToSucceed)
         {
             var ipcOperationPayload = "hi";
 
-            await WithExecutionEnvironmentAndIpcServer(
+            return WithExecutionEnvironmentAndIpcServer(
                 ipcProvider,
                 ipcExecutor: new LambdaIpcOperationExecutor((op) => IpcResult.Success(op.Payload)), // the server echoes whatever operation payload it receives
                 act: async (env, moniker, ipcServer) => // ipcServer has been started; ipc pips will connect to it; 
@@ -494,12 +495,12 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task ProcessWithCache()
+        public Task ProcessWithCache()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -689,12 +690,12 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task TemporaryOutputsAreNotStoredInCacheIfAbsent()
+        public Task TemporaryOutputsAreNotStoredInCacheIfAbsent()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -724,13 +725,13 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task TemporaryOutputsAreNotStoredInCacheIfPresent()
+        public Task TemporaryOutputsAreNotStoredInCacheIfPresent()
         {
             const string Contents = "Matches!";
             const string TempContents = "TempMatches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -765,12 +766,12 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task ProcessWithCacheAndOutputsForcedWritable()
+        public Task ProcessWithCacheAndOutputsForcedWritable()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -923,11 +924,11 @@ namespace Test.BuildXL.Scheduler
         [InlineData(OutputReportingMode.TruncatedOutputOnError, 2 * SandboxedProcessPipExecutor.MaxConsoleLength)]
         [InlineData(OutputReportingMode.FullOutputOnError, 2 * SandboxedProcessPipExecutor.MaxConsoleLength, false)]
         [InlineData(OutputReportingMode.TruncatedOutputOnError, 2 * SandboxedProcessPipExecutor.MaxConsoleLength, true)]
-        public async Task FailingProcessWithErrorRegex(OutputReportingMode outputReportingMode, int errorMessageLength, bool regexMatchesSomething = true)
+        public Task FailingProcessWithErrorRegex(OutputReportingMode outputReportingMode, int errorMessageLength, bool regexMatchesSomething = true)
         {
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -942,7 +943,7 @@ namespace Test.BuildXL.Scheduler
                     Process pip = CreateErrorProcess(
                         env.Context,
                         workingDirectoryAbsolutePath,
-                        destinationAbsolutePath, 
+                        destinationAbsolutePath,
                         errorPattern: regexMatchesSomething ? "ERROR" : "NOMATCH",
                         errorMessageLength: errorMessageLength);
                     var testRunChecker = new TestRunChecker();
@@ -978,7 +979,7 @@ namespace Test.BuildXL.Scheduler
                     {
                         // "Z" is a marker at the end of the error message. We should see this in the DX64 message as long as
                         // we aren't truncating the error
-                        XAssert.IsTrue(Regex.IsMatch(log, $@"(?<Prefix>dx00{(int)ProcessesLogEventId.PipProcessError})(?<AnythingButZ>[^z]*)(?<ZForEndOfError>z)", RegexOptions.IgnoreCase), 
+                        XAssert.IsTrue(Regex.IsMatch(log, $@"(?<Prefix>dx00{(int)ProcessesLogEventId.PipProcessError})(?<AnythingButZ>[^z]*)(?<ZForEndOfError>z)", RegexOptions.IgnoreCase),
                             "Non-truncated error message was not found in error event. Full output:" + log);
                     }
 
@@ -988,11 +989,11 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task FailingProcessWithChunkSizeErrorAndErrorRegex()
+        public Task FailingProcessWithChunkSizeErrorAndErrorRegex()
         {
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -1006,7 +1007,7 @@ namespace Test.BuildXL.Scheduler
 
                     var builder = new StringBuilder();
                     builder.AppendLine("@echo off");
-                    for (int i = 0; i < SandboxedProcessPipExecutor.OutputChunkInLines * 3/2 ; ++i)
+                    for (int i = 0; i < SandboxedProcessPipExecutor.OutputChunkInLines * 3 / 2; ++i)
                     {
                         if (i % 2 == 0)
                         {
@@ -1049,12 +1050,12 @@ namespace Test.BuildXL.Scheduler
         [InlineData(true, ProcessesLogEventId.PipProcessError, false, 10 * SandboxedProcessPipExecutor.OutputChunkInLines, OutputReportingMode.FullOutputAlways)]       
         [InlineData(true, ProcessesLogEventId.PipProcessWarning, false)]
         [InlineData(false, ProcessesLogEventId.PipProcessWarning, true)]
-        public async Task ProcessPrintPathsToLog(bool regexMatchesEverything, ProcessesLogEventId eventId, bool shouldContainLogPath, int errorMessageLength = 0, OutputReportingMode outputReportingMode = OutputReportingMode.TruncatedOutputOnError)
+        public Task ProcessPrintPathsToLog(bool regexMatchesEverything, ProcessesLogEventId eventId, bool shouldContainLogPath, int errorMessageLength = 0, OutputReportingMode outputReportingMode = OutputReportingMode.TruncatedOutputOnError)
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
-                { 
+                {
                     string workingDirectory = GetFullPath("work");
                     AbsolutePath workingDirectoryAbsolutePath = AbsolutePath.Create(env.Context.PathTable, workingDirectory);
 
@@ -1076,13 +1077,13 @@ namespace Test.BuildXL.Scheduler
                     else
                     {
                         Process pip = CreateWarningProcess(
-                            env.Context, 
-                            workingDirectoryAbsolutePath, 
+                            env.Context,
+                            workingDirectoryAbsolutePath,
                             destinationAbsolutePath,
                             regexMatchesEverything ? false : true);
                         var testRunChecker = new TestRunChecker();
                         testRunChecker.ExpectWarning();
-                        await testRunChecker.VerifySucceeded(env, pip); 
+                        await testRunChecker.VerifySucceeded(env, pip);
                         AssertWarningEventLogged(eventId);
                     }
 
@@ -1131,9 +1132,9 @@ namespace Test.BuildXL.Scheduler
 
         [Trait(BuildXL.TestUtilities.Features.Feature, BuildXL.TestUtilities.Features.NonStandardOptions)]
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessUncacheableDueToFileMonitoringViolationsInSealedDirectory()
+        public Task ProcessUncacheableDueToFileMonitoringViolationsInSealedDirectory()
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
 
                 // We set monitoring violations to warnings so the pip completes (though uncached).
@@ -1170,9 +1171,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessFailsDueToFileMonitoringViolationsInSealedDirectory()
+        public Task ProcessFailsDueToFileMonitoringViolationsInSealedDirectory()
         {
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
 
                 // We set monitoring violations to errors so the pip fails due to the directory dependency issue
                 config: pathTable => GetConfiguration(pathTable, fileAccessIgnoreCodeCoverage: true, failUnexpectedFileAccesses: false, unexpectedFileAccessesAreErrors: true),
@@ -1191,7 +1192,7 @@ namespace Test.BuildXL.Scheduler
                     CreateDirectoryWithProbeTargets(env.Context.PathTable, sourceAbsolutePath, fileAContents: "A", fileBContents: "B2");
                     // Pip with file monitoring errors succeeds in PipExecutor but fails in the post-process step.
                     await testRunChecker.VerifySucceeded(env, pip, expectMarkedPerpetuallyDirty: true);
-                    
+
                     AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess, count: 2);
                     AssertVerboseEventLogged(LogEventId.DisallowedFileAccessInSealedDirectory, count: 1);
                     AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
@@ -1206,12 +1207,12 @@ namespace Test.BuildXL.Scheduler
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessCachedWithAllowlistedFileMonitoringViolations()
+        public Task ProcessCachedWithAllowlistedFileMonitoringViolations()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
 
                 // We set monitoring violations to warnings so the pip completes.
@@ -1263,11 +1264,11 @@ namespace Test.BuildXL.Scheduler
         // the case when another file has posted a cache content for the same strong fingerprint.
         // In such case BuildXL detects the replaced local cache content with the remote one and uses that for consequent pip executions.
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessCachedForCacheConvergence()
+        public Task ProcessCachedForCacheConvergence()
         {
             string localContents;
             IgnoreWarnings();
-            await WithCachingExecutionEnvironmentForCacheConvergence(
+            return WithCachingExecutionEnvironmentForCacheConvergence(
                 GetFullPath(".cache"),
 
                 // We set monitoring violations to warnings so the pip completes.
@@ -1323,12 +1324,12 @@ namespace Test.BuildXL.Scheduler
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessWithCacheMaintainsCase()
+        public Task ProcessWithCacheMaintainsCase()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -1370,12 +1371,12 @@ namespace Test.BuildXL.Scheduler
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessNotCachedWithAllowlistedFileMonitoringViolations()
+        public Task ProcessNotCachedWithAllowlistedFileMonitoringViolations()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
 
                 // We set monitoring violations to warnings so the pip completes.
@@ -1435,9 +1436,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessNotCachedWithAllowlistedFileMonitoringViolationsInSealedDirectory()
+        public Task ProcessNotCachedWithAllowlistedFileMonitoringViolationsInSealedDirectory()
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
 
                 // We set monitoring violations to warnings so the pip completes.
@@ -1491,9 +1492,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessCachedWithAllowlistedFileMonitoringViolationsInSealedDirectory()
+        public Task ProcessCachedWithAllowlistedFileMonitoringViolationsInSealedDirectory()
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
 
                 // We set monitoring violations to warnings so the pip completes.
@@ -1636,10 +1637,10 @@ namespace Test.BuildXL.Scheduler
         }
 
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        public async Task ProcessWithDirectoryEnumeration_Bug1021066()
+        public Task ProcessWithDirectoryEnumeration_Bug1021066()
         {
             string sourceDir = GetFullPath("inc");
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -1775,9 +1776,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task ProcessWithDirectoryInput()
+        public Task ProcessWithDirectoryInput()
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -1932,9 +1933,9 @@ namespace Test.BuildXL.Scheduler
         /// Tests that we can have a partially-sealed directory input for D\A and D\B while also writing D\C (write access to B should not be denied).
         /// </summary>
         [Fact]
-        public async Task ProcessWithOutputInsideDirectoryInput()
+        public Task ProcessWithOutputInsideDirectoryInput()
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -1955,9 +1956,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task ProcessWithSharedOpaqueDirectoryOutputs()
+        public Task ProcessWithSharedOpaqueDirectoryOutputs()
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -1982,9 +1983,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task ProcessWithMultipleDirectoryInputs()
+        public Task ProcessWithMultipleDirectoryInputs()
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -2027,9 +2028,9 @@ namespace Test.BuildXL.Scheduler
         }
 
         [Fact]
-        public async Task ProcessCleansTempDirBeforeRunning()
+        public Task ProcessCleansTempDirBeforeRunning()
         {
-            await WithExecutionEnvironment(
+            return WithExecutionEnvironment(
                 async env =>
                 {
                     // Create a temp directory with a file in it from a previous run
@@ -2052,7 +2053,7 @@ namespace Test.BuildXL.Scheduler
                         pipDataBuilder.Add("/d");
                         pipDataBuilder.Add("/c");
                     }
-                    
+
                     using (pipDataBuilder.StartFragment(PipDataFragmentEscaping.CRuntimeArgumentRules, " "))
                     {
                         pipDataBuilder.Add(OperatingSystemHelper.IsUnixOS ? "if [ -f " + oldFile + " ]; then echo exists; else echo not exist; fi;" : "if exist \"" + oldFile + "\" (echo exists) else (echo not exist)");
@@ -2191,11 +2192,11 @@ EXIT /b 3
         }
 
         [Fact]
-        public async Task PreserveOutputsWithDisallowedSandbox()
+        public Task PreserveOutputsWithDisallowedSandbox()
         {
             const string PriorOutput = "PriorOutputContent";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -2207,11 +2208,11 @@ EXIT /b 3
         }
 
         [Fact]
-        public async Task PreserveOutputsWithAllowedSandboxButDisallowedPip()
+        public Task PreserveOutputsWithAllowedSandboxButDisallowedPip()
         {
             const string PriorOutput = "PriorOutputContent";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -2223,11 +2224,11 @@ EXIT /b 3
         }
 
         [Fact]
-        public async Task PreserveOutputsAllowed()
+        public Task PreserveOutputsAllowed()
         {
             const string PriorOutput = "PriorOutputContent";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -2267,9 +2268,9 @@ EXIT /b 3
         [Theory]
         [InlineData("Hello-0")]
         [InlineData("Hello-1")]
-        public async Task TestCacheHitPipResultShouldContainDynamicallyObservedInputs(string revert)
+        public Task TestCacheHitPipResultShouldContainDynamicallyObservedInputs(string revert)
         {
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -2311,8 +2312,8 @@ EXIT /b 3
                     File.WriteAllText(expandedDirectoryMemberPath, "Hello-1");
 
                     await VerifyPipResult(
-                        PipResultStatus.Succeeded, 
-                        env, 
+                        PipResultStatus.Succeeded,
+                        env,
                         process,
                         customVerify:
                             pipResult =>
@@ -2331,8 +2332,8 @@ EXIT /b 3
                     File.WriteAllText(expandedDirectoryMemberPath, revert);
 
                     await VerifyPipResult(
-                        PipResultStatus.DeployedFromCache, 
-                        env, 
+                        PipResultStatus.DeployedFromCache,
+                        env,
                         process,
                         customVerify:
                             pipResult =>
@@ -3077,12 +3078,12 @@ EXIT /b 3
         }
 
         [Fact]
-        public async Task CopyFileWritable()
+        public Task CopyFileWritable()
         {
             const string Contents = "Matches!";
             const string BadContents = "Anti-Matches!";
 
-            await WithCachingExecutionEnvironment(
+            return WithCachingExecutionEnvironment(
                 GetFullPath(".cache"),
                 async env =>
                 {
@@ -3122,6 +3123,49 @@ EXIT /b 3
                     {
                         XAssert.Fail("Failed writing to the destination file. This implies that the outputs were not left writable, despite requesting that via Process.Options.OutputsMustRemainWritable");
                     }
+                });
+        }
+
+        [Theory]
+        [InlineData(WriteFilePip.PathRenderingOption.None)]
+        [InlineData(WriteFilePip.PathRenderingOption.BackSlashes)]
+        [InlineData(WriteFilePip.PathRenderingOption.EscapedBackSlashes)]
+        [InlineData(WriteFilePip.PathRenderingOption.ForwardSlashes)]
+        public Task WriteFileWithPathRenderingOptions(WriteFilePip.PathRenderingOption option)
+        {
+            return WithExecutionEnvironment(
+                async env =>
+                {
+                    string destination = GetFullPath("dest");
+                    AbsolutePath destinationAbsolutePath = AbsolutePath.Create(env.Context.PathTable, destination);
+                    FileArtifact destinationArtifact = FileArtifact.CreateSourceFile(destinationAbsolutePath).CreateNextWrittenVersion();
+                    PipData contents = PipDataBuilder.CreatePipData(
+                        env.Context.StringTable,
+                        "",
+                        PipDataFragmentEscaping.NoEscaping,
+                        destinationAbsolutePath);
+                    var pip = new WriteFilePip(destinationArtifact, contents, WriteFileEncoding.Utf8, ReadOnlyArray<StringId>.Empty, PipProvenance.CreateDummy(env.Context), new WriteFilePip.Options(option));
+                    await VerifyPipResult(PipResultStatus.Succeeded, env, pip);
+                    string actual = File.ReadAllText(destination);
+                    string expected = "";
+
+                    switch(option)
+                    {
+                        case WriteFilePip.PathRenderingOption.None:
+                            expected = destinationAbsolutePath.ToString(env.Context.PathTable);
+                            break;
+                        case WriteFilePip.PathRenderingOption.BackSlashes:
+                            expected = destinationAbsolutePath.ToString(env.Context.PathTable, PathFormat.Windows);
+                            break;
+                        case WriteFilePip.PathRenderingOption.EscapedBackSlashes:
+                            expected = destinationAbsolutePath.ToString(env.Context.PathTable, PathFormat.Windows).Replace(@"\", @"\\"); ;
+                            break;
+                        case WriteFilePip.PathRenderingOption.ForwardSlashes:
+                            expected = destinationAbsolutePath.ToString(env.Context.PathTable, PathFormat.Script);
+                            break;
+                    }
+
+                    XAssert.AreEqual(expected, actual);
                 });
         }
 

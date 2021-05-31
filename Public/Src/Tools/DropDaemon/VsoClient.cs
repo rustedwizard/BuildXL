@@ -9,9 +9,12 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Threading.Tasks.Dataflow;
+using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Ipc.Common;
+using BuildXL.Ipc.ExternalApi;
 using BuildXL.Ipc.Interfaces;
+using BuildXL.Utilities;
+using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using Microsoft.IdentityModel.Clients.ActiveDirectory;
 using Microsoft.VisualStudio.Services.ArtifactServices.App.Shared.Cache;
@@ -56,7 +59,10 @@ namespace Tool.DropDaemon
             internal long TotalComputeFileBlobDescriptorForAssociateMs = 0;
             internal long TotalComputeFileBlobDescriptorForUploadMs = 0;
             internal long FinalizeTimeMs = 0;
-            internal long TotalUploadSizeMb = 0;
+            internal long TotalAssociateSizeBytes = 0;
+            internal long TotalUploadSizeBytes = 0;
+            internal long TotalBuildManifestRegistrationDurationMs = 0;
+            internal long TotalBuildManifestRegistrationFailures = 0;
 
             internal IDictionary<string, long> ToDictionary()
             {
@@ -74,13 +80,17 @@ namespace Tool.DropDaemon
                 AddStat(dict, Statistics.TotalComputeFileBlobDescriptorForAssociateMs, ref TotalComputeFileBlobDescriptorForAssociateMs);
                 AddStat(dict, Statistics.TotalComputeFileBlobDescriptorForUploadMs, ref TotalComputeFileBlobDescriptorForUploadMs);
                 AddStat(dict, Statistics.FinalizeTimeMs, ref FinalizeTimeMs);
-                AddStat(dict, Statistics.TotalUploadSizeMb, ref TotalUploadSizeMb);
+                // we track the total size of files in bytes, but log it in megabytes
+                AddStat(dict, Statistics.TotalAssociateSizeMb, ref TotalAssociateSizeBytes, size => size >> 20);
+                AddStat(dict, Statistics.TotalUploadSizeMb, ref TotalUploadSizeBytes, size => size >> 20);
+                AddStat(dict, Statistics.TotalBuildManifestRegistrationDurationMs, ref TotalBuildManifestRegistrationDurationMs);
+                AddStat(dict, Statistics.TotalBuildManifestRegistrationFailures, ref TotalBuildManifestRegistrationFailures);
                 return dict;
             }
 
-            private static void AddStat(IDictionary<string, long> stats, string key, ref long value)
+            private static void AddStat(IDictionary<string, long> stats, string key, ref long value, Func<long, long> converter = null)
             {
-                stats[I($"DropDaemon.{key}")] = Volatile.Read(ref value);
+                stats[I($"DropDaemon.{key}")] = converter != null ? converter(Volatile.Read(ref value)) : Volatile.Read(ref value);
             }
         }
         #endregion
@@ -89,23 +99,15 @@ namespace Tool.DropDaemon
         private readonly DropConfig m_config;
         private readonly IDropServiceClient m_dropClient;
         private readonly CancellationTokenSource m_cancellationSource;
-        private readonly Timer m_batchTimer;
+        private readonly DropDaemon m_dropDaemon;
 
-        private readonly BatchBlock<AddFileItem> m_batchBlock;
-        private readonly BufferBlock<AddFileItem[]> m_bufferBlock;
-        private readonly ActionBlock<AddFileItem[]> m_actionBlock;
-
-        private long m_lastTimeProcessAddFileRanInTicks = DateTime.UtcNow.Ticks;
+        private readonly NagleQueue<AddFileItem> m_nagleQueue;
 
         private CancellationToken Token => m_cancellationSource.Token;
 
         private static IAppTraceSource Tracer => DropAppTraceSource.SingleInstance;
 
         private static CacheContext CacheContext => null; // not needed for anything but "get", which we don't do
-
-        private VssCredentials GetCredentials() =>
-            new VsoCredentialHelper(m => m_logger.Verbose(m))
-                .GetCredentials(m_config.Service, true, null, null, PromptBehavior.Never);
 
         private ArtifactHttpClientFactory GetFactory() =>
             new ArtifactHttpClientFactory(
@@ -126,12 +128,13 @@ namespace Tool.DropDaemon
         public string DropUrl => ServiceEndpoint + "/_apis/drop/drops/" + DropName;
 
         /// <nodoc />
-        public VsoClient(IIpcLogger logger, DropConfig dropConfig)
+        public VsoClient(IIpcLogger logger, DropDaemon dropDaemon)
         {
-            Contract.Requires(dropConfig != null);
+            Contract.Requires(dropDaemon?.DropConfig != null);
 
             m_logger = logger;
-            m_config = dropConfig;
+            m_dropDaemon = dropDaemon;
+            m_config = dropDaemon.DropConfig;
             m_cancellationSource = new CancellationTokenSource();
 
             logger.Info("Using drop config: " + JsonConvert.SerializeObject(m_config));
@@ -143,27 +146,42 @@ namespace Tool.DropDaemon
                 logger: logger,
                 clientConstructor: CreateDropServiceClient);
 
-            // create dataflow blocks
-            var groupingOptions = new GroupingDataflowBlockOptions { Greedy = true };
-
-            var actionOptions = new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = m_config.MaxParallelUploads };
-            var linkOptions = new DataflowLinkOptions { PropagateCompletion = true };
-
-            m_batchBlock = new BatchBlock<AddFileItem>(m_config.BatchSize, groupingOptions);
-            m_bufferBlock = new BufferBlock<AddFileItem[]>(); // per http://blog.stephencleary.com/2012/11/async-producerconsumer-queue-using.html, good to have buffer when throttling
-            m_actionBlock = new ActionBlock<AddFileItem[]>(ProcessAddFilesAsync, actionOptions);
-            m_batchBlock.LinkTo(m_bufferBlock, linkOptions);
-            m_bufferBlock.LinkTo(m_actionBlock, linkOptions);
-
-            // create and set up timer for triggering the batch block
-            TimeSpan timerInterval = m_config.NagleTime;
-            m_batchTimer = new Timer(FlushBatchBlock, null, timerInterval, timerInterval);
+            m_nagleQueue = NagleQueue<AddFileItem>.Create(
+                maxDegreeOfParallelism: m_config.MaxParallelUploads,
+                batchSize: m_config.BatchSize,
+                interval: m_config.NagleTime,
+                processBatch: ProcessAddFilesAsync);
 
             if (m_config.ArtifactLogName != null)
             {
                 DropAppTraceSource.SingleInstance.SetSourceLevel(System.Diagnostics.SourceLevels.Verbose);
                 Tracer.AddFileTraceListener(Path.Combine(m_config.LogDir, m_config.ArtifactLogName));
             }
+        }
+
+        /// <summary>
+        /// Takes a hash as string and registers its corresponding SHA-256 ContentHash using BuildXL Api.
+        /// Should be called only when DropConfig.GenerateBuildManifest is true.
+        /// Returns a hashset of failing RelativePaths.
+        /// </summary>
+        private async Task<HashSet<string>> RegisterFilesForBuildManifestAsync(BuildManifestEntry[] buildManifestEntries)
+        {
+            await Task.Yield();
+            Contract.Requires(m_dropDaemon.DropConfig.GenerateBuildManifest, "RegisterFileForBuildManifest API called even though Build Manifest Generation is Disabled in DropConfig");
+            var bxlResult = await m_dropDaemon.ApiClient.RegisterFilesForBuildManifest(m_dropDaemon.DropName, buildManifestEntries);
+            if (!bxlResult.Succeeded)
+            {
+                m_logger.Verbose($"ApiClient.RegisterFileForBuildManifest unsuccessful. Failure: {bxlResult.Failure.DescribeIncludingInnerFailures()}");
+                return new HashSet<string>(buildManifestEntries.Select(bme => bme.RelativePath));
+            }
+
+            if (bxlResult.Result.Length > 0)
+            {
+                m_logger.Verbose($"ApiClient.RegisterFileForBuildManifest found {bxlResult.Result.Length} file hashing failures.");
+                return new HashSet<string>(bxlResult.Result.Select(bme => bme.RelativePath));
+            }
+
+            return new HashSet<string>();
         }
 
         /// <summary>
@@ -211,8 +229,14 @@ namespace Tool.DropDaemon
             Interlocked.Increment(ref Stats.NumAddFileRequests);
 
             var addFileItem = new AddFileItem(dropItem);
-            await m_batchBlock.SendAsync(addFileItem);
-            return await addFileItem.TaskSource.Task;
+            m_nagleQueue.Enqueue(addFileItem);
+
+            var manifestResult = await addFileItem.BuildManifestTaskSource.Task;
+            var dropResult = await addFileItem.DropResultTaskSource.Task;
+
+            return manifestResult == RegisterFileForBuildManifestResult.Failed
+                ? AddFileResult.RegisterFileForBuildManifestFailure
+                : dropResult;
         }
 
         /// <summary>
@@ -220,8 +244,7 @@ namespace Tool.DropDaemon
         /// </summary>
         public async Task<FinalizeResult> FinalizeAsync(CancellationToken token)
         {
-            m_batchBlock.Complete();
-            await m_actionBlock.Completion;
+            await m_nagleQueue.DisposeAsync();
 
             var startTime = DateTime.UtcNow;
             await m_dropClient.FinalizeAsync(DropName, token);
@@ -258,7 +281,7 @@ namespace Tool.DropDaemon
         {
             m_dropClient.Dispose();
             m_cancellationSource.Dispose();
-            m_batchTimer.Dispose();
+            m_nagleQueue.Dispose();
         }
 
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose client", Justification = "Caller is responsible for disposing it")]
@@ -277,18 +300,6 @@ namespace Tool.DropDaemon
         }
 
         /// <summary>
-        ///     Triggered by <see cref="m_batchTimer"/>.
-        /// </summary>
-        private void FlushBatchBlock(object state)
-        {
-            var elapsedTicks = ElapsedTicksSinceLastProcessedBatch();
-            if (elapsedTicks > m_config.NagleTime.Ticks)
-            {
-                m_batchBlock.TriggerBatch();
-            }
-        }
-
-        /// <summary>
         ///     Implements 'drop addfile' by first calling <see cref="IDropServiceClient.AssociateAsync"/>,
         ///     and then <see cref="IDropServiceClient.UploadAndAssociateAsync"/>.
         /// </summary>
@@ -297,8 +308,6 @@ namespace Tool.DropDaemon
         /// </remarks>
         private async Task ProcessAddFilesAsync(AddFileItem[] batch)
         {
-            Interlocked.Exchange(ref m_lastTimeProcessAddFileRanInTicks, DateTime.UtcNow.Ticks);
-
             if (batch.Length == 0)
             {
                 return;
@@ -321,6 +330,21 @@ namespace Tool.DropDaemon
                 var numSkipped = batch.Length - dedupedBatch.Length;
                 m_logger.Info("Processing a batch of {0} drop files after skipping {1} files.", dedupedBatch.Length, numSkipped);
 
+                Task<HashSet<string>> registerFilesForBuildManifestTask = null;
+                // Register files for Build Manifest
+                if (m_dropDaemon.DropConfig.GenerateBuildManifest)
+                {
+                    BuildManifestEntry[] buildManifestEntries = dedupedBatch
+                        .Where(dropItem => dropItem.BlobIdentifier != null)
+                        .Select(dropItem => new BuildManifestEntry(dropItem.RelativeDropFilePath, dropItem.BlobIdentifier.ToContentHash(), dropItem.FullFilePath))
+                        .ToArray();
+
+                    if (buildManifestEntries.Length > 0) // dropItem.BlobIdentifier = null for files generated in the DropDaemon
+                    {
+                        registerFilesForBuildManifestTask = Task.Run(() => RegisterFilesForBuildManifestAsync(buildManifestEntries));
+                    }
+                }
+
                 // compute blobs for associate
                 var startTime = DateTime.UtcNow;
                 blobsForAssociate = await Task.WhenAll(dedupedBatch.Select(item => item.FileBlobDescriptorForAssociateAsync(m_config.EnableChunkDedup, Token)));
@@ -338,8 +362,27 @@ namespace Tool.DropDaemon
                 // run 'UploadAndAssociate' for the missing files.
                 await UploadAndAssociateAsync(associateStatus, blobsForUpload);
                 SetResultForUploadedMissingItems(itemsLeftToUpload);
-                Interlocked.Add(ref Stats.TotalUploadSizeMb, blobsForUpload.Sum(b => b.FileSize ?? 0) >> 20);
+                Interlocked.Add(ref Stats.TotalUploadSizeBytes, blobsForUpload.Sum(b => b.FileSize ?? 0));
 
+                startTime = DateTime.UtcNow;
+
+                foreach (var file in dedupedBatch)
+                {
+                    RegisterFileForBuildManifestResult result = registerFilesForBuildManifestTask == null
+                        ? RegisterFileForBuildManifestResult.Skipped
+                        : (await registerFilesForBuildManifestTask).Contains(file.RelativeDropFilePath)
+                            ? RegisterFileForBuildManifestResult.Failed
+                            : RegisterFileForBuildManifestResult.Registered;
+                    file.BuildManifestTaskSource.TrySetResult(result);
+
+                    if (result == RegisterFileForBuildManifestResult.Failed)
+                    {
+                        Interlocked.Increment(ref Stats.TotalBuildManifestRegistrationFailures);
+                        m_logger.Info($"Build Manifest File registration failed for file at RelativePath '{file.RelativeDropFilePath}' with VSO '{file.BlobIdentifier.AlgorithmResultString}'.");
+                    }
+                }
+
+                Interlocked.Add(ref Stats.TotalBuildManifestRegistrationDurationMs, ElapsedMillis(startTime));
                 m_logger.Info("Done processing AddFile batch.");
             }
             catch (Exception e)
@@ -347,14 +390,17 @@ namespace Tool.DropDaemon
                 m_logger.Verbose($"Failed ProcessAddFilesAsync (batch size:{batch.Length}, blobsForAssociate size:{blobsForAssociate.Length}){Environment.NewLine}"
                     + string.Join(
                         Environment.NewLine,
-                        batch.Select(item => $"'{item.FullFilePath}', '{item.RelativeDropFilePath}', BlobId:'{item.BlobIdentifier?.ToString() ?? ""}', Task.IsCompleted:{item.TaskSource.Task.IsCompleted}")));
+                        batch.Select(item => $"'{item.FullFilePath}', '{item.RelativeDropFilePath}', BlobId:'{item.BlobIdentifier?.ToString() ?? ""}', Task.IsCompleted:{item.DropResultTaskSource.Task.IsCompleted}")));
 
                 foreach (AddFileItem item in batch)
                 {
-                    if (!item.TaskSource.Task.IsCompleted)
+                    if (!item.DropResultTaskSource.Task.IsCompleted)
                     {
-                        item.TaskSource.SetException(e);
+                        item.DropResultTaskSource.SetException(e);
                     }
+
+                    // No exceptions are thrown by RegisterFilesForBuildManifestAsync
+                    item.BuildManifestTaskSource.TrySetResult(RegisterFileForBuildManifestResult.Skipped);
                 }
             }
         }
@@ -372,12 +418,14 @@ namespace Tool.DropDaemon
                     if (existingItem.BlobIdentifier != null && existingItem.BlobIdentifier == item.BlobIdentifier)
                     {
                         // the item won't be returned for further processing, so we need to mark its task complete
-                        item.TaskSource.SetResult(AddFileResult.SkippedAsDuplicate);
+                        item.DropResultTaskSource.SetResult(AddFileResult.SkippedAsDuplicate);
+                        item.BuildManifestTaskSource.SetResult(RegisterFileForBuildManifestResult.Skipped);
                         ++numSkipped;
                     }
                     else
                     {
-                        item.TaskSource.SetException(new Exception($"An item with a drop path '{item.RelativeDropFilePath}' is already present -- existing content: '{existingItem?.BlobIdentifier?.ToContentHash()}', new content: '{item?.BlobIdentifier?.ToContentHash()}'"));
+                        item.DropResultTaskSource.SetException(new Exception($"An item with a drop path '{item.RelativeDropFilePath}' is already present -- existing content: '{existingItem?.BlobIdentifier?.ToContentHash()}', new content: '{item?.BlobIdentifier?.ToContentHash()}'"));
+                        item.BuildManifestTaskSource.SetResult(RegisterFileForBuildManifestResult.Skipped);
                         ++numFailed;
                     }
                 }
@@ -477,7 +525,7 @@ namespace Tool.DropDaemon
         {
             foreach (AddFileItem item in uploadedItems)
             {
-                item.TaskSource.SetResult(AddFileResult.UploadedAndAssociated);
+                item.DropResultTaskSource.SetResult(AddFileResult.UploadedAndAssociated);
             }
         }
 
@@ -486,16 +534,18 @@ namespace Tool.DropDaemon
         ///     (as indicated by <paramref name="associateStatus"/>), and returns <see cref="AddFileItem"/>s
         ///     for those that are missing (<see cref="AssociationsStatus.Missing"/>).
         /// </summary>
-        private static async Task<IReadOnlyList<AddFileItem>> SetResultForAssociatedNonMissingItemsAsync(AddFileItem[] batch, AssociationsStatus associateStatus, bool chunkDedup, CancellationToken cancellationToken)
+        private async Task<IReadOnlyList<AddFileItem>> SetResultForAssociatedNonMissingItemsAsync(AddFileItem[] batch, AssociationsStatus associateStatus, bool chunkDedup, CancellationToken cancellationToken)
         {
             var missingItems = new List<AddFileItem>();
             var missingBlobIds = new HashSet<BlobIdentifier>(associateStatus.Missing);
+            long totalSizeOfAssociatedFiles = 0;
             foreach (AddFileItem item in batch)
             {
                 var itemFileBlobDescriptor = await item.FileBlobDescriptorForAssociateAsync(chunkDedup, cancellationToken);
                 if (!missingBlobIds.Contains(itemFileBlobDescriptor.BlobIdentifier))
                 {
-                    item.TaskSource.SetResult(AddFileResult.Associated);
+                    item.DropResultTaskSource.SetResult(AddFileResult.Associated);
+                    totalSizeOfAssociatedFiles += item.PrecomputedFileLength;
                 }
                 else
                 {
@@ -503,12 +553,8 @@ namespace Tool.DropDaemon
                 }
             }
 
+            Interlocked.Add(ref Stats.TotalAssociateSizeBytes, totalSizeOfAssociatedFiles);
             return missingItems;
-        }
-
-        private long ElapsedTicksSinceLastProcessedBatch()
-        {
-            return DateTime.UtcNow.Ticks - Interlocked.Read(ref m_lastTimeProcessAddFileRanInTicks);
         }
 
         /// <summary>
@@ -521,7 +567,9 @@ namespace Tool.DropDaemon
             private FileBlobDescriptor m_fileBlobDescriptorForUpload;
             private FileBlobDescriptor m_fileBlobDescriptorForAssociate;
 
-            internal TaskSourceSlim<AddFileResult> TaskSource { get; }
+            internal TaskSourceSlim<AddFileResult> DropResultTaskSource { get; }
+
+            internal TaskSourceSlim<RegisterFileForBuildManifestResult> BuildManifestTaskSource { get; }
 
             internal string FullFilePath => m_dropItem.FullFilePath;
 
@@ -529,12 +577,19 @@ namespace Tool.DropDaemon
 
             internal BlobIdentifier BlobIdentifier => m_dropItem.BlobIdentifier;
 
+            /// <summary>
+            /// Optional pre-computed file length. This field is set only for files that have known length
+            /// and that originated from BuildXL. In all other cases the field is set to 0.
+            /// </summary>
+            internal long PrecomputedFileLength => m_dropItem.FileLength;
+
             internal AddFileItem(IDropItem item)
             {
-                TaskSource = TaskSourceSlim.Create<AddFileResult>();
+                DropResultTaskSource = TaskSourceSlim.Create<AddFileResult>();
                 m_dropItem = item;
                 m_fileBlobDescriptorForUpload = null;
                 m_fileBlobDescriptorForAssociate = null;
+                BuildManifestTaskSource = TaskSourceSlim.Create<RegisterFileForBuildManifestResult>();
             }
 
             /// <summary>
@@ -621,6 +676,24 @@ namespace Tool.DropDaemon
                     return await FileBlobDescriptorForUploadAsync(chunkDedup, cancellationToken);
                 }
             }
+        }
+
+        /// <summary>
+        /// Try to acquire credentials using the Azure Artifacts Helper first, if that fails then fallback to VsoCredentialHelper
+        /// </summary>
+        /// <returns>Credentials for PAT that was acquired.</returns>
+        private VssCredentials GetCredentials()
+        {
+            Action<string> loggerAction = m => m_logger.Verbose(m);
+            var adoCredentialHelper = new AzureArtifactsCredentialHelper(loggerAction);
+            var credentialHelperResult = adoCredentialHelper.AcquirePat(m_config.Service, PatType.VstsDropReadWrite).Result;
+
+            if (credentialHelperResult.Result == AzureArtifactsCredentialHelperResultType.Success)
+            {
+                return new VsoCredentialHelper(loggerAction).GetPATCredentials(credentialHelperResult.Pat);
+            }
+
+            return new VsoCredentialHelper(loggerAction).GetCredentials(serviceUri: m_config.Service, useAad: true, existingAadTokenCacheBytes: null, pat: null, promptBehavior: PromptBehavior.Never);
         }
     }
 }

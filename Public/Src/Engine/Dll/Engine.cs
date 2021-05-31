@@ -35,7 +35,6 @@ using BuildXL.Pips.Graph;
 using BuildXL.Pips.Operations;
 using BuildXL.Processes;
 using BuildXL.Scheduler;
-using BuildXL.Scheduler.Artifacts;
 using BuildXL.Storage;
 using BuildXL.Storage.Fingerprints;
 using BuildXL.Tracing;
@@ -70,9 +69,9 @@ namespace BuildXL.Engine
 
         /// <summary>
         /// Manages interactions with workers/coordinator for distributed builds.
-        /// Exists only when engine runs in master mode.
+        /// Exists only when engine runs in orchestrator mode.
         /// </summary>
-        private readonly MasterService m_masterService;
+        private readonly OrchestratorService m_orchestratorService;
 
         /// <summary>
         /// The worker service - exists only when the engine runs in worker mode.
@@ -82,7 +81,7 @@ namespace BuildXL.Engine
         /// <summary>
         /// Common representation of current distribution service
         /// </summary>
-        private readonly IDistributionService m_distributionService;
+        private readonly DistributionService m_distributionService;
 
         /// <summary>
         /// This holds the state that the engine needs to hand down to the components it hosts.
@@ -146,6 +145,7 @@ namespace BuildXL.Engine
             }
         }
 
+        private enum FileContentTableType { Stub, FromFileOrNew, FromEngineState }
         private FileContentTable m_fileContentTable;
         private Task<FileContentTable> m_fileContentTask;
 
@@ -246,7 +246,7 @@ namespace BuildXL.Engine
         [CanBeNull]
         private readonly string m_buildVersion;
 
-        private bool IsDistributedMaster => Configuration.Distribution.BuildRole == DistributedBuildRoles.Master;
+        private bool IsDistributedOrchestrator => Configuration.Distribution.BuildRole.IsOrchestrator();
 
         private bool IsDistributedWorker => Configuration.Distribution.BuildRole == DistributedBuildRoles.Worker;
 
@@ -272,14 +272,10 @@ namespace BuildXL.Engine
             Contract.Requires(configuration != null);
             Contract.Requires(initialConfig != null);
 
-            bool grpcHandlerInliningEnabled = GrpcSettings.HandlerInliningEnabled;
-
-            GrpcEnvironment.InitializeIfNeeded(GrpcSettings.ThreadPoolSize, grpcHandlerInliningEnabled);
+            GrpcEnvironment.Initialize();
 
             Logger.Log.GrpcSettings(
                 loggingContext,
-                GrpcSettings.ThreadPoolSize,
-                grpcHandlerInliningEnabled,
                 (int)GrpcSettings.CallTimeout.TotalMinutes,
                 (int)GrpcSettings.WorkerAttachTimeout.TotalMinutes);
 
@@ -302,13 +298,14 @@ namespace BuildXL.Engine
             m_trackingEventListener = trackingEventListener;
             m_rememberAllChangedTrackedInputs = rememberAllChangedTrackedInputs;
 
-            // Activity id is unique per the CB session. However, this is not enough as we invoke more than one BuildXL per machine per CB session due to the Office workflow.
-            // That's why, we also concat the environment to the id.
-            var distributedBuildId = I($"{Configuration.Logging.RelatedActivityId}-{Configuration.Logging.Environment}");
-            if (IsDistributedMaster)
+            var distributedBuildId = new DistributedBuildId(
+                Configuration.Logging.RelatedActivityId ?? "00000000-0000-0000-0000-000000000000",  // Can be null in non-distributed builds or if left unspecified
+                Configuration.Logging.Environment.ToString());
+
+            if (IsDistributedOrchestrator)
             {
-                m_masterService = new MasterService(Configuration.Distribution, loggingContext, distributedBuildId);
-                m_distributionService = m_masterService;
+                m_orchestratorService = new OrchestratorService(Configuration.Distribution, loggingContext, distributedBuildId);
+                m_distributionService = m_orchestratorService;
             }
             else if (IsDistributedWorker)
             {
@@ -718,6 +715,7 @@ namespace BuildXL.Engine
             logging.RedirectedLogsDirectory = layout.OutputDirectory.Combine(pathTable, Strings.Layout_DefaultJunctionNameTotLogFolder);
 
             mutableConfig.Sandbox.TimeoutDumpDirectory = logging.LogsDirectory.Combine(pathTable, "TimeoutDumps");
+            mutableConfig.Sandbox.SurvivingPipProcessChildrenDumpDirectory = logging.LogsDirectory.Combine(pathTable, LogFileExtensions.SurvivingPipProcessChildrenDumpDirectory);
 
             logging.Log = logging.LogsDirectory.Combine(pathTable, logging.LogPrefix + LogFileExtensions.Log);
             logging.ErrorLog = logging.LogsDirectory.Combine(pathTable, logging.LogPrefix + LogFileExtensions.Errors);
@@ -853,9 +851,10 @@ namespace BuildXL.Engine
             }
 
             // Customer builds may involve a lot of large strings that can fill up the string table.
+            // Adding a non-zero overflow buffer count increases the capacity of the string table.
             // Large string buffer is a secondary table used when the strings are large. By adjusting the threshold for
             // the string size, some of the large strings that used to go to the string table can go to the large string buffer.
-            StringTable.OverrideLargeStringBufferThreshold(EngineEnvironmentSettings.LargeStringBufferThresholdBytes);
+            StringTable.OverrideStringTableDefaults(EngineEnvironmentSettings.LargeStringBufferThresholdBytes, EngineEnvironmentSettings.StringTableOverflowBufferCount);
 
             if (mutableConfig.Export.SnapshotFile.IsValid && mutableConfig.Export.SnapshotMode != SnapshotMode.None)
             {
@@ -877,21 +876,37 @@ namespace BuildXL.Engine
             }
 
             // Distribution overrides
-            if (mutableConfig.Distribution.BuildRole == DistributedBuildRoles.Master)
+            if (mutableConfig.Distribution.BuildRole.IsOrchestrator())
             {
                 if (!mutableConfig.Distribution.BuildWorkers.Any())
                 {
                     // Disable the distribution if no remote worker is given.
                     mutableConfig.Distribution.BuildRole = DistributedBuildRoles.None;
+                    mutableConfig.Distribution.LowWorkersWarningThreshold = 0;
                 }
                 else
                 {
-                    // Force graph caching because the master needs to communicate it to the worker.
+                    var remoteWorkerCount = mutableConfig.Distribution.BuildWorkers.Count;
+
+                    if (mutableConfig.Distribution.LowWorkersWarningThreshold == null)
+                    {
+                        mutableConfig.Distribution.LowWorkersWarningThreshold = remoteWorkerCount/2;
+                    }
+                    else
+                    {
+                        mutableConfig.Distribution.LowWorkersWarningThreshold = Math.Min(remoteWorkerCount + 1, mutableConfig.Distribution.LowWorkersWarningThreshold.Value);
+                    }
+                    
+                    // Force graph caching because the orchestrator needs to communicate it to the worker.
                     mutableConfig.Cache.CacheGraph = true;
                 }
             }
+            else
+            {
+                mutableConfig.Distribution.LowWorkersWarningThreshold = 0;
+            }
 
-            if (mutableConfig.Distribution.BuildRole != DistributedBuildRoles.Master)
+            if (!mutableConfig.Distribution.BuildRole.IsOrchestrator())
             {
                 // No additional choose worker threads needed in single machine builds or workers
                 mutableConfig.Schedule.MaxChooseWorkerCpu = 1;
@@ -900,7 +915,7 @@ namespace BuildXL.Engine
 
             if (mutableConfig.Distribution.BuildRole == DistributedBuildRoles.Worker)
             {
-                // No reason for the worker to interact with HistoricPerformanceInfo. Scheduling decisions are handled by the master
+                // No reason for the worker to interact with HistoricPerformanceInfo. Scheduling decisions are handled by the orchestrator
                 mutableConfig.Schedule.UseHistoricalPerformanceInfo = false;
             }
 
@@ -1094,6 +1109,14 @@ namespace BuildXL.Engine
                 }
             }
 
+            if (mutableConfig.Sandbox.UnsafeSandboxConfiguration.IgnorePreserveOutputsPrivatization
+                && mutableConfig.Sandbox.UnsafeSandboxConfiguration.PreserveOutputs != PreserveOutputsMode.Disabled
+                && mutableConfig.Schedule.StoreOutputsToCache)
+            {
+                Logger.Log.ConfigIncompatibleOptionIgnorePreserveOutputsPrivatization(loggingContext);
+                success = false;
+            }
+
             // CloudBuild overrides
             if (mutableConfig.InCloudBuild())
             {
@@ -1198,20 +1221,32 @@ namespace BuildXL.Engine
                     // If ManageMemoryMode is unset for CB builds, we use EmptyWorkingSet option due to the large page file size in CB machines.
                     mutableConfig.Schedule.ManageMemoryMode = ManageMemoryMode.EmptyWorkingSet;
                 }
+
+                // Since VFS lives inside BXL process currently. Disallow on office enlist and meta build because
+                // they materialize files which would be needed by subsequent invocations and thus requires VFS to
+                // span multiple invocations. Just starting at Product build is sufficient.
+                if (mutableConfig.Logging.Environment == ExecutionEnvironment.OfficeMetaBuildLab
+                    || mutableConfig.Logging.Environment == ExecutionEnvironment.OfficeEnlistmentBuildLab)
+                {
+                    mutableConfig.Cache.VfsCasRoot = AbsolutePath.Invalid;
+                }
+
+                // Unless otherwise specified, distributed metabuilds in CloudBuild should replicate outputs to all machines
+                // TODO: Remove this once reduced metabuild materialization is fully tested
+                if (mutableConfig.Distribution.ReplicateOutputsToWorkers == null
+                    && mutableConfig.Logging.Environment == ExecutionEnvironment.OfficeMetaBuildLab
+                    && mutableConfig.Distribution.BuildRole.IsOrchestrator())
+                {
+                    mutableConfig.Distribution.ReplicateOutputsToWorkers = true;
+                }
+
+                // When running in cloudbuild we want to ignore the user setting the interactive flag
+                // and force it to be false since we never want to pop up UI there.
+                mutableConfig.Interactive = false;
             }
             else
             {
                 mutableConfig.Logging.StoreFingerprints = initialCommandLineConfiguration.Logging.StoreFingerprints ?? true;
-            }
-
-            // Unless otherwise specified, distributed metabuilds in CloudBuild should replicate outputs to all machines
-            // TODO: Remove this once reduced metabuild materialization is fully tested
-            if (mutableConfig.InCloudBuild() &&
-                mutableConfig.Distribution.ReplicateOutputsToWorkers == null &&
-                mutableConfig.Logging.Environment == ExecutionEnvironment.OfficeMetaBuildLab &&
-                mutableConfig.Distribution.BuildRole == DistributedBuildRoles.Master)
-            {
-                mutableConfig.Distribution.ReplicateOutputsToWorkers = true;
             }
 
             // If graph patching is requested, we need to reload the engine state when possible
@@ -1236,13 +1271,6 @@ namespace BuildXL.Engine
             if (mutableConfig.Distribution.ReplicateOutputsToWorkers == true)
             {
                 mutableConfig.Distribution.EarlyWorkerRelease = false;
-            }
-
-            // When running in cloudbuild we want to ignore the user setting the interactive flag
-            // and force it to be false since we never want to pop up UI there.
-            if (mutableConfig.InCloudBuild())
-            {
-                mutableConfig.Interactive = false;
             }
 
             if (mutableConfig.Cache.VfsCasRoot.IsValid)
@@ -1405,8 +1433,11 @@ namespace BuildXL.Engine
             }
             else if (r.Result == PathExistence.ExistsAsDirectory)
             {
-                Logger.Log.FailedToRedirectUserProfile(loggingContext, I($"'{redirectedProfile}' exists as a directory."));
-                return false;
+                if (!FileUtilities.TryRemoveDirectory(redirectedProfile, out int errorCode))
+                {
+                    Logger.Log.FailedToRedirectUserProfile(loggingContext, I($"Failed to delete existing directory '{redirectedProfile}' (error code: '{errorCode}')."));
+                    return false;
+                }
             }
 
             try
@@ -1646,7 +1677,9 @@ namespace BuildXL.Engine
         private IReadOnlyList<string> DiscoverGvfsProjectionFiles(MountsTable mountsTable)
         {
             var result = new HashSet<string>(OperatingSystemHelper.PathComparer);
-            var readableMountRoots = mountsTable.AllMounts.Where(m => m.IsReadable).Select(m => m.Path);
+            // There might be extra readable mounts coming from module specified ones, but the logic below is a heuristics already
+            // that tries to catch the most common cases
+            var readableMountRoots = mountsTable.AllMountsSoFar.Where(m => m.IsReadable).Select(m => m.Path);
             foreach (var mountRoot in readableMountRoots)
             {
                 for (var path = mountRoot; path.IsValid; path = path.GetParent(Context.PathTable))
@@ -1802,14 +1835,7 @@ namespace BuildXL.Engine
                                 }
                             }
 
-                            // Returns stub if explicitly not use file content table.
-                            m_fileContentTask = Configuration.Engine.UseFileContentTable == false
-                                ? Task.FromResult(FileContentTable.CreateStub(engineLoggingContext))
-                                : FileContentTable.LoadOrCreateAsync(
-                                    engineLoggingContext,
-                                    Configuration.Layout.FileContentTableFile.ToString(Context.PathTable),
-                                    Configuration.Cache.FileContentTableEntryTimeToLive ?? FileContentTable.DefaultTimeToLive);
-
+                            m_fileContentTask = LoadFileContentTableAsync(engineState, engineLoggingContext);
                             EngineSchedule engineSchedule = null;
 
                             // Task representing the async initialization of this engine's cache.
@@ -1857,12 +1883,12 @@ namespace BuildXL.Engine
                             {
                                 if (Configuration.Distribution.BuildRole == DistributedBuildRoles.Worker)
                                 {
-                                    if (!m_workerService.WaitForMasterAttach())
+                                    if (!m_workerService.WaitForOrchestratorAttach())
                                     {
                                         // Worker timeout logs a warning but no error. It is not considered a failure wrt the worker
                                         Contract.Assert(
                                             engineLoggingContext.ErrorWasLogged,
-                                            "An error should have been logged during waiting for attaching to the master.");
+                                            "An error should have been logged during waiting for attaching to the orchestrator.");
                                         return BuildXLEngineResult.Failed(engineState);
                                     }
                                 }
@@ -1904,6 +1930,12 @@ namespace BuildXL.Engine
                                     out engineSchedule,
                                     out rootFilter);
                                 success &= constructScheduleResult != ConstructScheduleResult.Failure;
+                                bool exitOnNewGraph = constructScheduleResult == ConstructScheduleResult.ExitOnNewGraph;
+                                if (exitOnNewGraph)
+                                {
+                                    Context.EngineCounters.AddToCounter(EngineCounter.ExitOnNewGraph, 1);
+                                }
+
                                 ValidateSuccessMatches(success, engineLoggingContext);
 
                                 var phase = Configuration.Engine.Phase;
@@ -1940,7 +1972,7 @@ namespace BuildXL.Engine
                                     CleanUpFrontEndOnSuccess(success, constructScheduleResult);
                                 }
 
-                                // Build workers don't allow CleanOnly builds since the master selects which pips they run
+                                // Build workers don't allow CleanOnly builds since the orchestrator selects which pips they run
                                 if (success && Configuration.Engine.CleanOnly && Configuration.Distribution.BuildRole != DistributedBuildRoles.Worker)
                                 {
                                     Contract.Assert(
@@ -1967,7 +1999,7 @@ namespace BuildXL.Engine
                                 }
 
                                 // Keep this as close to the Execute phase as possible
-                                if (phase.HasFlag(EnginePhases.Schedule) && Configuration.Engine.LogStatistics)
+                                if (phase.HasFlag(EnginePhases.Schedule) && !exitOnNewGraph && Configuration.Engine.LogStatistics)
                                 {
                                     BuildXL.Tracing.Logger.Log.Statistic(
                                         engineLoggingContext,
@@ -1980,7 +2012,7 @@ namespace BuildXL.Engine
 
                                 ThreadPoolHelper.ConfigureWorkerThreadPools(Configuration.Schedule.MaxProcesses);
 
-                                if (success && phase.HasFlag(EnginePhases.Execute))
+                                if (success && !exitOnNewGraph && phase.HasFlag(EnginePhases.Execute))
                                 {
                                     Contract.Assert(
                                         phase.HasFlag(EnginePhases.Schedule),
@@ -2026,7 +2058,7 @@ namespace BuildXL.Engine
 
                                 Task<bool> postExecutionTasks = Task.FromResult(true);
 
-                                // Post execution tasks are only performed on master.
+                                // Post execution tasks are only performed on orchestrator.
                                 if (Configuration.Distribution.BuildRole != DistributedBuildRoles.Worker && engineSchedule != null)
                                 {
                                     // Even if the execution phase failed or was skipped, we want to persist / finish persisting some structures like the exported pip graph.
@@ -2084,7 +2116,7 @@ namespace BuildXL.Engine
 
                                 LogStats(loggingContext, engineSchedule, cacheInitializationTask, constructScheduleResult);
 
-                                Context.EngineCounters.MeasuredDispose(m_masterService, EngineCounter.MasterServiceDisposeDuration);
+                                Context.EngineCounters.MeasuredDispose(m_orchestratorService, EngineCounter.OrchestratorServiceDisposeDuration);
 
                                 Context.EngineCounters.MeasuredDispose(m_workerService, EngineCounter.WorkerServiceDisposeDuration);
 
@@ -2103,10 +2135,14 @@ namespace BuildXL.Engine
                                     }
                                     else
                                     {
-                                        // If the build is unsuccessful, i.e., engineSchedule is null, and engine state is not disposed, then reuse the existing engine state.
-                                        newEngineState = engineState != null && engineState.IsDisposed ? null : engineState;
+                                        // If the build is unsuccessful, i.e., engineSchedule is null, and engine state is not disposed, 
+                                        // then reuse the existing engine, updating the file content table
+                                        newEngineState = !EngineState.IsUsable(engineState)
+                                            ? null
+                                            : engineState.WithFileContentTable(FileContentTable);
                                     }
 
+                                    Contract.Assert(newEngineState == null || ReferenceEquals(FileContentTable, newEngineState.FileContentTable), "The file content table wasn't correctly updated");
                                     Contract.Assume(EngineState.CorrectEngineStateTransition(engineState, newEngineState, out var incorrectMessage), incorrectMessage);
                                 }
 
@@ -2183,6 +2219,37 @@ namespace BuildXL.Engine
                 previousState: engineState,
                 newState: newEngineState,
                 shouldDisposePreviousEngineState: false /* Engine state can still be usable. */);
+        }
+
+        private async Task<FileContentTable> LoadFileContentTableAsync(EngineState engineState, LoggingContext engineLoggingContext)
+        {
+            FileContentTableType type;
+            FileContentTable fct;
+            
+            var sw = Stopwatch.StartNew();
+            if (Configuration.Engine.UseFileContentTable == false)
+            {
+                // Returns stub if explicitly not use file content table.
+                type = FileContentTableType.Stub;
+                fct = FileContentTable.CreateStub(engineLoggingContext);
+            }
+            else if (!EngineState.IsUsable(engineState) || engineState.FileContentTable.IsStub)
+            {
+                // Load FCT if engineState is not available or if last build used a stub (i.e. UseFCT was false last run)
+                type = FileContentTableType.FromFileOrNew;
+                fct = await FileContentTable.LoadOrCreateAsync(engineLoggingContext,
+                                Configuration.Layout.FileContentTableFile.ToString(Context.PathTable),
+                                Configuration.Cache.FileContentTableEntryTimeToLive ?? FileContentTable.DefaultTimeToLive);
+            }
+            else
+            {
+                // Reuse from engine state
+                type = FileContentTableType.FromEngineState;
+                fct = FileContentTable.CreateFromTable(engineState.FileContentTable, engineLoggingContext, Configuration.Cache.FileContentTableEntryTimeToLive);
+            }
+
+            Logger.Log.EngineLoadedFileContentTable(engineLoggingContext, type.ToString(), sw.ElapsedMilliseconds);
+            return fct;
         }
 
         internal static void CheckArtifactFolersAndEmitNoIndexWarning(PathTable pathTable, LoggingContext loggingContext, params AbsolutePath[] paths)
@@ -2397,6 +2464,7 @@ namespace BuildXL.Engine
                 { "unsafe_OptimizedAstConversion", Logger.Log.ConfigUnsafeOptimizedAstConversion },
                 { "unsafe_AllowDuplicateTemporaryDirectory", Logger.Log.ConfigUnsafeAllowDuplicateTemporaryDirectory },
                 { "unsafe_SkipFlaggingSharedOpaqueOutputs", Logger.Log.ConfigUnsafeSkipFlaggingSharedOpaqueOutputs },
+                { "unsafe_IgnorePreserveOutputsPrivatization", Logger.Log.ConfigUnsafeIgnorePreserveOutputsPrivatization },
             };
         }
 
@@ -2673,6 +2741,7 @@ namespace BuildXL.Engine
             Failure,
             ConstructedNewGraph,
             ReusedExistingGraph,
+						ExitOnNewGraph
         }
 
         /// <summary>
@@ -2755,8 +2824,8 @@ namespace BuildXL.Engine
             }
 
             GraphReuseResult reuseResult = null;
-
-            if (Configuration.Engine.Phase.HasFlag(EnginePhases.Schedule)
+            var phase = Configuration.Engine.Phase;
+            if (phase.HasFlag(EnginePhases.Schedule)
                 &&
                 ((IsGraphCacheConsumptionAllowed() && graphFingerprint != null) ||
                  Configuration.Distribution.BuildRole == DistributedBuildRoles.Worker))
@@ -2811,9 +2880,14 @@ namespace BuildXL.Engine
                 m_enginePerformanceInfo.CacheInitializationDurationMs = (long)cacheInitializationTask.InitializationTime.TotalMilliseconds;
             }
 
+            if (Configuration.Engine.ExitOnNewGraph && !reusedGraph)
+            {
+                Logger.Log.ExitOnNewGraph(loggingContext);
+                return ConstructScheduleResult.ExitOnNewGraph;
+            }
+
             m_buildViewModel.SetContext(Context);
 
-            var phase = Configuration.Engine.Phase;
             try
             {
                 if (engineSchedule == null)
@@ -3001,7 +3075,7 @@ namespace BuildXL.Engine
                                 mountsTable.MountsByName);
                         }
 
-                        if (IsDistributedMaster)
+                        if (IsDistributedOrchestrator)
                         {
                             // In a distributed build, we must synchronously wait for the graph to be placed in the content cache.
                             if (!m_graphCacheContentCachePut.GetAwaiter().GetResult())
@@ -3038,9 +3112,9 @@ namespace BuildXL.Engine
                 }
 
                 // Now that graph is constructed and saved, workers can be attached
-                if (IsDistributedMaster && phase.HasFlag(EnginePhases.Execute))
+                if (IsDistributedOrchestrator && phase.HasFlag(EnginePhases.Execute))
                 {
-                    m_masterService.EnableDistribution(engineSchedule);
+                    m_orchestratorService.EnableDistribution(engineSchedule);
                 }
 
                 if (!engineSchedule.PrepareForBuild(
@@ -3214,6 +3288,7 @@ namespace BuildXL.Engine
                 {"StringTableBytes", stringTable.SizeInBytes },
                 {"StringTableLargeStringBytes", stringTable.LargeStringSize },
                 {"StringTableLargeStringCount", stringTable.LargeStringCount },
+                {"StringTableOverflowBufferStringCount", stringTable.OverflowedStringCount },
                 {"TokenTextTableBytes", tokenTextTable.SizeInBytes },
             };
 
@@ -3356,9 +3431,9 @@ namespace BuildXL.Engine
                                 Logger.Log.PipGraphIdentfier(tb.LoggingContext, identifierFingerprint.Value.ToString());
                             }
 
-                            if (success && Configuration.Distribution.BuildRole == DistributedBuildRoles.Master)
+                            if (success && Configuration.Distribution.BuildRole.IsOrchestrator())
                             {
-                                m_masterService.CachedGraphDescriptor = cachedGraphDescriptor.Value;
+                                m_orchestratorService.CachedGraphDescriptor = cachedGraphDescriptor.Value;
                             }
                         }
 
@@ -3425,7 +3500,7 @@ namespace BuildXL.Engine
             EngineSerializer serializer,
             GraphFingerprint graphFingerprint,
             IBuildParameters availableEnvironmentVariables,
-            MountsTable availableMounts,
+            MountsTable mainConfigAvailableMounts,
             JournalState journalState,
             int maxDegreeOfParallelism)
         {
@@ -3436,7 +3511,7 @@ namespace BuildXL.Engine
                 fileContentTable: FileContentTable,
                 graphFingerprint: graphFingerprint,
                 availableEnvironmentVariables: availableEnvironmentVariables,
-                availableMounts: availableMounts,
+                mainConfigAvailableMounts: mainConfigAvailableMounts,
                 journalState: journalState,
                 timeLimitForJournalScanning:
                     Configuration.Engine.ScanChangeJournalTimeLimitInSec < 0

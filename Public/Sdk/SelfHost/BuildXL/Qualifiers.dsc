@@ -19,43 +19,37 @@ export interface FullFrameworkQualifier extends Qualifier {
 @@public
 export interface DefaultQualifier extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "netcoreapp3.1";
+    targetFramework: "netcoreapp3.1" | "net5.0";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
 /**
- * Qualifier for projects that support DotNetCore
+ * Qualifier for projects that support DotNetCore and .NET472
  */
 @@public
 export interface DefaultQualifierWithNet472 extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "net472" | "netcoreapp3.1";
+    targetFramework: "netcoreapp3.1" | "net5.0" | "net472";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
 /**
- * Qualifier for projects that support DotNetCore
+ * Qualifier for projects that support DotNetCore, .NET472 and NetStandard2.0
  */
 @@public
-export interface DefaultQualifierWithOldFullFrameworks extends Qualifier {
+export interface DefaultQualifierWithNet472AndNetStandard20 extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "net462" | "net472" | "netcoreapp3.1";
+    targetFramework: "netcoreapp3.1" | "net5.0" | "net472" | "netstandard2.0";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
 /**
- * Qualifier for projects that support DotNetCore
+ * Qualifier for projects that support DotNetCore, .NET462, .NET472 and NetStandard2.0
  */
 @@public
-export interface DefaultQualifierWithNetStandard20 extends Qualifier {
-    configuration: "debug" | "release";
-    targetFramework: "net462" | "net472" | "netcoreapp3.1" | "netstandard2.0";
-    targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
-}
-
 export interface AllSupportedQualifiers extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "net462" | "net472" | "netcoreapp3.1" | "netstandard2.0";
+    targetFramework: "netcoreapp3.1" | "net5.0" | "net472" | "netstandard2.0" | "net462";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
@@ -71,7 +65,14 @@ export interface PlatformDependentQualifier extends Qualifier {
 @@public
 export interface NetCoreAppQualifier extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "netcoreapp3.1";
+    targetFramework: "netcoreapp3.1" | "net5.0";
+    targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
+}
+
+@@public
+export interface Net5Qualifier extends Qualifier {
+    configuration: "debug" | "release";
+    targetFramework: "net5.0";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 

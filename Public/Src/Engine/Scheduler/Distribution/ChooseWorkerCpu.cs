@@ -64,7 +64,7 @@ namespace BuildXL.Scheduler.Distribution
         /// <summary>
         /// The number of choose worker iterations
         /// </summary>
-        public int ChooseIterations { get; private set; }
+        public ulong ChooseIterations { get; private set; }
 
         /// <summary>
         /// The total time spent choosing a worker
@@ -80,7 +80,7 @@ namespace BuildXL.Scheduler.Distribution
         /// </summary>
         private readonly ContentTrackingSet m_executedProcessOutputs;
 
-        protected readonly Dictionary<WorkerResource, BoxRef<int>> m_limitingResourceCounts = new Dictionary<WorkerResource, BoxRef<int>>();
+        protected readonly Dictionary<WorkerResource, BoxRef<ulong>> m_limitingResourceCounts = new Dictionary<WorkerResource, BoxRef<ulong>>();
 
         private int m_totalAcquiredProcessSlots;
 
@@ -185,7 +185,7 @@ namespace BuildXL.Scheduler.Distribution
                     {
                         m_lastIterationBlockedPip = runnablePip;
                         LastBlockedPip = runnablePip;
-                        var limitingResourceCount = m_limitingResourceCounts.GetOrAdd(limitingResource.Value, k => new BoxRef<int>());
+                        var limitingResourceCount = m_limitingResourceCounts.GetOrAdd(limitingResource.Value, k => new BoxRef<ulong>());
                         limitingResourceCount.Value++;
                     }
                     else
@@ -207,7 +207,7 @@ namespace BuildXL.Scheduler.Distribution
         /// </summary>
         private Worker ChooseWorker(RunnablePip runnablePip, WorkerSetupCost[] workerSetupCosts, out WorkerResource? limitingResource)
         {
-            if (MustRunOnMaster(runnablePip))
+            if (MustRunOnOrchestrator(runnablePip))
             {
                 // This is shortcut for the single-machine builds and distributed workers.
                 return LocalWorker.TryAcquire(runnablePip, out limitingResource, loadFactor: MaxLoadFactor) ? LocalWorker : null;
@@ -386,7 +386,7 @@ namespace BuildXL.Scheduler.Distribution
             /// </summary>
             public void EstimateAndSortSetupCostPerWorker(RunnablePip runnablePip)
             {
-                if (m_context.MustRunOnMaster(runnablePip))
+                if (m_context.MustRunOnOrchestrator(runnablePip))
                 {
                     // Only estimate setup costs for pips which can execute remotely
                     return;
@@ -452,11 +452,7 @@ namespace BuildXL.Scheduler.Distribution
                 for (int i = 0; i < m_context.Workers.Count; i++)
                 {
                     var worker = m_context.Workers[i];
-                    WorkerSetupCosts[i] = new WorkerSetupCost()
-                    {
-                        Worker = worker,
-                        AcquiredSlots = pip.PipType == PipType.Ipc ? worker.AcquiredIpcSlots : worker.AcquiredProcessSlots
-                    };
+                    WorkerSetupCosts[i] = new WorkerSetupCost(){ Worker = worker };
                 }
             }
         }
@@ -472,14 +468,6 @@ namespace BuildXL.Scheduler.Distribution
             public long SetupBytes { get; set; }
 
             /// <summary>
-            /// Number of acquired slots
-            /// </summary>
-            /// <remarks>
-            /// For IPC pips, this means acquired IPC slots, and for process pips, it means acquired process slots.
-            /// </remarks>
-            public int AcquiredSlots { get; set; }
-
-            /// <summary>
             /// The associated worker
             /// </summary>
             public Worker Worker { get; set; }
@@ -487,8 +475,7 @@ namespace BuildXL.Scheduler.Distribution
             /// <inheritdoc />
             public int CompareTo(WorkerSetupCost other)
             {
-                var result = SetupBytes.CompareTo(other.SetupBytes);
-                return result == 0 ? AcquiredSlots.CompareTo(other.AcquiredSlots) : result;
+                return SetupBytes.CompareTo(other.SetupBytes);
             }
         }
     }

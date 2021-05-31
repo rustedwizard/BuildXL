@@ -257,6 +257,7 @@ namespace BuildXL.Pips.Graph
                             modules: Modules,
                             pipProducers: PipProducers,
                             opaqueDirectoryProducers: OutputDirectoryProducers,
+                            outputsUnderOpaqueExistenceAssertions: OutputsUnderOpaqueExistenceAssertions,
                             outputDirectoryExclusions: OutputDirectoryExclusions,
                             outputDirectoryRoots: OutputDirectoryRoots,
                             compositeSharedOpaqueProducers: CompositeOutputDirectoryProducers,
@@ -1599,9 +1600,17 @@ namespace BuildXL.Pips.Graph
             /// <summary>
             /// Verifies that the given path is under a writable root
             /// </summary>
-            private static bool IsWritablePath(AbsolutePath path, SemanticPathExpander semanticPathExpander, out SemanticPathInfo semanticPathInfo)
+            private bool IsWritablePath(AbsolutePath path, SemanticPathExpander semanticPathExpander, out SemanticPathInfo semanticPathInfo)
             {
                 semanticPathInfo = semanticPathExpander.GetSemanticPathInfo(path);
+
+                // For historical reasons, writes happening outside of known mounts are allowed. This behavior needs to eventually change, but for the
+                // time being we just print a warning and continue. TODO: turn this into an error once all customers are in compliance
+                if (!semanticPathInfo.IsValid)
+                {
+                    Logger.WriteDeclaredOutsideOfKnownMount(LoggingContext, path.ToString(Context.PathTable));
+                }
+
                 return !semanticPathInfo.IsValid || semanticPathInfo.IsWritable;
             }
 
@@ -1804,6 +1813,18 @@ namespace BuildXL.Pips.Graph
                 DirectoryArtifact fullSealArtifact = SealDirectoryTable.TryFindFullySealedDirectoryArtifactForFile(path);
                 if (fullSealArtifact.IsValid && !fullSealArtifact.IsSharedOpaque)
                 {
+                    var producerPipResult = OutputDirectoryProducers.TryGet(fullSealArtifact);
+
+                    // If the file is under an opaque but it is an existence assertion produced by the same pip, then
+                    // we let it happen since this file is not representing an 'extra' write, just a point name for an existing one.
+                    if (producerPipResult.IsFound &&
+                        OutputsUnderOpaqueExistenceAssertions.TryGet(fullSealArtifact) is var result && 
+                        result.IsFound && result.Item.Value.Contains(FileArtifact.CreateOutputFile(path)) 
+                        && producerPipResult.Item.Value == pip.PipId.ToNodeId())
+                    {
+                        return false;
+                    }
+
                     SealDirectoryTable.TryGetSealForDirectoryArtifact(fullSealArtifact, out PipId sealingPipId);
                     Contract.Assert(sealingPipId.IsValid);
 
@@ -1983,6 +2004,59 @@ namespace BuildXL.Pips.Graph
                 }
 
                 ComputeAndStorePipStaticFingerprint(writeFile);
+
+                return true;
+            }
+
+            /// <inheritdoc/>
+            public bool TryAssertOutputExistenceInOpaqueDirectory(DirectoryArtifact outputDirectoryArtifact, AbsolutePath outputInOpaque, out FileArtifact fileArtifact)
+            {
+                Contract.Requires(outputDirectoryArtifact.IsValid);
+                Contract.Requires(outputDirectoryArtifact.IsOutputDirectory());
+                Contract.Requires(outputInOpaque.IsWithin(Context.PathTable, outputDirectoryArtifact.Path));
+
+                var success = TryGetOutputDirectoryPip(outputDirectoryArtifact, out NodeId producerPipResult);
+                Contract.Assert(success);
+
+                // File artifacts under opaque directories always have rewrite count 1
+                fileArtifact = FileArtifact.CreateOutputFile(outputInOpaque);
+
+                // Let's retrieve the producer of the opaque
+                var producerPipId = producerPipResult.ToPipId();
+                var producerPip = PipTable.HydratePip(producerPipId, PipQueryContext.PipGraphIsValidOutputFileArtifactRewrite1);
+
+                // We don't allow assertions on composite shared opaques
+                // TODO: this can be implemented in the future. Making the composite opaque the producer of the file is not a big deal but
+                // we need to accommodate this into the file monitoring violation analyzer to not flag this as a double write
+                if (producerPip.PipType == PipType.SealDirectory && ((SealDirectory)producerPip).IsComposite)
+                {
+                    LogEventWithPipProvenance(Logger.ScheduleFailAddPipAssertionNotSupportedInCompositeOpaques, producerPip, fileArtifact);
+                    return false;
+                }
+
+                using (LockManager.PathAccessGroupLock pathAccessLock = LockManager.AcquirePathAccessLock(fileArtifact))
+                {
+                    // Check if the assertion was already made. In that case, just return successfully.
+                    if (OutputsUnderOpaqueExistenceAssertions.ContainsKey(outputDirectoryArtifact))
+                    {
+                        return true;
+                    }
+
+                    OutputsUnderOpaqueExistenceAssertions.AddOrUpdate(
+                        outputDirectoryArtifact,
+                        fileArtifact,
+                        (key, fileArtifact) => new HashSet<FileArtifact> { fileArtifact },
+                        (key, fileArtifact, assertions) => { assertions.Add(fileArtifact); return assertions; });
+
+                    // Validate the output as if it was a regular file output. Same constraints apply.
+                    if (!IsValidOutputFileArtifact(pathAccessLock, fileArtifact, FileArtifact.Invalid, producerPip, SemanticPathExpander))
+                    {
+                        return false;
+                    }
+
+                    // Add the output to the pip graph and keep track of the assertion
+                    AddOutput(pathAccessLock, producerPipResult, FileArtifactWithAttributes.Create(fileArtifact, FileExistence.Required));
+                }
 
                 return true;
             }
@@ -2690,15 +2764,36 @@ namespace BuildXL.Pips.Graph
                                         return DirectoryArtifact.Invalid;
                                     }
 
-                                    // The directory to compose should be within the proposed root
-                                    if (!directoryElement.Path.IsWithin(Context.PathTable, artifactForNewSeal.Path))
+                                    // Depending on the way the composed directory is constructed, the proposed root must either contain all of the
+                                    // directories that are being composed or must be under the composed directory.
+
+                                    if (sealDirectory.CompositionActionKind == SealDirectoryCompositionActionKind.WidenDirectoryCone)
                                     {
-                                        LogEventWithPipProvenance(
-                                            Logger.ScheduleFailAddPipInvalidComposedSealDirectoryNotUnderRoot,
-                                            sealDirectory,
-                                            root,
-                                            directoryElement.Path);
-                                        return DirectoryArtifact.Invalid;
+                                        if (!directoryElement.Path.IsWithin(Context.PathTable, artifactForNewSeal.Path))
+                                        {
+                                            LogEventWithPipProvenance(
+                                                Logger.ScheduleFailAddPipInvalidComposedSealDirectoryNotUnderRoot,
+                                                sealDirectory,
+                                                root,
+                                                directoryElement.Path);
+                                            return DirectoryArtifact.Invalid;
+                                        }
+                                    }
+                                    else if (sealDirectory.CompositionActionKind == SealDirectoryCompositionActionKind.NarrowDirectoryCone)
+                                    {
+                                        if (!artifactForNewSeal.Path.IsWithin(Context.PathTable, directoryElement.Path))
+                                        {
+                                            LogEventWithPipProvenance(
+                                                Logger.ScheduleFailAddPipInvalidComposedSealDirectoryDoesNotContainRoot,
+                                                sealDirectory,
+                                                root,
+                                                directoryElement.Path);
+                                            return DirectoryArtifact.Invalid;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        Contract.Assert(false, I($"Composition action {sealDirectory.CompositionActionKind} is not supported."));
                                     }
 
                                     // First check if the element is a regular shared opaque, i.e. it is part of the directory outputs
@@ -3473,6 +3568,12 @@ namespace BuildXL.Pips.Graph
                     provenanceForRelated.SemiStableHash,
                     relatedPip.GetDescription(Context),
                     provenanceForRelated.OutputValueSymbol.ToString(Context.SymbolTable));
+            }
+
+            /// <inheritdoc/>
+            public Pip GetPipFromPipId(PipId pipId)
+            {
+                return m_immutablePipGraph.GetPipFromPipId(pipId);
             }
 
             #endregion Event Logging

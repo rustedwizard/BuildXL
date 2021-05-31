@@ -12,6 +12,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using BuildXL.Native.IO;
+using BuildXL.Native.IO.Windows;
 using BuildXL.Processes;
 using BuildXL.Utilities;
 
@@ -82,6 +83,11 @@ namespace Test.BuildXL.Executables.TestProcess
             /// Type for creating/writing a file
             /// </summary>
             WriteFile,
+
+            /// <summary>
+            /// Writes the content of an environment variable to a file
+            /// </summary>
+            WriteEnvVariableToFile,
 
             /// <summary>
             /// Type for moving a file
@@ -207,6 +213,11 @@ namespace Test.BuildXL.Executables.TestProcess
             /// Launches the debugger
             /// </summary>
             LaunchDebugger,
+
+            /// <summary>
+            /// Succeed with a non-zero exit code
+            /// </summary>
+            SucceedWithExitCode,
 
             /// <summary>
             /// Process that fails on first invocation and then succeeds on the second invocation
@@ -350,7 +361,7 @@ namespace Test.BuildXL.Executables.TestProcess
             FileOrDirectoryArtifact? linkPath = null,
             SymbolicLinkFlag? symLinkFlag = null,
             bool? doNotInfer = null,
-            string additionalArgs = null, 
+            string additionalArgs = null,
             int retriesOnWrite = 5,
             string environmentVariablesToSet = null)
         {
@@ -418,6 +429,9 @@ namespace Test.BuildXL.Executables.TestProcess
                         return;
                     case Type.WriteFile:
                         DoWriteFile();
+                        return;
+                    case Type.WriteEnvVariableToFile:
+                        DoWriteEnvVariableToFile();
                         return;
                     case Type.ReadAndWriteFile:
                         DoReadAndWriteFile();
@@ -487,6 +501,9 @@ namespace Test.BuildXL.Executables.TestProcess
                         return;
                     case Type.Fail:
                         DoFail();
+                        return;
+                    case Type.SucceedWithExitCode:
+                        DoSucceedWithExitCode();
                         return;
                     case Type.CrashHardNative:
                         DoCrashHardNative();
@@ -573,6 +590,18 @@ namespace Test.BuildXL.Executables.TestProcess
             return content == Environment.NewLine
                 ? new Operation(Type.AppendNewLine, path, doNotInfer: doNotInfer, additionalArgs: additionalArgs)
                 : new Operation(Type.WriteFile, path, content, doNotInfer: doNotInfer, additionalArgs: additionalArgs);
+        }
+
+        /// <summary>
+        /// Creates a write file operation that appends the content of the specified environment variable. The file is created if it does not exist.
+        /// </summary>
+        public static Operation WriteEnvVariableToFile(FileArtifact path, string envVariableName, bool doNotInfer = false, bool changePathToAllUpperCase = false, bool useLongPathPrefix = false)
+        {
+            Contract.Assert(!changePathToAllUpperCase || !useLongPathPrefix, "Cannot specify changePathToAllUpperCase and useLongPathPrefix simultaneously");
+
+            string additionalArgs = changePathToAllUpperCase ? Operation.AllUppercasePath : (useLongPathPrefix ? Operation.UseLongPathPrefix : null);
+
+            return new Operation(Type.WriteEnvVariableToFile, path, envVariableName, doNotInfer: doNotInfer, additionalArgs: additionalArgs);
         }
 
         /// <summary>
@@ -802,7 +831,7 @@ namespace Test.BuildXL.Executables.TestProcess
         /// <summary>
         /// Like <see cref="SpawnAndWritePidFile"/> except it sets the given environment variables.
         /// </summary>
-        public static Operation SpawnAndWritePidFileWithEnvs(PathTable pathTable, bool waitToFinish, Operation[] childOperations, FileOrDirectoryArtifact? pidFile, bool doNotInfer = false, string envs = null )
+        public static Operation SpawnAndWritePidFileWithEnvs(PathTable pathTable, bool waitToFinish, Operation[] childOperations, FileOrDirectoryArtifact? pidFile, bool doNotInfer = false, string envs = null)
         {
             var args = childOperations.Select(o => (o.ToCommandLine(pathTable, escapeResult: true))).ToArray();
             return new Operation(Type.Spawn, path: pidFile, content: EncodeList(args), additionalArgs: waitToFinish ? WaitToFinishMoniker : null, doNotInfer: doNotInfer, environmentVariablesToSet: envs);
@@ -885,6 +914,14 @@ namespace Test.BuildXL.Executables.TestProcess
         public static Operation Fail(int exitCode = -1)
         {
             return new Operation(Type.Fail, content: exitCode.ToString());
+        }
+
+        /// <summary>
+        /// Exits with a non-zero exit code, but make the exit code a success.
+        /// </summary>
+        public static Operation SucceedWithExitCode(int exitCode = 1)
+        {
+            return new Operation(Type.SucceedWithExitCode, content: exitCode.ToString());
         }
 
         /// <summary>
@@ -990,6 +1027,11 @@ namespace Test.BuildXL.Executables.TestProcess
             DoWriteFile(Content ?? Guid.NewGuid().ToString());
         }
 
+        private void DoWriteEnvVariableToFile()
+        {
+            DoWriteFile(Environment.GetEnvironmentVariable(Content));
+        }
+
         private void DoReadFileFromOtherFile()
         {
             // Read the file path from the first file
@@ -1011,7 +1053,7 @@ namespace Test.BuildXL.Executables.TestProcess
                 // Ignore tests for denied file access policies
             }
         }
-        
+
         private void DoWriteFileIfInputEqual()
         {
             string[] argument = DecodeList(Content);
@@ -1202,15 +1244,26 @@ namespace Test.BuildXL.Executables.TestProcess
         {
             try
             {
-                string enumeratePattern = AdditionalArgs;
-                if (enumeratePattern == null)
-                {
-                    Directory.EnumerateFileSystemEntries(PathAsString);
-                }
-                else
-                {
-                    Directory.EnumerateFileSystemEntries(PathAsString, enumeratePattern);
-                }
+                string enumeratePattern = AdditionalArgs ?? "*";
+
+                // For Windows, we call EnumerateWinFileSystemEntriesForTest whose underlying implementation
+                // calls FindFirstFile/FindNextFile. This is a workaround for testing enumeration with pattern.
+                // In .netcore 3.1, the implementation of Directory.EnumerateFileSystemEntries uses FindFirstFile/FindNextFile
+                // with the specified pattern included in the search path when calling FindFirstFile. In .NET5, the implementation
+                // of Directory.EnumerateFileSystemEntries calls NtQueryDirectoryFile with "null" (equal to "*") pattern,
+                // and path matching itself is done in the managed level. Thus, for .NET5, Detours will not detect/report the search pattern.
+                // Unfortunately, for more precise caching, our observed input processor relies on the pattern reported by Detours.
+                //
+                // The Linux Detours does not detect/report the search pattern simply because the search pattern is not passed to opendir.
+                // So it always treats directory enumerations as if they had the * pattern.
+                IEnumerable<string> e = OperatingSystemHelper.IsUnixOS
+                    ? Directory.EnumerateFileSystemEntries(PathAsString, enumeratePattern)
+                    : FileSystemWin.EnumerateWinFileSystemEntriesForTest(PathAsString, enumeratePattern, SearchOption.TopDirectoryOnly);
+                Analysis.IgnoreResult(e.ToArray());
+            }
+            catch (NativeWin32Exception e) when (e.NativeErrorCode == NativeIOConstants.ErrorFileNotFound || e.NativeErrorCode == NativeIOConstants.ErrorPathNotFound)
+            {
+                // Ignore enumerating absent directories
             }
             catch (DirectoryNotFoundException)
             {
@@ -1231,12 +1284,12 @@ namespace Test.BuildXL.Executables.TestProcess
                 throw maybeSymlink.Failure.CreateException();
             }
         }
-        
+
         private void DoCreateJunction()
         {
             Contract.Assert(!OperatingSystemHelper.IsUnixOS);
 
-            var maybeSymlink = FileUtilities.TryCreateReparsePointIfNotExistsOrTargetsDoNotMatch(LinkPathAsString, PathAsString, ReparsePointType.Junction, out var created);
+            var maybeSymlink = FileUtilities.TryCreateReparsePoint(LinkPathAsString, PathAsString, ReparsePointType.Junction);
             if (!maybeSymlink.Succeeded)
             {
                 throw maybeSymlink.Failure.CreateException();
@@ -1416,6 +1469,12 @@ namespace Test.BuildXL.Executables.TestProcess
             Environment.Exit(exitCode);
         }
 
+        private void DoSucceedWithExitCode()
+        {
+            int exitCode = int.TryParse(Content, out var result) ? result : -1;
+            Environment.Exit(exitCode);
+        }
+
         private void DoCrashHardNative()
         {
             global::BuildXL.Interop.Dispatch.ForceQuit();
@@ -1521,11 +1580,11 @@ namespace Test.BuildXL.Executables.TestProcess
             string envToSet = opArgs[6].Length == 0 ? null : opArgs[6];
 
             return Operation.FromCommandLine(
-                type: opType, 
-                path: pathAsString, 
-                content: content, 
-                linkPath: linkPathAsString, 
-                symLinkFlag: symLinkFlag, 
+                type: opType,
+                path: pathAsString,
+                content: content,
+                linkPath: linkPathAsString,
+                symLinkFlag: symLinkFlag,
                 additionalArgs: additionalArgs,
                 environmentVariablesToSet: envToSet);
         }

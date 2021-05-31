@@ -14,7 +14,7 @@ namespace BuildXL.FrontEnd.JavaScript.ProjectGraph
     /// <summary>
     /// There is a 1:1 relationship between a JavaScript project and a tuple (package.json, requested script command name)
     /// </summary>
-    [DebuggerDisplay("{Name}")]
+    [DebuggerDisplay("{Name}-{ScriptCommandName}")]
     public sealed class JavaScriptProject : GenericJavaScriptProject<JavaScriptProject>, IProjectWithDependencies<JavaScriptProject>
     {
         /// <nodoc/>
@@ -38,7 +38,7 @@ namespace BuildXL.FrontEnd.JavaScript.ProjectGraph
         }
 
         /// <nodoc/>
-        public static JavaScriptProject FromDeserializedProject(string scriptCommandName, string scriptCommand, DeserializedJavaScriptProject deserializedJavaScriptProject, PathTable pathTable)
+        public static JavaScriptProject FromDeserializedProject(string scriptCommandName, string scriptCommand, DeserializedJavaScriptProject deserializedJavaScriptProject)
         {
             // Filter the output directories and source files that apply to this particular script command name
             var outputDirectories = ExtractRelevantPaths(scriptCommandName, deserializedJavaScriptProject.OutputDirectories);

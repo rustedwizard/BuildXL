@@ -3,6 +3,7 @@
 
 import {Artifact, Cmd, Tool, Transformer} from "Sdk.Transformers";
 import * as Deployment from "Sdk.Deployment";
+import { Npm } from "Sdk.JavaScript";
 
 namespace Node {
 
@@ -49,9 +50,10 @@ namespace Node {
         return Transformer.execute(execArgs);
     }
 
-    const nodeWinDir = "node-v14.10.0-win-x64";
-    const nodeOsxDir = "node-v14.10.0-darwin-x64";
-    const nodeLinuxDir = "node-v14.10.0-linux-x64";
+    const nodeVersion = "v15.2.1";
+    const nodeWinDir = `node-${nodeVersion}-win-x64`;
+    const nodeOsxDir = `node-${nodeVersion}-darwin-x64`;
+    const nodeLinuxDir = `node-${nodeVersion}-linux-x64`;
 
     function getNodeTool() : Transformer.ToolDefinition {
         const host = Context.getCurrentHost();
@@ -117,6 +119,46 @@ namespace Node {
         return pkgContents.getFile(executable);
     }
 
+    @@public 
+    export function runNpmInstall(
+        targetFolder: Directory, 
+        dependencies: (File | StaticDirectory)[]) : SharedOpaqueDirectory {
+        
+        return Npm.runNpmInstall({
+            nodeTool: tool,
+            npmTool: tool,
+            additionalArguments: [Cmd.argument(Artifact.input(npmCli))],
+            targetFolder: targetFolder,
+            additionalDependencies: dependencies,
+            noBinLinks: true,
+            userNpmrcLocation: "local",
+            globalNpmrcLocation: "local"
+            });
+    }
+
+    @@public 
+    export function runNpmPackageInstall(
+        targetFolder: Directory, 
+        dependencies: (File | StaticDirectory)[], 
+        package: {name: string, version: string}) : SharedOpaqueDirectory {
+        
+        const nodeModules = d`${targetFolder}/node_modules`;
+
+        const result = Npm.runNpmInstallWithAdditionalOutputs({
+            nodeTool: tool,
+            npmTool: tool,
+            additionalArguments: [Cmd.argument(Artifact.input(npmCli))],
+            package: package,
+            targetFolder: targetFolder,
+            additionalDependencies: dependencies,
+            noBinLinks: true,
+            userNpmrcLocation: "local",
+            globalNpmrcLocation: "local"}, 
+            [nodeModules]);
+        
+            return <SharedOpaqueDirectory> result.getOutputDirectory(nodeModules);
+    }
+
     @@public
     export function tscCompile(workingDirectory: Directory, dependencies: Transformer.InputArtifact[]) : SharedOpaqueDirectory {
         const outPath = d`${workingDirectory}/out`;
@@ -174,7 +216,7 @@ namespace Node {
         const srcCopy: SharedOpaqueDirectory = Transformer.composeSharedOpaqueDirectories(outputDir, srcCopies);
 
         // Install required npm packages
-        const npmInstall = Npm.npmInstall(srcCopy, args.npmDependencies || []);
+        const npmInstall = runNpmInstall(srcCopy.root, [srcCopy, ...(args.npmDependencies || []), ...srcCopies]);
 
         // Compile
         const compileOutDir: SharedOpaqueDirectory = Node.tscCompile(

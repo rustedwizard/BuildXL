@@ -8,7 +8,7 @@ import * as Transformers from "Sdk.Transformers";
 import * as DetoursServices from "BuildXL.Sandbox.Windows";
 import * as Branding from "BuildXL.Branding";
 import * as VSIntegration from "BuildXL.Ide.VsIntegration";
-import {Node, Npm} from "Sdk.NodeJs";
+import { Node } from "Sdk.NodeJs";
 
 namespace VsCode.Client {
     // A new namespace with empty qualifier space to ensure the values inside are evaluated only once
@@ -19,7 +19,7 @@ namespace VsCode.Client {
     const clientCopy: OpaqueDirectory = Deployment.copyDirectory(clientSealDir.root, Context.getNewOutputDirectory("client-copy"), clientSealDir);
 
     @public
-    export const npmInstall = Npm.npmInstall(clientCopy, []);
+    export const npmInstall = Node.runNpmInstall(clientCopy.root, [clientCopy]);
 
     @@public
     export const compileOutDir: OpaqueDirectory = Node.tscCompile(
@@ -51,7 +51,7 @@ namespace LanguageService.Server {
                 // not during graph construction. This saves a lot of Mb's to keep us under the size limmit of the marketplace
                 excludedDeployableItems: [
                     importFrom("BuildXL.Tools").VBCSCompilerLogger.withQualifier({ targetFramework: "net472" }).dll,
-                    importFrom("BuildXL.Tools").VBCSCompilerLogger.withQualifier({ targetFramework: "netcoreapp3.1" }).dll,
+                    importFrom("BuildXL.Tools").VBCSCompilerLogger.withQualifier({ targetFramework: "net5.0" }).dll,
                 ]
             }),
         });

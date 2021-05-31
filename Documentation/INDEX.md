@@ -35,8 +35,8 @@ Keep this as the sole primary landing page for documentation and avoid creating 
 ## Build Execution
 * [Filtering](Wiki/How-To-Run-BuildXL/Filtering.md)
 * [Graph Reuse](Wiki/Advanced-Features/Graph-Reuse.md)
-* [User Profile Redirection](Wiki/Advanced-Features/User-Profile-Redirection.md)
 * [Content and Metadata Cache](../Public/Src/Cache/README.md)
+* [Two Phase Cache Lookup](Wiki/Advanced-Features/Two-Phase-Cache-Lookup.md)
 * [Paged Hashes](Specs/PagedHash.md)
 * [Filesystem modes and enumerations](Wiki/Advanced-Features/Filesystem-modes-and-Enumerations.md)
 * [Incremental Scheduling](Wiki/Advanced-Features/Incremental-Scheduling.md)
@@ -59,6 +59,8 @@ Keep this as the sole primary landing page for documentation and avoid creating 
 * [Sealed Directories](Wiki/Advanced-Features/Sealed-Directories.md)
 * [Search Path Enumeration](Wiki/Advanced-Features/Search-Path-Enumeration.md)
 * [Escaping the sandbox](Wiki/Advanced-Features/Process-breakaway.md)
+* [Directory Translations](Wiki/Advanced-Features/Symlinks-and-Junctions.md#directory-translations)
+* [Distributed builds](Wiki/Distributed-Builds.md)
 
 ## Logging and Analysis
 * [Console Output](Wiki/How-To-Run-BuildXL/Console-output.md)
@@ -72,7 +74,7 @@ Keep this as the sole primary landing page for documentation and avoid creating 
 * [Cache Miss Analysis](Wiki/Advanced-Features/Cache-Miss-Analysis.md)
 
 ## Onboarding
-* [Onboarding a Rush repo](Wiki/Frontends/rush-onboarding.md)
+* [Onboarding a JavaScript repo](Wiki/Frontends/js-onboarding.md)
 
 ## DScript
 * [Introduction](Wiki/DScript/Introduction.md)

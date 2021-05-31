@@ -265,12 +265,12 @@ namespace BuildXL.Utilities.Configuration
         /// <summary>
         /// Specifies the cpu queue limit in terms of a multiplier of the normal limit when at least one remote worker gets connected.
         /// </summary>
-        double? MasterCpuMultiplier { get; }
+        double? OrchestratorCpuMultiplier { get; }
 
         /// <summary>
         /// Specifies the cachelookup queue limit in terms of a multiplier of the normal limit when at least one remote worker gets connected.
         /// </summary>
-        double? MasterCacheLookupMultiplier { get; }
+        double? OrchestratorCacheLookupMultiplier { get; }
 
         /// <summary>
         /// Skip hash source file pips during graph creation.
@@ -353,9 +353,14 @@ namespace BuildXL.Utilities.Configuration
         bool EnableHistoricCommitMemoryProjection { get; }
 
         /// <summary>
-        /// Specifies the maximum amount of commit memory which can be utilized before scheduling is paused to allow freeing resources.
+        /// Specifies the maximum amount of commit memory which makes scheduler stop executing more pips.
         /// </summary>
         int MaximumCommitUtilizationPercentage { get; }
+
+        /// <summary>
+        /// Specifies the critical amount of commit memory which makes scheduler cancel ongoing/suspended pips.
+        /// </summary>
+        int CriticalCommitUtilizationPercentage { get; }
 
         /// <summary>
         /// Specifies the min multiplier for the number of elements in ChooseWorkerCPU queue

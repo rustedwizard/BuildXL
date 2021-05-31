@@ -3,13 +3,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using BuildXL.Cache.ContentStore.Distributed.Tracing;
 using BuildXL.Cache.ContentStore.FileSystem;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Extensions;
@@ -20,8 +19,8 @@ using BuildXL.Cache.ContentStore.Interfaces.Time;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
+using BuildXL.Cache.ContentStore.UtilitiesCore.Sketching;
 using BuildXL.Cache.ContentStore.Utils;
-using BuildXL.Cache.MemoizationStore.Interfaces.Results;
 using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Engine.Cache;
 using BuildXL.Engine.Cache.KeyValueStores;
@@ -29,9 +28,10 @@ using BuildXL.Native.IO;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
+using static BuildXL.Cache.ContentStore.Distributed.Tracing.TracingStructuredExtensions;
 using AbsolutePath = BuildXL.Cache.ContentStore.Interfaces.FileSystem.AbsolutePath;
 
-#nullable enable annotations
+#nullable enable
 
 namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 {
@@ -45,11 +45,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         private KeyValueStoreGuard _keyValueStore;
         private const string ActiveStoreSlotFileName = "activeSlot.txt";
         private StoreSlot _activeSlot = StoreSlot.Slot1;
-        private string _storeLocation;
+        private string? _storeLocation;
         private readonly string _activeSlotFilePath;
-        private Timer _compactionTimer;
 
-        private readonly RocksDbLogsManager _logManager;
+        private readonly RocksDbLogsManager? _logManager;
 
         private enum StoreSlot
         {
@@ -80,7 +79,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             /// This serves all of CaChaaS' needs for storage, modulo garbage collection.
             /// </summary>
             Metadata,
-            DatabaseManagement,
         }
 
         private enum ClusterStateKeys
@@ -101,17 +99,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             {
                 _logManager = new RocksDbLogsManager(clock, new PassThroughFileSystem(), _configuration.LogsBackupPath, _configuration.LogsRetention);
             }
+
+            // this is a hacky way to convince the compiler that the field is initialized.
+            // Technically, the field is nullable, but keeping it as nullable causes more issues than giving us benefits.
+            _keyValueStore = null!;
         }
 
         /// <inheritdoc />
         protected override Task<BoolResult> ShutdownCoreAsync(OperationContext context)
         {
-            lock (TimerChangeLock)
-            {
-                _compactionTimer?.Dispose();
-                _compactionTimer = null;
-            }
-
             _keyValueStore?.Dispose();
 
             return base.ShutdownCoreAsync(context);
@@ -128,30 +124,11 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                     return RestoreCheckpoint(context, _configuration.TestInitialCheckpointPath);
                 }
 
-                if (_configuration.FullRangeCompactionInterval != Timeout.InfiniteTimeSpan)
-                {
-                    _compactionTimer = new Timer(
-                        _ => FullRangeCompaction(context.CreateNested(nameof(RocksDbContentLocationDatabase), caller: nameof(FullRangeCompaction))),
-                        null,
-                        IsDatabaseWriteable ? _configuration.FullRangeCompactionInterval : Timeout.InfiniteTimeSpan,
-                        Timeout.InfiniteTimeSpan);
-                }
+                // We only create the timers within the Startup method. It is expected that users will call
+                // SetDatabaseMode before proceeding to use the database, as that method will actually start the timers.
             }
 
             return result;
-        }
-
-        /// <inheritdoc />
-        public override void SetDatabaseMode(bool isDatabaseWriteable)
-        {
-            if (IsDatabaseWriteable != isDatabaseWriteable)
-            {
-                // Shutdown can't happen simultaneously, so no need to take the lock
-                var nextCompactionTimeSpan = isDatabaseWriteable ? _configuration.FullRangeCompactionInterval : Timeout.InfiniteTimeSpan;
-                _compactionTimer?.Change(nextCompactionTimeSpan, Timeout.InfiniteTimeSpan);
-            }
-
-            base.SetDatabaseMode(isDatabaseWriteable);
         }
 
         private BoolResult InitialLoad(OperationContext context, StoreSlot activeSlot)
@@ -198,7 +175,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             return result;
         }
 
-        private bool IsStoredEpochInvalid(out string epoch)
+        private bool IsStoredEpochInvalid([NotNullWhen(true)] out string? epoch)
         {
             TryGetGlobalEntry(nameof(ClusterStateKeys.StoredEpoch), out epoch);
             return _configuration.Epoch != epoch;
@@ -226,10 +203,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 Tracer.Info(context, $"Creating RocksDb store at '{storeLocation}'. Clean={clean}, Configured Epoch='{_configuration.Epoch}'");
 
                 var possibleStore = KeyValueStoreAccessor.Open(
-                    new KeyValueStoreAccessor.RocksDbStoreArguments()
+                    new RocksDbStoreConfiguration(storeLocation)
                     {
-                        StoreDirectory = storeLocation,
-                        AdditionalColumns = new[] { nameof(Columns.ClusterState), nameof(Columns.Metadata), nameof(Columns.DatabaseManagement) },
+                        AdditionalColumns = new[] { nameof(Columns.ClusterState), nameof(Columns.Metadata) },
                         RotateLogsMaxFileSizeBytes = _configuration.LogsKeepLongTerm ? 0ul : ((ulong)"1MB".ToSize()),
                         RotateLogsNumFiles = _configuration.LogsKeepLongTerm ? 60ul : 1,
                         RotateLogsMaxAge = TimeSpan.FromHours(_configuration.LogsKeepLongTerm ? 12 : 1),
@@ -249,7 +225,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         // Since the writes to ClusterState are relatively few, we can make-do with disabling
                         // compaction here and pretending like we are using a read-only database.
                         DisableAutomaticCompactions = !IsDatabaseWriteable,
-                        LeveledCompactionDynamicLevelTargetSizes = _configuration.EnableDynamicLevelTargetSizes,
+                        LeveledCompactionDynamicLevelTargetSizes = true,
+                        Compression = _configuration.Compression,
+                        UseReadOptionsWithSetTotalOrderSeekInDbEnumeration = _configuration.UseReadOptionsWithSetTotalOrderSeekInDbEnumeration,
+                        UseReadOptionsWithSetTotalOrderSeekInGarbageCollection = _configuration.UseReadOptionsWithSetTotalOrderSeekInGarbageCollection,
                     },
                     // When an exception is caught from within methods using the database, this handler is called to
                     // decide whether the exception should be rethrown in user code, and the database invalidated. Our
@@ -358,6 +337,9 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             try
             {
+                LogMemoryUsage(context, columnFamilyName: null);
+                LogMemoryUsage(context, columnFamilyName: nameof(Columns.Metadata));
+
                 if (IsStoredEpochInvalid(out var storedEpoch))
                 {
                     SetGlobalEntry(nameof(ClusterStateKeys.StoredEpoch), _configuration.Epoch);
@@ -385,7 +367,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             try
             {
-                LogMemoryUsage(context);
+                LogMemoryUsage(context, columnFamilyName: null);
+                LogMemoryUsage(context, columnFamilyName: nameof(Columns.Metadata));
 
                 var activeSlot = _activeSlot;
 
@@ -420,52 +403,39 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             }
         }
 
-        private void LogMemoryUsage(OperationContext context)
+        private void LogMemoryUsage(OperationContext context, string? columnFamilyName)
         {
             if (_keyValueStore != null)
             {
-                try
-                {
-                    var usage = _keyValueStore.Use(store =>
-                    {
-                        // From the docs:
-                        // 
-                        // There are a couple of components in RocksDB that contribute to memory usage:
-                        // Block cache
-                        // Indexes and bloom filters
-                        // Memtables
-                        // Blocks pinned by iterators
-                        // 
-                        // Since we never create a cache, we don't need to check those.
+                _ = context.PerformOperation(Tracer, () =>
+                  {
+                      return _keyValueStore.Use(store =>
+                      {
+                          // See: https://github.com/facebook/rocksdb/wiki/Memory-usage-in-RocksDB
 
-                        long? indexesAndBloomFilters = null;
-                        long? memtables = null;
-                        if (long.TryParse(store.GetProperty("rocksdb.estimate-table-readers-mem"), out var val))
-                        {
-                            indexesAndBloomFilters = val;
-                        }
-                        if (long.TryParse(store.GetProperty("rocksdb.cur-size-all-mem-tables"), out val))
-                        {
-                            memtables = val;
-                        }
+                          // Indexes and bloom filters
+                          long tableReadersMem = GetLongProperty(store, "rocksdb.estimate-table-readers-mem", columnFamilyName).GetValueOrDefault(-1);
 
-                        return (indexesAndBloomFilters, memtables);
-                    });
+                          // Memtables
+                          long curSizeAllMemTables = GetLongProperty(store, "rocksdb.cur-size-all-mem-tables", columnFamilyName).GetValueOrDefault(-1);
 
-                    if (usage.Succeeded)
-                    {
-                        var (indexesAndBloomFilters, memtables) = usage.Result;
-                        Tracer.Debug(context, $"Loading next checkpoint. Current database memory usage: IndexesAndBloomFilters={indexesAndBloomFilters}bytes, Memtables={memtables}bytes");
-                    }
-                    else
-                    {
-                        Tracer.Debug(context, $"Failed to get database memory usage: {usage.Failure.DescribeIncludingInnerFailures()}");
-                    }
-                }
-                catch (Exception e)
-                {
-                    Tracer.Debug(context, $"Failed to get database memory usage. Exception: {e}");
-                }
+                          // Block cache
+                          long blockCacheUsage = GetLongProperty(store, "rocksdb.block-cache-usage", columnFamilyName).GetValueOrDefault(-1);
+
+                          // Blocks pinned by iterators
+                          long blockCachePinnedUsage = GetLongProperty(store, "rocksdb.block-cache-pinned-usage", columnFamilyName).GetValueOrDefault(-1);
+
+                          return (tableReadersMem, curSizeAllMemTables, blockCacheUsage, blockCachePinnedUsage);
+                      }).ToResult();
+                  }, traceOperationStarted: false, messageFactory: r =>
+                  {
+                      if (!r.Succeeded)
+                      {
+                          return string.Empty;
+                      }
+
+                      return $"ColumnFamily=[{columnFamilyName ?? "default"}] TableReadersMemBytes=[{r.Value.tableReadersMem}] CurSizeAllMemTablesBytes=[{r.Value.curSizeAllMemTables}] BlockCacheUsageBytes=[{r.Value.blockCacheUsage}] BlockCachePinnedUsageBytes=[{r.Value.blockCachePinnedUsage}]";
+                  });
             }
         }
 
@@ -476,35 +446,41 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        public override void SetGlobalEntry(string key, string value)
+        public override void SetGlobalEntry(string key, string? value)
         {
-            _keyValueStore.Use(store =>
-            {
-                if (value == null)
+            _keyValueStore.Use(
+                static (store, state) =>
                 {
-                    store.Remove(key, nameof(Columns.ClusterState));
-                }
-                else
-                {
-                    store.Put(key, value, nameof(Columns.ClusterState));
-                }
-            }).ThrowOnError();
+                    if (state.value == null)
+                    {
+                        store.Remove(state.key, nameof(Columns.ClusterState));
+                    }
+                    else
+                    {
+                        store.Put(state.key, state.value, nameof(Columns.ClusterState));
+                    }
+                    return Unit.Void;
+                },
+                (key, value)).ThrowOnError();
         }
 
         /// <inheritdoc />
-        public override bool TryGetGlobalEntry(string key, out string value)
+        public override bool TryGetGlobalEntry(string key, [NotNullWhen(true)] out string? value)
         {
-            value = _keyValueStore.Use(store =>
-            {
-                if (store.TryGetValue(key, out var value, nameof(Columns.ClusterState)))
+            value = _keyValueStore.Use(
+                static (store, state) =>
                 {
-                    return value;
-                }
-                else
-                {
-                    return null;
-                }
-            }).ThrowOnError();
+                    if (store.TryGetValue(state, out var result, nameof(Columns.ClusterState)))
+                    {
+                        return result;
+                    }
+                    else
+                    {
+                        return null;
+                    }
+                },
+                key).ThrowOnError();
+
             return value != null;
         }
 
@@ -512,17 +488,17 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         protected override IEnumerable<ShortHash> EnumerateSortedKeysFromStorage(OperationContext context)
         {
             return EnumerateEntriesWithSortedKeysFromStorage(context, valueFilter: null, returnKeysOnly: true)
-                .Select(pair => pair.key);
+                .Select(static pair => pair.key);
         }
 
         /// <inheritdoc />
-        protected override IEnumerable<(ShortHash key, ContentLocationEntry entry)> EnumerateEntriesWithSortedKeysFromStorage(
+        protected override IEnumerable<(ShortHash key, ContentLocationEntry? entry)> EnumerateEntriesWithSortedKeysFromStorage(
             OperationContext context,
-            EnumerationFilter? valueFilter,
-            bool returnKeysOnly)
+            EnumerationFilter? valueFilter = null,
+            bool returnKeysOnly = false)
         {
             var token = context.Token;
-            var keyBuffer = new List<(ShortHash key, ContentLocationEntry entry)>();
+            var keyBuffer = new List<(ShortHash key, ContentLocationEntry? entry)>();
             // Last successfully processed entry, or before-the-start pointer
             var startValue = valueFilter?.StartingPoint?.ToByteArray();
 
@@ -545,14 +521,14 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                             using (var cts = new CancellationTokenSource())
                             using (var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, token, killSwitch))
                             {
-                                var gcResult = store.GarbageCollectByKeyValue(
-                                    canCollect: (iterator) =>
+                                var iterationResult = store.IterateDbContent(
+                                    onNextItem: iterator =>
                                     {
                                         var key = iterator.Key();
                                         if (processedKeys == 0 && ByteArrayComparer.Instance.Equals(startValue, key))
                                         {
                                             // Start value is the same as the key. Skip it to keep from double processing the start value.
-                                            return false;
+                                            return;
                                         }
 
                                         if (returnKeysOnly)
@@ -561,10 +537,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                                         }
                                         else
                                         {
-                                            byte[] value = null;
+                                            byte[]? value = null;
                                             if (valueFilter?.ShouldEnumerate?.Invoke(value = iterator.Value()) == true)
                                             {
-                                                keyBuffer.Add((DeserializeKey(key), DeserializeContentLocationEntry(value)));
+                                                keyBuffer.Add((DeserializeKey(key), DeserializeContentLocationEntry(value!)));
                                             }
                                         }
 
@@ -578,13 +554,12 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                                             // which will set reachedEnd to false.
                                             cts.Cancel();
                                         }
-
-                                        return false;
                                     },
-                                    cancellationToken: cancellation.Token,
-                                    startValue: startValue);
+                                    columnFamilyName: null,
+                                    startValue: startValue,
+                                    token: cancellation.Token);
 
-                                reachedEnd = gcResult.ReachedEnd;
+                                reachedEnd = iterationResult.ReachedEnd;
                             }
 
                             killSwitchUsed = killSwitch.IsCancellationRequested;
@@ -599,20 +574,21 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        protected override bool TryGetEntryCoreFromStorage(OperationContext context, ShortHash hash, out ContentLocationEntry entry)
+        protected override bool TryGetEntryCoreFromStorage(OperationContext context, ShortHash hash, [NotNullWhen(true)] out ContentLocationEntry? entry)
         {
             entry = _keyValueStore.Use(
-                    (store, state) => TryGetEntryCoreHelper(state.hash, store, state.db),
+                    static (store, state) => TryGetEntryCoreHelper(state.hash, store, state.db),
                     (hash, db: this)
                 ).ThrowOnError();
             return entry != null;
         }
 
         // NOTE: This should remain static to avoid allocations in TryGetEntryCore
-        private static ContentLocationEntry TryGetEntryCoreHelper(ShortHash hash, IBuildXLKeyValueStore store, RocksDbContentLocationDatabase db)
+        private static ContentLocationEntry? TryGetEntryCoreHelper(ShortHash hash, RocksDbStore store, RocksDbContentLocationDatabase db)
         {
-            ContentLocationEntry result = null;
-            if (store.TryGetValue(db.GetKey(hash), out var data))
+            ContentLocationEntry? result = null;
+            using var poolHandle = db.GetKey(hash);
+            if (store.TryGetValue(poolHandle.Value, out var data))
             {
                 result = db.DeserializeContentLocationEntry(data);
             }
@@ -625,61 +601,70 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             if (entry == null)
             {
-                DeleteFromDb(context, hash);
+                DeleteFromDb(hash);
             }
             else
             {
-                SaveToDb(context, hash, entry);
+                SaveToDb(hash, entry);
             }
         }
 
         /// <inheritdoc />
         internal override void PersistBatch(OperationContext context, IEnumerable<KeyValuePair<ShortHash, ContentLocationEntry>> pairs)
         {
-            _keyValueStore.Use((store, state) => PersistBatchHelper(store, state.pairs, state.db), (pairs, db: this)).ThrowOnError();
+            _keyValueStore.Use(static (store, state) => PersistBatchHelper(store, state.pairs, state.db), (pairs, db: this)).ThrowOnError();
         }
 
-        private static Unit PersistBatchHelper(IBuildXLKeyValueStore store, IEnumerable<KeyValuePair<ShortHash, ContentLocationEntry>> pairs, RocksDbContentLocationDatabase db)
+        private static Unit PersistBatchHelper(RocksDbStore store, IEnumerable<KeyValuePair<ShortHash, ContentLocationEntry>> pairs, RocksDbContentLocationDatabase db)
         {
-            store.ApplyBatch(pairs.Select(
-                kvp => new KeyValuePair<byte[], byte[]>(db.GetKey(kvp.Key), kvp.Value != null ? db.SerializeContentLocationEntry(kvp.Value) : null)));
+            store.ApplyBatch(
+                pairs.SelectWithState(
+                    static (kvp, db) => new KeyValuePair<byte[], byte[]?>(db.GetMaterializedKey(kvp.Key), kvp.Value != null ? db.SerializeContentLocationEntry(kvp.Value) : null),
+                    state: db));
             return Unit.Void;
         }
 
-        private void SaveToDb(OperationContext context, ShortHash hash, ContentLocationEntry entry)
+        private void SaveToDb(ShortHash hash, ContentLocationEntry entry)
         {
             _keyValueStore.Use(
-                (store, state) => SaveToDbHelper(state.hash, state.entry, store, state.db), (hash, entry, db: this)).ThrowOnError();
+                static (store, state) => SaveToDbHelper(state.hash, state.entry, store, state.db), (hash, entry, db: this)).ThrowOnError();
         }
 
         // NOTE: This should remain static to avoid allocations in Store
-        private static Unit SaveToDbHelper(ShortHash hash, ContentLocationEntry entry, IBuildXLKeyValueStore store, RocksDbContentLocationDatabase db)
+        private static Unit SaveToDbHelper(ShortHash hash, ContentLocationEntry entry, RocksDbStore store, RocksDbContentLocationDatabase db)
         {
             var value = db.SerializeContentLocationEntry(entry);
-            store.Put(db.GetKey(hash), value);
+            using var poolHandle = db.GetKey(hash);
+            store.Put(poolHandle.Value, value);
 
             return Unit.Void;
         }
 
-        private void DeleteFromDb(OperationContext context, ShortHash hash)
+        private void DeleteFromDb(ShortHash hash)
         {
             _keyValueStore.Use(
-                (store, state) => DeleteFromDbHelper(state.hash, store, state.db), (hash, db: this)).ThrowOnError();
+                static (store, state) => DeleteFromDbHelper(state.hash, store, state.db), (hash, db: this)).ThrowOnError();
         }
 
         // NOTE: This should remain static to avoid allocations in Delete
-        private static Unit DeleteFromDbHelper(ShortHash hash, IBuildXLKeyValueStore store, RocksDbContentLocationDatabase db)
+        private static Unit DeleteFromDbHelper(ShortHash hash, RocksDbStore store, RocksDbContentLocationDatabase db)
         {
-            store.Remove(db.GetKey(hash));
+            using var poolHandle = db.GetKey(hash);
+            store.Remove(poolHandle.Value);
             return Unit.Void;
         }
 
         private ShortHash DeserializeKey(byte[] key)
         {
-            return new ShortHash(new FixedBytes(key));
+            return ShortHash.FromBytes(key);
         }
 
-        private byte[] GetKey(ShortHash hash)
+        private Pool<byte[]>.PoolHandle GetKey(in ShortHash hash)
+        {
+            return hash.ToPooledByteArray();
+        }
+
+        private byte[] GetMaterializedKey(in ShortHash hash)
         {
             return hash.ToByteArray();
         }
@@ -687,6 +672,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         /// <inheritdoc />
         public override Result<MetadataEntry?> GetMetadataEntry(OperationContext context, StrongFingerprint strongFingerprint, bool touch)
         {
+            // This method calls _keyValueStore.Use with non-static lambda, because this code is complicated
+            // and not as perf critical as other places.
             var key = GetMetadataKey(strongFingerprint);
             MetadataEntry? result = null;
             var status = _keyValueStore.Use(
@@ -697,7 +684,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                         var metadata = DeserializeMetadataEntry(data);
                         result = metadata;
 
-                        if (!_configuration.OpenReadOnly && touch)
+                        if (!_configuration.OpenReadOnly && IsDatabaseWriteable && touch)
                         {
                             // Update the time, only if no one else has changed it in the mean time. We don't
                             // really care if this succeeds or not, because if it doesn't it only means someone
@@ -775,26 +762,26 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         }
 
         /// <inheritdoc />
-        public override IEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(OperationContext context)
+        public override IEnumerable<Result<StrongFingerprint>> EnumerateStrongFingerprints(OperationContext context)
         {
-            var result = new List<StructResult<StrongFingerprint>>();
+            var result = new List<Result<StrongFingerprint>>();
             var status = _keyValueStore.Use(
-                store =>
+                static (store, state) =>
                 {
-                    foreach (var kvp in store.PrefixSearch((byte[])null, nameof(Columns.Metadata)))
+                    foreach (var kvp in store.PrefixSearch((byte[]?)null, nameof(Columns.Metadata)))
                     {
                         // TODO(jubayard): since this method only needs the keys and not the values, it wouldn't hurt
                         // to make an alternative prefix search that doesn't even read the values from RocksDB.
-                        var strongFingerprint = DeserializeStrongFingerprint(kvp.Key);
-                        result.Add(StructResult.Create(strongFingerprint));
+                        var strongFingerprint = state.@this.DeserializeStrongFingerprint(kvp.Key);
+                        state.result.Add(Result.Success(strongFingerprint));
                     }
 
-                    return result;
-                });
+                    return state.result;
+                }, (result: result, @this: this));
 
             if (!status.Succeeded)
             {
-                result.Add(new StructResult<StrongFingerprint>(status.Failure.CreateException()));
+                result.Add(new Result<StrongFingerprint>(status.Failure.CreateException()));
             }
 
             return result;
@@ -805,19 +792,22 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
         {
             var selectors = new List<(long TimeUtc, Selector Selector)>();
             var status = _keyValueStore.Use(
-                store =>
+                static (store, state) =>
                 {
-                    var key = SerializeWeakFingerprint(weakFingerprint);
+                    var @this = state.@this;
+                    var key = @this.SerializeWeakFingerprint(state.weakFingerprint);
 
                     // This only works because the strong fingerprint serializes the weak fingerprint first. Hence,
                     // we know that all keys here are strong fingerprints that match the weak fingerprint.
                     foreach (var kvp in store.PrefixSearch(key, columnFamilyName: nameof(Columns.Metadata)))
                     {
-                        var strongFingerprint = DeserializeStrongFingerprint(kvp.Key);
-                        var timeUtc = DeserializeMetadataLastAccessTimeUtc(kvp.Value);
-                        selectors.Add((timeUtc, strongFingerprint.Selector));
+                        var strongFingerprint = @this.DeserializeStrongFingerprint(kvp.Key);
+                        var timeUtc = @this.DeserializeMetadataLastAccessTimeUtc(kvp.Value);
+                        state.selectors.Add((timeUtc, strongFingerprint.Selector));
                     }
-                });
+
+                    return Unit.Void;
+                }, (selectors: selectors, @this: this, weakFingerprint: weakFingerprint));
 
             if (!status.Succeeded)
             {
@@ -831,17 +821,17 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private byte[] SerializeWeakFingerprint(Fingerprint weakFingerprint)
         {
-            return SerializationPool.Serialize(weakFingerprint, (instance, writer) => instance.Serialize(writer));
+            return SerializationPool.Serialize(weakFingerprint, static (instance, writer) => instance.Serialize(writer));
         }
 
         private byte[] SerializeStrongFingerprint(StrongFingerprint strongFingerprint)
         {
-            return SerializationPool.Serialize(strongFingerprint, (instance, writer) => instance.Serialize(writer));
+            return SerializationPool.Serialize(strongFingerprint, static (instance, writer) => instance.Serialize(writer));
         }
 
         private StrongFingerprint DeserializeStrongFingerprint(byte[] bytes)
         {
-            return SerializationPool.Deserialize(bytes, reader => StrongFingerprint.Deserialize(reader));
+            return SerializationPool.Deserialize(bytes, static reader => StrongFingerprint.Deserialize(reader));
         }
 
         private byte[] GetMetadataKey(StrongFingerprint strongFingerprint)
@@ -851,113 +841,267 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
 
         private byte[] SerializeMetadataEntry(MetadataEntry value)
         {
-            return SerializationPool.Serialize(value, (instance, writer) => instance.Serialize(writer));
+            return SerializationPool.Serialize(value, static (instance, writer) => instance.Serialize(writer));
         }
 
         private MetadataEntry DeserializeMetadataEntry(byte[] data)
         {
-            return SerializationPool.Deserialize(data, reader => MetadataEntry.Deserialize(reader));
+            return SerializationPool.Deserialize(data, static reader => MetadataEntry.Deserialize(reader));
         }
 
         private long DeserializeMetadataLastAccessTimeUtc(byte[] data)
         {
-            return SerializationPool.Deserialize(data, reader => MetadataEntry.DeserializeLastAccessTimeUtc(reader));
-        }
-
-
-        private Result<long> GetLongProperty(IBuildXLKeyValueStore store, string propertyName, string columnFamilyName = null)
-        {
-            try
-            {
-                return long.Parse(store.GetProperty(propertyName, columnFamilyName));
-            }
-            catch (Exception exception)
-            {
-                return new Result<long>(exception);
-            }
+            return SerializationPool.Deserialize(data, static reader => MetadataEntry.DeserializeLastAccessTimeUtc(reader));
         }
 
         /// <inheritdoc />
-        protected override BoolResult GarbageCollectMetadataCore(OperationContext context)
+        protected override Result<MetadataGarbageCollectionOutput> GarbageCollectMetadataCore(OperationContext context)
         {
             return _keyValueStore.Use((store, killSwitch) =>
             {
-                // The strategy here is to follow what the SQLite memoization store does: we want to keep the top K
-                // elements by last access time (i.e. an LRU policy). This is slightly worse than that, because our
-                // iterator will go stale as time passes: since we iterate over a snapshot of the DB, we can't
-                // guarantee that an entry we remove is truly the one we should be removing. Moreover, since we store
-                // information what the last access times were, our internal priority queue may go stale over time as
-                // well.
-                var liveDbSizeInBytesBeforeGc = GetLongProperty(store, "rocksdb.estimate-live-data-size", columnFamilyName: nameof(Columns.Metadata));
+                using var ctx = context.WithCancellationToken(killSwitch);
 
-                var scannedEntries = 0;
-                var removedEntries = 0;
+                long metadataCFSizeBeforeGcBytes = GetLongProperty(
+                    store,
+                    "rocksdb.estimate-live-data-size",
+                    columnFamilyName: nameof(Columns.Metadata)).GetValueOrDefault(-1);
 
-                using (var cts = CancellationTokenSource.CreateLinkedTokenSource(killSwitch, context.Token))
+                var output = _configuration.MetadataGarbageCollectionStrategy switch
                 {
-                    // This is a min-heap using lexicographic order: an element will be at the `Top` if its `fileTimeUtc`
-                    // is the smallest (i.e. the oldest). Hence, we always know what the cut-off point is for the top K: if
-                    // a new element is smaller than the Top, it's not in the top K, if larger, it is.
-                    var entries = new PriorityQueue<(long fileTimeUtc, byte[] strongFingerprint)>(
-                        capacity: _configuration.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep + 1,
-                        comparer: Comparer<(long fileTimeUtc, byte[] strongFingerprint)>.Create((x, y) => x.fileTimeUtc.CompareTo(y.fileTimeUtc)));
-                    foreach (var keyValuePair in store.PrefixSearch((byte[])null, nameof(Columns.Metadata)))
+                    MetadataGarbageCollectionStrategy.CapacityBound =>
+                        GarbageCollectMetadataWithMaximumEntriesStrategy(ctx, store),
+                    MetadataGarbageCollectionStrategy.DiskSizeBound =>
+                        GarbageCollectMetadataWithMaximumSizeStrategy(ctx, store),
+                    _ =>
+                        throw new InvalidOperationException($"Unknown Metadata GC strategy `{_configuration.MetadataGarbageCollectionStrategy}`"),
+                };
+
+                Counters[ContentLocationDatabaseCounters.GarbageCollectMetadataEntriesScanned].Add(output.Scanned);
+                Counters[ContentLocationDatabaseCounters.GarbageCollectMetadataEntriesRemoved].Add(output.Removed);
+
+                output.MetadataCFSizeBeforeGcBytes = metadataCFSizeBeforeGcBytes;
+                output.MetadataCFSizeAfterGcBytes = GetLongProperty(
+                    store,
+                    "rocksdb.estimate-live-data-size",
+                    columnFamilyName: nameof(Columns.Metadata)).GetValueOrDefault(-1);
+                output.KillSwitch = killSwitch.IsCancellationRequested;
+                return output;
+            }).ToResult();
+        }
+
+        private MetadataGarbageCollectionOutput GarbageCollectMetadataWithMaximumEntriesStrategy(OperationContext context, RocksDbStore store)
+        {
+            // The strategy here is to keep the top K elements by last access time (i.e. an LRU policy). This is
+            // slightly worse than that, because our iterator will go stale as time passes: since we iterate over
+            // a snapshot of the DB, we can't guarantee that an entry we remove is truly the one we should be
+            // removing. Moreover, since we store information what the last access times were, our internal
+            // priority queue may go stale over time as well.
+
+            long scannedEntries = 0;
+            long removedEntries = 0;
+
+            // This is a min-heap using lexicographic order: an element will be at the `Top` if its `fileTimeUtc`
+            // is the smallest (i.e. the oldest). Hence, we always know what the cut-off point is for the top K: if
+            // a new element is smaller than the Top, it's not in the top K, if larger, it is.
+            var entries = new PriorityQueue<(long fileTimeUtc, byte[] strongFingerprint)>(
+                capacity: _configuration.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep + 1,
+                comparer: Comparer<(long fileTimeUtc, byte[] strongFingerprint)>.Create((x, y) => x.fileTimeUtc.CompareTo(y.fileTimeUtc)));
+            foreach (var keyValuePair in store.PrefixSearch((byte[]?)null, nameof(Columns.Metadata)))
+            {
+                // NOTE(jubayard): the expensive part of this is iterating over the whole database; the less we
+                // take _while_ we do that, the better. An alternative is to compute a quantile sketch and remove
+                // unneeded entries as we go. We could also batch deletions here.
+
+                if (context.Token.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                var entry = (fileTimeUtc: DeserializeMetadataLastAccessTimeUtc(keyValuePair.Value),
+                    strongFingerprint: keyValuePair.Key);
+
+                byte[]? strongFingerprintToRemove = null;
+
+                if (entries.Count >= _configuration.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep && entries.Top.fileTimeUtc > entry.fileTimeUtc)
+                {
+                    // If we already reached the maximum number of elements to keep, and the current entry is older
+                    // than the oldest in the top K, we can just remove the current entry.
+                    strongFingerprintToRemove = entry.strongFingerprint;
+                }
+                else
+                {
+                    // We either didn't reach the number of elements we want to keep, or the entry has a last
+                    // access time larger than the current smallest one in the top K.
+                    entries.Push(entry);
+
+                    if (entries.Count > _configuration.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep)
                     {
-                        // NOTE(jubayard): the expensive part of this is iterating over the whole database; the less we
-                        // take _while_ we do that, the better. An alternative is to compute a quantile sketch and remove
-                        // unneeded entries as we go. We could also batch deletions here.
-
-                        if (cts.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        var entry = (fileTimeUtc: DeserializeMetadataLastAccessTimeUtc(keyValuePair.Value),
-                            strongFingerprint: keyValuePair.Key);
-
-                        byte[] strongFingerprintToRemove = null;
-
-                        if (entries.Count >= _configuration.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep && entries.Top.fileTimeUtc > entry.fileTimeUtc)
-                        {
-                            // If we already reached the maximum number of elements to keep, and the current entry is older
-                            // than the oldest in the top K, we can just remove the current entry.
-                            strongFingerprintToRemove = entry.strongFingerprint;
-                        }
-                        else
-                        {
-                            // We either didn't reach the number of elements we want to keep, or the entry has a last
-                            // access time larger than the current smallest one in the top K.
-                            entries.Push(entry);
-
-                            if (entries.Count > _configuration.MetadataGarbageCollectionMaximumNumberOfEntriesToKeep)
-                            {
-                                strongFingerprintToRemove = entries.Top.strongFingerprint;
-                                entries.Pop();
-                            }
-                        }
-
-                        if (!(strongFingerprintToRemove is null))
-                        {
-                            store.Remove(strongFingerprintToRemove, columnFamilyName: nameof(Columns.Metadata));
-                            removedEntries++;
-                        }
-
-                        scannedEntries++;
+                        strongFingerprintToRemove = entries.Top.strongFingerprint;
+                        entries.Pop();
                     }
                 }
 
-                Counters[ContentLocationDatabaseCounters.GarbageCollectMetadataEntriesRemoved].Add(removedEntries);
-                Counters[ContentLocationDatabaseCounters.GarbageCollectMetadataEntriesScanned].Add(scannedEntries);
+                if (!(strongFingerprintToRemove is null))
+                {
+                    store.Remove(strongFingerprintToRemove, columnFamilyName: nameof(Columns.Metadata));
+                    removedEntries++;
 
-                var liveDbSizeInBytesAfterGc = GetLongProperty(store, "rocksdb.estimate-live-data-size", columnFamilyName: nameof(Columns.Metadata));
+                    if (_configuration.MetadataGarbageCollectionLogEnabled)
+                    {
+                        var strongFingerprint = DeserializeStrongFingerprint(strongFingerprintToRemove);
+                        NagleOperationTracer?.Enqueue((context, strongFingerprint, EntryOperation.RemoveMetadataEntry, OperationReason.GarbageCollect));
+                    }
+                }
 
-                // NOTE(jubayard): since we report the live DB size, it is possible it may increase after GC, because
-                // new tombstones have been added. However, there is no way to compute how much we added/removed that
-                // doesn't involve either keeping track of the values, or doing two passes over the column family.
-                Tracer.Debug(context, $"Metadata Garbage Collection results: ScannedEntries=[{scannedEntries}] RemovedEntries=[{removedEntries}] LiveDbSizeInBytesBeforeGc=[{liveDbSizeInBytesBeforeGc}] LiveDbSizeInBytesAfterGc=[{liveDbSizeInBytesAfterGc}] KillSwitch=[{killSwitch.IsCancellationRequested}]");
+                scannedEntries++;
+            }
 
-                return Unit.Void;
-            }).ToBoolResult();
+            return new MetadataGarbageCollectionOutput()
+            {
+                Scanned = scannedEntries,
+                Removed = removedEntries,
+            };
+        }
+
+        private MetadataGarbageCollectionOutput GarbageCollectMetadataWithMaximumSizeStrategy(OperationContext context, RocksDbStore store)
+        {
+            ulong sizeTargetBytes = (ulong)Math.Ceiling(_configuration.MetadataGarbageCollectionMaximumSizeMb * 1e6);
+
+            // This garbage collection algorithm works in two passes:
+            //   1. We estimate the quantiles of last access times w.r.t. now, in minutes.
+            //   2. We know the current size S, the target size T, and the amount we need to remove R = T - S > 0.
+            //      Since we need to remove R bytes of data, that corresponds to a fraction R/S of the current size,
+            //      hence, we can search for the quantile R/S of the last access time distribution (i.e. the cut-off
+            //      time T at which R/S entries are older).
+            //      The second pass goes through the entire DB again, and removes all last access times older than T.
+            // The underlying assumption is that the key size distribution is uniform and independent of time.
+
+            // The database snapshot that we traverse will be set at the moment we call PrefixSearch. Any changes to
+            // the database after that won't be seen by this method. Hence, last access times are computed w.r.t. now.
+            var now = Clock.UtcNow;
+
+            Tracer.Info(context, $"Starting first pass. Now=[{now}]");
+
+            ulong firstPassSumKeySize = 0;
+            ulong firstPassSumValueSize = 0;
+            ulong firstPassScannedEntries = 0;
+            var lastAccessTimeSketch = new DDSketch();
+            var strongFingerprintSizeSketch = new DDSketch();
+            var metadataEntrySizeSketch = new DDSketch();
+            foreach (var keyValuePair in store.PrefixSearch((byte[]?)null, nameof(Columns.Metadata)))
+            {
+                context.Token.ThrowIfCancellationRequested();
+
+                var lastAccessTime = DateTime.FromFileTimeUtc(DeserializeMetadataLastAccessTimeUtc(keyValuePair.Value));
+                var lastAccessDelta = now - lastAccessTime;
+
+                lastAccessTimeSketch.Insert(lastAccessDelta.TotalMinutes);
+
+                strongFingerprintSizeSketch.Insert(keyValuePair.Key.Length);
+                metadataEntrySizeSketch.Insert(keyValuePair.Value.Length);
+
+                firstPassSumKeySize += (uint)keyValuePair.Key.Length;
+                firstPassSumValueSize += (uint)keyValuePair.Value.Length;
+                firstPassScannedEntries++;
+            }
+
+            if (firstPassScannedEntries == 0)
+            {
+                Tracer.Info(context, $"No entries in database. Early stopping.");
+                return new MetadataGarbageCollectionOutput()
+                {
+                    Scanned = 0,
+                    Removed = 0,
+                };
+            }
+
+            double avgKeySize = (double)firstPassSumKeySize / (double)firstPassScannedEntries;
+            double avgValueSize = (double)firstPassSumValueSize / (double)firstPassScannedEntries;
+            Tracer.Info(context, $"First pass complete. SumKeySize=[{firstPassSumKeySize}] SumValueSize=[{firstPassSumValueSize}] CountEntries=[{firstPassScannedEntries}] AvgKeySize=[{avgKeySize}] AvgValueSize=[{avgValueSize}]");
+
+            Tracer.Info(context, $"Last Access Time statistics: Max=[{lastAccessTimeSketch.Max}] Min=[{lastAccessTimeSketch.Min}] Avg=[{lastAccessTimeSketch.Average}] P50=[{lastAccessTimeSketch.Quantile(0.5)}] P75=[{lastAccessTimeSketch.Quantile(0.75)}] P90=[{lastAccessTimeSketch.Quantile(0.90)}] P95=[{lastAccessTimeSketch.Quantile(0.95)}]");
+
+            Tracer.Info(context, $"Strong Fingerprint size statistics: Max=[{strongFingerprintSizeSketch.Max}] Min=[{strongFingerprintSizeSketch.Min}] Avg=[{strongFingerprintSizeSketch.Average}] P50=[{strongFingerprintSizeSketch.Quantile(0.5)}] P75=[{strongFingerprintSizeSketch.Quantile(0.75)}] P90=[{strongFingerprintSizeSketch.Quantile(0.90)}] P95=[{strongFingerprintSizeSketch.Quantile(0.95)}]");
+
+            Tracer.Info(context, $"Metadata Entry size statistics: Max=[{metadataEntrySizeSketch.Max}] Min=[{metadataEntrySizeSketch.Min}] Avg=[{metadataEntrySizeSketch.Average}] P50=[{metadataEntrySizeSketch.Quantile(0.5)}] P75=[{metadataEntrySizeSketch.Quantile(0.75)}] P90=[{metadataEntrySizeSketch.Quantile(0.90)}] P95=[{metadataEntrySizeSketch.Quantile(0.95)}]");
+
+            ulong sizeDatabaseBytes = firstPassSumKeySize + firstPassSumValueSize;
+            if (sizeDatabaseBytes <= sizeTargetBytes)
+            {
+                Tracer.Info(context, $"Early stop. SizeBytes=[{sizeDatabaseBytes}] SizeTargetBytes=[{sizeTargetBytes}]");
+                return new MetadataGarbageCollectionOutput()
+                {
+                    Scanned = (long)firstPassScannedEntries,
+                    Removed = 0,
+                };
+            }
+
+            ulong sizeRemovalBytes = sizeDatabaseBytes - sizeTargetBytes;
+            double fractionToRemove = (double)sizeRemovalBytes / (double)sizeDatabaseBytes;
+            double fractionToKeep = 1.0 - fractionToRemove;
+
+            var keepCutOffMinutes = lastAccessTimeSketch.Quantile(fractionToKeep);
+
+            // Everything older than this point will be removed
+            var keepCutOffDateTime = now - TimeSpan.FromMinutes(keepCutOffMinutes);
+            var keepCutOffFileTimeUtc = keepCutOffDateTime.ToFileTimeUtc();
+
+            Tracer.Info(context, $"Starting second pass. SizeBytes=[{sizeDatabaseBytes}] SizeRemovalBytes=[{sizeRemovalBytes}] FractionToKeep=[{fractionToKeep}] KeepCutOffMinutes=[{keepCutOffMinutes}] KeepCutOffDateTime=[{keepCutOffDateTime}]");
+
+            var secondPassScannedEntries = 0;
+            var secondPassRemovedEntries = 0;
+            ulong secondPassSumKeySize = 0;
+            ulong secondPassSumValueSize = 0;
+            ulong secondPassRemovedKeySize = 0;
+            ulong secondPassRemovedValueSize = 0;
+
+            foreach (var keyValuePair in store.PrefixSearch((byte[]?)null, nameof(Columns.Metadata)))
+            {
+                if (context.Token.IsCancellationRequested)
+                {
+                    // If the operation's been cancelled, we still want to trace what we have found thus far anyways.
+                    // Hence, we just break and throw afterwards.
+                    break;
+                }
+
+                var entry = (fileTimeUtc: DeserializeMetadataLastAccessTimeUtc(keyValuePair.Value), strongFingerprint: keyValuePair.Key);
+                if (entry.fileTimeUtc < keepCutOffFileTimeUtc)
+                {
+                    store.Remove(entry.strongFingerprint, columnFamilyName: nameof(Columns.Metadata));
+
+                    secondPassRemovedKeySize += (ulong)keyValuePair.Key.Length;
+                    secondPassRemovedValueSize += (ulong)keyValuePair.Value.Length;
+                    secondPassRemovedEntries++;
+
+                    if (_configuration.MetadataGarbageCollectionLogEnabled)
+                    {
+                        var strongFingerprint = DeserializeStrongFingerprint(entry.strongFingerprint);
+                        NagleOperationTracer?.Enqueue((context, strongFingerprint, EntryOperation.RemoveMetadataEntry, OperationReason.GarbageCollect));
+                    }
+                }
+
+                secondPassSumKeySize += (ulong)keyValuePair.Key.Length;
+                secondPassSumValueSize += (ulong)keyValuePair.Value.Length;
+                secondPassScannedEntries++;
+            }
+
+            Tracer.Info(context, $"Second pass complete. ScannedEntries=[{secondPassScannedEntries}] RemovedEntries=[{secondPassRemovedEntries}] SumKeySize=[{secondPassSumKeySize}] SumValueSize=[{secondPassSumValueSize}] RemovedKeySize=[{secondPassRemovedValueSize}] RemovedValueSize=[{secondPassRemovedValueSize}] SizeBytes=[{sizeDatabaseBytes}] SizeRemovalBytes=[{sizeRemovalBytes}] FractionToKeep=[{fractionToKeep}] KeepCutOffMinutes=[{keepCutOffMinutes}] KeepCutOffDateTime=[{keepCutOffDateTime}]");
+
+
+            var removedSizeBytes = secondPassRemovedKeySize + secondPassRemovedValueSize;
+            var preGcSizeBytes = secondPassSumKeySize + secondPassSumValueSize;
+            // NOTE: This math below can overflow.
+            var postGcSizeBytes = (long)preGcSizeBytes - (long)removedSizeBytes;
+            var sizeTargetDelta = (long)sizeTargetBytes - (long)postGcSizeBytes;
+            Tracer.Info(context, $"Final results. PreGcSizeBytes=[{preGcSizeBytes}] PostGcSizeBytes=[{postGcSizeBytes}] RemovedSizeBytes=[{removedSizeBytes}] SizeTargetDelta=[{sizeTargetDelta}]");
+
+            context.Token.ThrowIfCancellationRequested();
+
+            return new MetadataGarbageCollectionOutput()
+            {
+                Scanned = secondPassScannedEntries,
+                Removed = secondPassRemovedEntries,
+            };
         }
 
         /// <nodoc />
@@ -1008,189 +1152,15 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             return _keyValueStore.Use(store => GetLongProperty(store, propertyName, columnFamilyName)).Result;
         }
 
-        private void FullRangeCompaction(OperationContext context)
+        private Result<long> GetLongProperty(RocksDbStore store, string propertyName, string? columnFamilyName = null)
         {
-            if (ShutdownStarted)
+            try
             {
-                return;
+                return long.Parse(store.GetProperty(propertyName, columnFamilyName));
             }
-
-            using (var cancellableContext = TrackShutdown(context))
+            catch (Exception exception)
             {
-                var ctx = (OperationContext)cancellableContext;
-                var killSwitchUsed = false;
-                ctx.PerformOperation<BoolResult>(Tracer, () =>
-                    PossibleExtensions.ToBoolResult(_keyValueStore.Use((store, killSwitch) =>
-                    {
-                        using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Token, killSwitch))
-                        {
-                            foreach (var columnFamily in new[] { "default", nameof(Columns.ClusterState), nameof(Columns.Metadata) })
-                            {
-                                if (cts.IsCancellationRequested)
-                                {
-                                    killSwitchUsed = killSwitch.IsCancellationRequested;
-                                    break;
-                                }
-
-                                var result = CompactColumnFamily(context, store, columnFamily);
-                                if (!result.Succeeded)
-                                {
-                                    break;
-                                }
-                            }
-                        }
-                    })),
-                    messageFactory: _ => $"KillSwitch=[{killSwitchUsed}]").IgnoreFailure();
-            }
-
-            if (!ShutdownStarted)
-            {
-                lock (TimerChangeLock)
-                {
-                    // No try-catch required here.
-                    _compactionTimer?.Change(_configuration.FullRangeCompactionInterval, Timeout.InfiniteTimeSpan);
-                }
-            }
-        }
-
-        private BoolResult CompactColumnFamily(OperationContext context, IBuildXLKeyValueStore store, string columnFamilyName)
-        {
-            uint? startRange = null;
-            uint? endRange = null;
-
-            return context.PerformOperation(Tracer, () =>
-            {
-                switch (_configuration.FullRangeCompactionVariant)
-                {
-                    case FullRangeCompactionVariant.EntireRange:
-                    {
-                        store.CompactRange((byte[])null, null, columnFamilyName);
-                        break;
-                    }
-                    case FullRangeCompactionVariant.ByteIncrements:
-                    {
-                        var info = GetCompactionInfo(store, columnFamilyName);
-
-                        var compactionEndPrefix = unchecked((byte)(info.LastCompactionEndPrefix + _configuration.FullRangeCompactionByteIncrementStep));
-
-                        startRange = info.LastCompactionEndPrefix;
-                        endRange = compactionEndPrefix;
-
-                        var start = new byte[] { info.LastCompactionEndPrefix };
-                        var limit = new byte[] { compactionEndPrefix };
-                        if (info.LastCompactionEndPrefix > compactionEndPrefix)
-                        {
-                            // We'll wrap around when we add the increment step at the end of the range; hence, we produce two compactions.
-                            store.CompactRange(start, null, columnFamilyName);
-                            store.CompactRange(null, limit, columnFamilyName);
-                        }
-                        else
-                        {
-                            store.CompactRange(start, limit, columnFamilyName);
-                        }
-
-                        StoreCompactionInfo(
-                            store,
-                            new CompactionInfo
-                            {
-                                LastCompactionEndPrefix = compactionEndPrefix,
-                            },
-                            columnFamilyName);
-                        break;
-                    }
-                    case FullRangeCompactionVariant.WordIncrements:
-                    {
-                        var info = GetCompactionInfo(store, columnFamilyName);
-
-                        var compactionEndPrefix = unchecked((ushort)(info.LastWordCompactionEndPrefix + _configuration.FullRangeCompactionByteIncrementStep));
-
-                        startRange = info.LastWordCompactionEndPrefix;
-                        endRange = compactionEndPrefix;
-
-                        var start = BitConverter.GetBytes(info.LastWordCompactionEndPrefix);
-                        var limit = BitConverter.GetBytes(compactionEndPrefix);
-                        if (info.LastWordCompactionEndPrefix > compactionEndPrefix)
-                        {
-                            // We'll wrap around when we add the increment step at the end of the range; hence, we produce two compactions.
-                            store.CompactRange(start, null, columnFamilyName);
-                            store.CompactRange(null, limit, columnFamilyName);
-                        }
-                        else
-                        {
-                            store.CompactRange(start, limit, columnFamilyName);
-                        }
-
-                        StoreCompactionInfo(
-                            store,
-                            new CompactionInfo
-                            {
-                                LastWordCompactionEndPrefix = compactionEndPrefix,
-                            },
-                            columnFamilyName);
-                        break;
-                    }
-                }
-
-                return BoolResult.Success;
-            }, messageFactory: _ => $"ColumnFamily=[{columnFamilyName}] Variant=[{_configuration.FullRangeCompactionVariant}] Start=[{startRange?.ToString() ?? "NULL"}] End=[{endRange?.ToString() ?? "NULL"}]");
-        }
-
-        private void StoreCompactionInfo(IBuildXLKeyValueStore store, CompactionInfo compactionInfo, string columnFamilyName)
-        {
-            Contract.RequiresNotNull(store);
-            Contract.RequiresNotNullOrEmpty(columnFamilyName);
-
-            var key = Encoding.UTF8.GetBytes($"{columnFamilyName}_CompactionInfoV2");
-            var value = SerializeCompactionInfo(compactionInfo);
-            store.Put(key, value, columnFamilyName: nameof(Columns.DatabaseManagement));
-        }
-
-        private CompactionInfo GetCompactionInfo(IBuildXLKeyValueStore store, string columnFamilyName)
-        {
-            Contract.RequiresNotNull(store);
-            Contract.RequiresNotNullOrEmpty(columnFamilyName);
-
-            var key = Encoding.UTF8.GetBytes($"{columnFamilyName}_CompactionInfoV2");
-            if (store.TryGetValue(key, out var value, columnFamilyName: nameof(Columns.DatabaseManagement)))
-            {
-                return DeserializeCompactionInfo(value);
-            }
-
-            return new CompactionInfo();
-        }
-
-        private byte[] SerializeCompactionInfo(CompactionInfo strongFingerprint)
-        {
-            return SerializationPool.Serialize(strongFingerprint, (instance, writer) => instance.Serialize(writer));
-        }
-
-        private CompactionInfo DeserializeCompactionInfo(byte[] bytes)
-        {
-            return SerializationPool.Deserialize(bytes, reader => CompactionInfo.Deserialize(reader));
-        }
-
-        private struct CompactionInfo
-        {
-            public byte LastCompactionEndPrefix { get; set; }
-
-            public ushort LastWordCompactionEndPrefix { get; set; }
-
-            public void Serialize(BuildXLWriter writer)
-            {
-                writer.Write(LastCompactionEndPrefix);
-                writer.Write(LastWordCompactionEndPrefix);
-            }
-
-            public static CompactionInfo Deserialize(BuildXLReader reader)
-            {
-                var lastCompactionEndPrefix = reader.ReadByte();
-                var lastWordCompactionEndPrefix = reader.ReadUInt16();
-
-                return new CompactionInfo()
-                {
-                    LastCompactionEndPrefix = lastCompactionEndPrefix,
-                    LastWordCompactionEndPrefix = lastWordCompactionEndPrefix,
-                };
+                return new Result<long>(exception);
             }
         }
 
@@ -1206,7 +1176,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
             /// Operations that do this will have their database switched under them as they are running. They can
             /// also choose to terminate gracefully if possible. For examples, see:
             ///  - <see cref="GarbageCollectMetadataCore(OperationContext)"/>
-            ///  - <see cref="FullRangeCompaction(OperationContext)"/>
             ///  - Content GC
             /// </summary>
             private CancellationTokenSource _killSwitch = new CancellationTokenSource();
@@ -1241,44 +1210,46 @@ namespace BuildXL.Cache.ContentStore.Distributed.NuCache
                 _killSwitch = new CancellationTokenSource();
             }
 
-            public Possible<TResult> Use<TState, TResult>(Func<IBuildXLKeyValueStore, TState, TResult> action, TState state)
+            public Possible<TResult> Use<TState, TResult>(Func<RocksDbStore, TState, TResult> action, TState state)
             {
                 using var token = _accessorLock.AcquireReadLock();
                 return _accessor.Use(action, state);
             }
 
-            public Possible<Unit> Use(Action<IBuildXLKeyValueStore> action)
+            public Possible<Unit> Use(Action<RocksDbStore> action)
             {
                 using var token = _accessorLock.AcquireReadLock();
                 return _accessor.Use(action);
             }
 
-            public Possible<TResult> Use<TResult>(Func<IBuildXLKeyValueStore, TResult> action)
+            public Possible<TResult> Use<TResult>(Func<RocksDbStore, TResult> action)
             {
                 using var token = _accessorLock.AcquireReadLock();
                 return _accessor.Use(action);
             }
 
-            public Possible<TResult> Use<TState, TResult>(Func<IBuildXLKeyValueStore, TState, CancellationToken, TResult> action, TState state)
+            public Possible<TResult> Use<TState, TResult>(Func<RocksDbStore, TState, CancellationToken, TResult> action, TState state)
             {
                 using var token = _accessorLock.AcquireReadLock();
-                return _accessor.Use((store, innerState) => action(store, innerState.state, innerState.token), (state, token: _killSwitch.Token));
+                return _accessor.Use(
+                    static (store, innerState) => innerState.action(store, innerState.state, innerState.token),
+                    (state, token: _killSwitch.Token, action));
             }
 
-            public Possible<Unit> Use(Action<IBuildXLKeyValueStore, CancellationToken> action)
+            public Possible<Unit> Use(Action<RocksDbStore, CancellationToken> action)
             {
                 using var token = _accessorLock.AcquireReadLock();
-                return _accessor.Use((store, killSwitch) =>
-                {
-                    action(store, killSwitch);
-                    return Unit.Void;
-                }, _killSwitch.Token);
+                return _accessor.Use(
+                    static (store, state) => { state.action(store, state.killSwitch); return Unit.Void; },
+                    (killSwitch: _killSwitch.Token, action));
             }
 
-            public Possible<TResult> Use<TResult>(Func<IBuildXLKeyValueStore, CancellationToken, TResult> action)
+            public Possible<TResult> Use<TResult>(Func<RocksDbStore, CancellationToken, TResult> action)
             {
                 using var token = _accessorLock.AcquireReadLock();
-                return _accessor.Use((store, killSwitch) => action(store, killSwitch), _killSwitch.Token);
+                return _accessor.Use(
+                    static (store, state) => state.action(store, state.killSwitch),
+                    (killSwitch: _killSwitch.Token, action));
             }
         }
     }

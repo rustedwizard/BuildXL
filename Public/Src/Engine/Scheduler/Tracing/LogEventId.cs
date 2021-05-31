@@ -24,6 +24,7 @@ namespace BuildXL.Scheduler.Tracing
         PipIpcFailedDueToInvalidInput = 77,
 
         DeleteFullySealDirectoryUnsealedContents = 244,
+        FailedToSealDirectory = 245,
         PipsSucceededStats = 227,
         PipsFailedStats = 228,
         StatsPerformanceLog = 459,
@@ -33,7 +34,6 @@ namespace BuildXL.Scheduler.Tracing
         CacheDescriptorMissForContentFingerprint = 201,
         ContentMissAfterContentFingerprintCacheDescriptorHit = 202,
         PipOutputDeployedFromCache = 204,
-
 
         InvalidProcessPipDueToExplicitArtifactsInOpaqueDirectory = 219,
         IgnoringUntrackedSourceFileNotUnderMount = 222,
@@ -182,6 +182,8 @@ namespace BuildXL.Scheduler.Tracing
         ConvertToRunnableFromCacheFailed = 2731,
         TwoPhasePublishingCacheEntryFailedError = 2732,
         PipMaterializeDependenciesFromCacheTimeoutFailure = 2740,
+        PipHydrateFileFailure = 2741,
+        PipHydratedFile = 2742,
 
         LogMismatchedDetoursErrorCount = 2922,
         PipExitedWithAzureWatsonExitCode = 2924,
@@ -215,9 +217,11 @@ namespace BuildXL.Scheduler.Tracing
         StorageCacheCleanDirectoryOutputError = 3615,
         StorageReparsePointInOutputDirectoryWarning = 3616,
 
-        PipInputVerificationMismatchRecovery = 3617,
-        PipInputVerificationMismatchRecoveryExpectedExistence = 3618,
-        PipInputVerificationMismatchRecoveryExpectedNonExistence = 3619,
+        // Deprecated (source file materialization)
+        // was PipInputVerificationMismatchRecovery = 3617,
+        // was PipInputVerificationMismatchRecoveryExpectedExistence = 3618,
+        // was PipInputVerificationMismatchRecoveryExpectedNonExistence = 3619,
+
         UnexpectedlySmallObservedInputCount = 3620,
         HistoricPerfDataCacheTrace = 3621,
         CancellingProcessPipExecutionDueToResourceExhaustion = 3622,
@@ -286,9 +290,9 @@ namespace BuildXL.Scheduler.Tracing
 
         DistributionExecutePipRequest = 5011,
         DistributionFinishedPipRequest = 5012,
-        DistributionMasterWorkerProcessOutputContent = 5013,
-        // DistributionStartDownThrottleMasterLocal = 5014,
-        // DistributionStopDownThrottleMasterLocal = 5015,
+        DistributionOrchestratorWorkerProcessOutputContent = 5013,
+        // DistributionStartDownThrottleOrchestratorLocal = 5014,
+        // DistributionStopDownThrottleOrchestratorLocal = 5015,
 
         CriticalPathPipRecord = 5016,
         CriticalPathChain = 5017,
@@ -409,7 +413,7 @@ namespace BuildXL.Scheduler.Tracing
         ApiServerReceivedMessage = 12107,
         ApiServerReceivedWarningMessage = 12108,
         ApiServerStoreBuildManifestHashToCacheFailed = 12109,
-        ErrorApiServerGetBuildManifestHashFromCacheFailed = 12110,
+        ErrorApiServerGetBuildManifestHashFromLocalFileFailed = 12110,
 
         // Copy file cont'd.
         // Elsewhere = 12201,
@@ -449,6 +453,7 @@ namespace BuildXL.Scheduler.Tracing
         DirtyBuildProcessNotSkipped = 14202,
         DirtyBuildStats = 14203,
         MinimumWorkersNotSatisfied = 14204,
+        WorkerCountBelowWarningThreshold = 14205,
         BuildSetCalculatorStats = 14210,
         BuildSetCalculatorProcessStats = 14211,
         BuildSetCalculatorScheduleDependenciesUntilCleanAndMaterializedStats = 14212,
@@ -483,6 +488,24 @@ namespace BuildXL.Scheduler.Tracing
         FileContentManagerTryMaterializeFileAsyncFileArtifactAvailableLater = 14518,
         ModuleWorkerMapping = 14519,
         AddedNewWorkerToModuleAffinity = 14520,
+
+        SkippingDownstreamPipsDueToPipSuccess = 14521,
+
+        // Dump pip lite analyzer
+        DumpPipLiteUnableToCreateLogDirectory = 14522,
+        DumpPipLiteUnableToSerializePip = 14523,
+        DumpPipLiteUnableToSerializePipDueToBadArgument = 14524,
+        DumpPipLiteUnableToSerializePipDueToBadPath = 14525,
+        RuntimeDumpPipLiteLogLimitReached = 14526,
+
+        RecordFileForBuildManifestAfterGenerateBuildManifestFileList = 14527,
+        GenerateBuildManifestFileListFoundDuplicateHashes = 14528,
+        BuildManifestGeneratorFoundDuplicateHash = 14529,
+        GenerateBuildManifestFileListResult = 14530,
+
+        LogCachedPipOutput = 14531,
+
+        DumpPipLiteSettingsMismatch = 14532,
 
         // was DependencyViolationGenericWithRelatedPip_AsError = 25000,
         // was DependencyViolationGeneric_AsError = 25001,

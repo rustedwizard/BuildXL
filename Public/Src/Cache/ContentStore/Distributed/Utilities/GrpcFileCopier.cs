@@ -16,6 +16,7 @@ using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
 using BuildXL.Cache.ContentStore.Service.Grpc;
 using BuildXL.Cache.ContentStore.Sessions;
+using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.Utils;
 
@@ -26,10 +27,10 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
     /// </summary>
     public class GrpcFileCopier : IRemoteFileCopier, IContentCommunicationManager, IDisposable
     {
+        private static readonly Tracer Tracer = new Tracer(nameof(GrpcFileCopier));
+
         private readonly Context _context;
         private readonly GrpcFileCopierConfiguration _configuration;
-
-        private const string GrpcUriSchemePrefix = "grpc://";
 
         private readonly GrpcCopyClientCache _clientCache;
 
@@ -39,22 +40,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
         /// The resolved DNS host name or local machine name
         /// </summary>
         private readonly string _localMachineName;
-
-        /// <summary>
-        /// Extract the host name from an AbsolutePath's segments.
-        /// </summary>
-        public static string GetHostName(bool isLocal, IReadOnlyList<string> segments)
-        {
-            if (OperatingSystemHelper.IsWindowsOS)
-            {
-                return isLocal ? "localhost" : segments.First();
-            }
-            else
-            {
-                // Linux always uses the first segment as the host name.
-                return segments.First();
-            }
-        }
 
         /// <summary>
         /// Constructor for <see cref="GrpcFileCopier"/>.
@@ -67,14 +52,39 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
 
             _junctionsByDirectory = configuration.JunctionsByDirectory?.ToDictionary(kvp => new AbsolutePath(kvp.Key), kvp => new AbsolutePath(kvp.Value)) ?? new Dictionary<AbsolutePath, AbsolutePath>();
 
-            try
+            if (configuration.UseDomainName)
             {
-                _localMachineName = System.Net.Dns.GetHostName();
+                try
+                {
+                    var ipProperties = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties();
+                    var hostName = ipProperties.HostName;
+                    var domainName = ipProperties.DomainName;
+                    if (!string.IsNullOrEmpty(domainName) && !string.IsNullOrEmpty(hostName))
+                    {
+                        _localMachineName = $"{hostName}.{domainName}";
+                    }
+                    else
+                    {
+                        Tracer.Warning(context, $"Failed to get machine name and domain from `IPGlobalProperties.GetIPGlobalProperties` [Host={hostName} Domain={domainName}]. Falling back to `Dns.GetHostName`.");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Tracer.Warning(context, $"Failed to get machine name from `IPGlobalProperties.GetIPGlobalProperties`. Falling back to `Dns.GetHostName`. {e}");
+                }
             }
-            catch (Exception e)
+
+            if (_localMachineName == null)
             {
-                context.Warning($"Failed to get machine name from `Dns.GetHostName`. Falling back to `Environment.MachineName`. {e.ToString()}");
-                _localMachineName = Environment.MachineName;
+                try
+                {
+                    _localMachineName = System.Net.Dns.GetHostName();
+                }
+                catch (Exception e)
+                {
+                    Tracer.Warning(context, $"Failed to get machine name from `Dns.GetHostName`. Falling back to `Environment.MachineName`. {e}");
+                    _localMachineName = Environment.MachineName;
+                }
             }
         }
 
@@ -82,15 +92,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
         public void Dispose()
         {
             _clientCache.Dispose();
-        }
-
-        /// <inheritdoc />
-        public Task<FileExistenceResult> CheckFileExistsAsync(OperationContext context, ContentLocation sourceLocation)
-        {
-            // Extract host and port from machine location
-            (string host, int port) = ExtractHostInfo(sourceLocation.Machine);
-
-            return _clientCache.UseAsync(context, host, port, (nestedContext, client) => client.CheckFileExistsAsync(nestedContext, sourceLocation.Hash));
         }
 
         /// <inheritdoc />
@@ -109,7 +110,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
                 // ResourcePoolV2 may throw TimeoutException if the connection fails.
                 // Wrapping this error and converting it to an "error code".
 
-                return await _clientCache.UseWithInvalidationAsync(context, host, _configuration.GrpcPort, async (nestedContext, clientWrapper) =>
+                return await _clientCache.UseWithInvalidationAsync(context, host, port, async (nestedContext, clientWrapper) =>
                 {
                     var result = await clientWrapper.Value.CopyToAsync(nestedContext, sourceLocation.Hash, destinationStream, options);
                     InvalidateResourceIfNeeded(nestedContext, options, result, clientWrapper);
@@ -190,24 +191,8 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
 
         private (string host, int port) ExtractHostInfo(MachineLocation machineLocation)
         {
-            var path = machineLocation.Path;
-            if (path.StartsWith(GrpcUriSchemePrefix))
-            {
-                // This is a uri format machine location
-                var uri = new Uri(path);
-                return (uri.Host, uri.Port);
-            }
-
-            var sourcePath = new AbsolutePath(path);
-
-            // TODO: Keep the segments in the AbsolutePath object?
-            // TODO: Indexable structure?
-            var segments = sourcePath.GetSegments();
-            Contract.Assert(segments.Count >= 4);
-
-            string host = GetHostName(sourcePath.IsLocal, segments);
-
-            return (host, _configuration.GrpcPort);
+            var info = machineLocation.ExtractHostInfo();
+            return (info.host, info.port ?? _configuration.GrpcPort);
         }
 
         /// <inheritdoc />
@@ -215,7 +200,7 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
         {
             if (_configuration.UseUniversalLocations)
             {
-                return new MachineLocation($"{GrpcUriSchemePrefix}{_localMachineName}:{_configuration.GrpcPort}/");
+                return new MachineLocation($"{MachineLocation.GrpcUriSchemePrefix}{_localMachineName}:{_configuration.GrpcPort}/");
             }
 
             if (!cacheRoot.IsLocal)

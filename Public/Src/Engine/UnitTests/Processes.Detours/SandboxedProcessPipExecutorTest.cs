@@ -1134,11 +1134,13 @@ namespace Test.BuildXL.Processes.Detours
 
                 SandboxedProcessPipExecutionResult result = await RunProcess(
                     context,
-                    new SandboxConfiguration {
+                    new SandboxConfiguration
+                    {
                         FileAccessIgnoreCodeCoverage = true,
                         FailUnexpectedFileAccesses = false,
                         UnsafeSandboxConfiguration = new UnsafeSandboxConfiguration { IgnoreUndeclaredAccessesUnderSharedOpaques = false },
-                        LogObservedFileAccesses = true},
+                        LogObservedFileAccesses = true
+                    },
                     pip,
                     fileAccessAllowlist: null,
                     new Dictionary<string, string>(),
@@ -1339,10 +1341,10 @@ namespace Test.BuildXL.Processes.Detours
                 await AssertProcessFailsPreparation(
                     context,
                    new SandboxConfiguration
-                    {
-                        FailUnexpectedFileAccesses = false,
-                        FileAccessIgnoreCodeCoverage = true
-                    },
+                   {
+                       FailUnexpectedFileAccesses = false,
+                       FileAccessIgnoreCodeCoverage = true
+                   },
                     pip);
             }
 
@@ -1678,7 +1680,7 @@ namespace Test.BuildXL.Processes.Detours
                 AbsolutePath workingDirectoryAbsolutePath = AbsolutePath.Create(context.PathTable, TestOutputDirectory);
 
                 var arguments = new PipDataBuilder(context.PathTable.StringTable);
-                arguments.Add("/d /c start " + CmdHelper.CmdX64 + " /k");  // Starts child process that hangs on console input and has to be killed by job object.
+                arguments.Add("/d /c start /B " + CmdHelper.CmdX64 + " /k");  // Starts child process that hangs on console input and has to be killed by job object.
 
                 var pip = new Process(
                     executableFileArtifact,
@@ -1708,9 +1710,15 @@ namespace Test.BuildXL.Processes.Detours
                     additionalTempDirectories: ReadOnlyArray<AbsolutePath>.Empty,
                     nestedProcessTerminationTimeout: TimeSpan.Zero);
 
+                AbsolutePath.TryCreate(context.PathTable, TemporaryDirectory, out AbsolutePath dumpDir);
+
                 SandboxedProcessPipExecutionResult result = await RunProcess(
                     context,
-                    new SandboxConfiguration { FileAccessIgnoreCodeCoverage = true },
+                    new SandboxConfiguration
+                    {
+                        FileAccessIgnoreCodeCoverage = true,
+                        SurvivingPipProcessChildrenDumpDirectory = dumpDir.Combine(context.PathTable, LogFileExtensions.SurvivingPipProcessChildrenDumpDirectory)
+                    },
                     pip,
                     null,
                     new Dictionary<string, string>(),
@@ -1723,9 +1731,10 @@ namespace Test.BuildXL.Processes.Detours
             // the current machine state. And each cmd might have its own conhost.
             int numChildrenSurvivedErrors = EventListener.GetEventCount((int)ProcessesLogEventId.PipProcessChildrenSurvivedError);
             SetExpectedFailures(1 + numChildrenSurvivedErrors, 0,
-                "DX0041",  // ProcessesLogEventId.PipProcessChildrenSurvivedError
+                "DX0041",   // ProcessesLogEventId.PipProcessChildrenSurvivedError
                 "DX0064");  // ProcessesLogEventId.PipProcessChildrenSurvivedKilled
             XAssert.IsTrue(numChildrenSurvivedErrors >= 1 && numChildrenSurvivedErrors <= 3, $"Child processes: {numChildrenSurvivedErrors}");
+            AssertVerboseEventLogged(ProcessesLogEventId.DumpSurvivingPipProcessChildrenStatus, count: numChildrenSurvivedErrors, allowMore: true);
         }
 
         [Fact]
@@ -1740,7 +1749,7 @@ namespace Test.BuildXL.Processes.Detours
                 AbsolutePath workingDirectoryAbsolutePath = AbsolutePath.Create(context.PathTable, TestOutputDirectory);
 
                 var arguments = new PipDataBuilder(context.PathTable.StringTable);
-                arguments.Add("/d /c start " + CmdHelper.CmdX64 + " /k");  // Starts child process that hangs on console input and has to be killed by job object.
+                arguments.Add("/d /c start /B " + CmdHelper.CmdX64 + " /k");  // Starts child process that hangs on console input and has to be killed by job object.
 
                 var pip = new Process(
                     executableFileArtifact,
@@ -2072,10 +2081,8 @@ namespace Test.BuildXL.Processes.Detours
             }
         }
 
-        [TheoryIfSupported(requiresSymlinkPermission: true, requiresWindowsBasedOperatingSystem: true)]
-        [InlineData(true)]
-        [InlineData(false)]
-        public async Task DirSymlinksAreProperlyResolvedAsync(bool managedReparsePointProcessing)
+        [FactIfSupported(requiresSymlinkPermission: true, requiresWindowsBasedOperatingSystem: true)]
+        public async Task DirSymlinksAreProperlyResolvedAsync()
         {
             var context = BuildXLContext.CreateInstanceForTesting();
             var symbolTable = context.SymbolTable;
@@ -2189,8 +2196,7 @@ namespace Test.BuildXL.Processes.Detours
                         LogObservedFileAccesses = true,
                         UnsafeSandboxConfiguration = new UnsafeSandboxConfiguration
                         {
-                            ProcessSymlinkedAccesses = managedReparsePointProcessing,
-                            IgnoreFullReparsePointResolving = managedReparsePointProcessing
+                            IgnoreFullReparsePointResolving = false
                         }
                     },
                     pip,
@@ -2200,13 +2206,10 @@ namespace Test.BuildXL.Processes.Detours
                     new TestDirectoryArtifactContext(
                             SealDirectoryKind.SharedOpaque,
                             new FileArtifact[] { FileArtifact.CreateOutputFile(inputUnderSharedOpaqueAbsolutePath) }),
-                    symlinkedAccessResolver: new SymlinkedAccessResolver(context, translator));
+                    reparsePointResolver: new ReparsePointResolver(context, translator));
 
                 var allReportedFileAccesses = result.ObservedFileAccesses.SelectMany(fa => fa.Accesses).ToList();
-                if (!managedReparsePointProcessing)
-                {
-                    allReportedFileAccesses.AddRange(result.UnexpectedFileAccesses.FileAccessViolationsNotAllowlisted);
-                }
+                allReportedFileAccesses.AddRange(result.UnexpectedFileAccesses.FileAccessViolationsNotAllowlisted);
 
                 XAssert.AreEqual(SandboxedProcessPipExecutionStatus.Succeeded, result.Status);
 
@@ -2335,7 +2338,7 @@ namespace Test.BuildXL.Processes.Detours
             SemanticPathExpander expander,
             IDirectoryArtifactContext directoryArtifactContext = null,
             Action<int> processIdListener = null,
-            SymlinkedAccessResolver symlinkedAccessResolver = null)
+            ReparsePointResolver reparsePointResolver = null)
         {
             Func<string, Task<bool>> dummyMakeOutputPrivate = pathStr => Task.FromResult(true);
             var loggingContext = CreateLoggingContextForTest();
@@ -2370,7 +2373,7 @@ namespace Test.BuildXL.Processes.Detours
                 tempDirectoryCleaner: MoveDeleteCleaner,
                 processIdListener: processIdListener,
                 directoryTranslator: directoryTranslator,
-                symlinkedAccessResolver: symlinkedAccessResolver).RunAsync(sandboxConnection: GetSandboxConnection());
+                reparsePointResolver: reparsePointResolver).RunAsync(sandboxConnection: GetSandboxConnection());
         }
 
         private static void VerifyExitCode(BuildXLContext context, SandboxedProcessPipExecutionResult result, int expectedExitCode)

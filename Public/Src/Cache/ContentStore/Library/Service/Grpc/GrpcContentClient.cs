@@ -8,6 +8,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Extensions;
+using BuildXL.Cache.ContentStore.FileSystem;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Extensions;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
@@ -82,17 +83,16 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 FileReplacementMode.None,
                 FileRealizationMode.HardLink);
 
-            return await OpenStreamAsync(operationContext, tempPath, placeFileResult);
-            ;
+            return OpenStream(operationContext, tempPath, placeFileResult);
         }
 
-        private async Task<OpenStreamResult> OpenStreamAsync(OperationContext context, AbsolutePath tempPath, PlaceFileResult placeFileResult)
+        private OpenStreamResult OpenStream(OperationContext context, AbsolutePath tempPath, PlaceFileResult placeFileResult)
         {
             if (placeFileResult)
             {
                 try
                 {
-                    StreamWithLength? stream = await FileSystem.OpenReadOnlyAsync(tempPath, FileShare.Delete | FileShare.Read);
+                    StreamWithLength? stream = FileSystem.TryOpenReadOnly(tempPath, FileShare.Delete | FileShare.Read);
                     if (stream == null)
                     {
                         throw new ClientCanRetryException(context, $"Failed to open temp file {tempPath}. The service may have restarted");
@@ -132,7 +132,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                         ContentHash = contentHash.ToByteString(),
                         Header = sessionContext.CreateHeader(),
                     }),
-                response => UnpackPinResult(response.Header)
+                response => UnpackPinResult(response.Header, response.Info)
                 );
         }
 
@@ -174,7 +174,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             int sessionId = sessionContext.Value.SessionId;
 
             var pinResults = new List<Indexed<PinResult>>();
-            var bulkPinRequest = new PinBulkRequest { Header = new RequestHeader(context.Id, sessionId) };
+            var bulkPinRequest = new PinBulkRequest { Header = new RequestHeader(context.TraceId, sessionId) };
             foreach (var contentHash in chunk)
             {
                 bulkPinRequest.Hashes.Add(
@@ -186,10 +186,11 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                 async () => await Client.PinBulkAsync(bulkPinRequest),
                 throwFailures: false);
 
+            var info = underlyingBulkPinResponse.Info.Count == 0 ? null : underlyingBulkPinResponse.Info;
             foreach (var response in underlyingBulkPinResponse.Header)
             {
                 await ResetOnUnknownSessionAsync(context, response.Value, sessionId);
-                pinResults.Add(UnpackPinResult(response.Value).WithIndex(response.Key + baseIndex));
+                pinResults.Add(UnpackPinResult(response.Value, info?[response.Key]).WithIndex(response.Key + baseIndex));
             }
 
             ServiceClientTracer.LogPinResults(context, pinResults.Select(r => chunk[r.Index - baseIndex]).ToList(), pinResults.Select(r => r.Item).ToList());
@@ -197,14 +198,16 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             return pinResults.AsTasks();
         }
 
-        private PinResult UnpackPinResult(ResponseHeader header)
+        private PinResult UnpackPinResult(ResponseHeader header, PinResponseInfo? info)
         {
             // Workaround: Handle the service returning negative result codes in error cases
             var resultCode = header.Result < 0 ? PinResult.ResultCode.Error : (PinResult.ResultCode)header.Result;
             string errorMessage = header.ErrorMessage;
-            return string.IsNullOrEmpty(errorMessage)
-                ? new PinResult(resultCode)
+            var result = string.IsNullOrEmpty(errorMessage)
+                ? new PinResult(resultCode) { ContentSize = info?.ContentSize ?? -1 }
                 : new PinResult(resultCode, errorMessage, header.Diagnostics);
+
+            return result;
         }
 
         /// <inheritdoc />
@@ -410,7 +413,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
             {
                 DeleteContentRequest request = new DeleteContentRequest()
                 {
-                    TraceId = context.TracingContext.Id.ToString(),
+                    TraceId = context.TracingContext.TraceId.ToString(),
                     HashType = (int)hash.HashType,
                     ContentHash = hash.ToByteString(),
                     DeleteLocalOnly = deleteLocalOnly
@@ -484,7 +487,7 @@ namespace BuildXL.Cache.ContentStore.Service.Grpc
                     }
                 }
 
-                using (var fileStream = await FileSystem.OpenAsync(tempFile, FileAccess.Write, FileMode.Create, FileShare.Delete))
+                using (var fileStream = FileSystem.TryOpenForWrite(tempFile, stream.TryGetStreamLength(), FileMode.Create, FileShare.Delete))
                 {
                     if (fileStream == null)
                     {

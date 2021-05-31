@@ -3,8 +3,13 @@
 
 using System;
 using System.Diagnostics.ContractsLight;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
+
+#pragma warning disable CS3001 // CLS
+#pragma warning disable CS3002
+#pragma warning disable CS3003
 
 namespace BuildXL.Cache.ContentStore.Hashing
 {
@@ -292,7 +297,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         }
 
         /// <inheritdoc />
-        public bool Equals(MurmurHash3 other)
+        public bool Equals([AllowNull]MurmurHash3 other)
         {
             return other.High == High && other.Low == Low;
         }

@@ -46,7 +46,7 @@ namespace BuildXL.Cache.MemoizationStore.Test.Sessions
             LocalServerConfiguration contentServerConfiguration,
             ServiceClientContentStoreConfiguration clientConfiguration)
         {
-            _server = new LocalCacheServer(fileSystem, logger, clientConfiguration.Scenario, contentStoreFactory, contentServerConfiguration);
+            _server = new LocalCacheServer(fileSystem, logger, clientConfiguration.Scenario, contentStoreFactory, contentServerConfiguration, Capabilities.All);
             _client = new ServiceClientCache(logger, fileSystem, clientConfiguration);
             SetThreadPoolSizes();
         }
@@ -92,7 +92,7 @@ namespace BuildXL.Cache.MemoizationStore.Test.Sessions
         public Task<GetStatsResult> GetStatsAsync(Context context) => _client.GetStatsAsync(context);
 
         /// <inheritdoc />
-        public System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context) => _client.EnumerateStrongFingerprints(context);
+        public IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context) => _client.EnumerateStrongFingerprints(context);
 
         private static void SetThreadPoolSizes()
         {

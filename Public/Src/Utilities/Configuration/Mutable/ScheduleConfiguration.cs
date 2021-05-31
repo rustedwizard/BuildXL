@@ -22,6 +22,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             TreatDirectoryAsAbsentFileOnHashingInputContent = true;
             MaximumRamUtilizationPercentage = 90;
             MaximumCommitUtilizationPercentage = 95;
+            CriticalCommitUtilizationPercentage = 98;
             MaximumAllowedMemoryPressureLevel = Memory.PressureLevel.Normal;
 
             AllowCopySymlink = true;
@@ -142,8 +143,8 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
             TelemetryTagPrefix = template.TelemetryTagPrefix;
 
-            MasterCpuMultiplier = template.MasterCpuMultiplier;
-            MasterCacheLookupMultiplier = template.MasterCacheLookupMultiplier;
+            OrchestratorCpuMultiplier = template.OrchestratorCpuMultiplier;
+            OrchestratorCacheLookupMultiplier = template.OrchestratorCacheLookupMultiplier;
             SkipHashSourceFile = template.SkipHashSourceFile;
 
             UnsafeDisableSharedOpaqueEmptyDirectoryScrubbing = template.UnsafeDisableSharedOpaqueEmptyDirectoryScrubbing;
@@ -156,6 +157,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MaxSealDirs = template.MaxSealDirs;
             EnableHistoricCommitMemoryProjection = template.EnableHistoricCommitMemoryProjection;
             MaximumCommitUtilizationPercentage = template.MaximumCommitUtilizationPercentage;
+            CriticalCommitUtilizationPercentage = template.CriticalCommitUtilizationPercentage;
             DelayedCacheLookupMinMultiplier = template.DelayedCacheLookupMinMultiplier;
             DelayedCacheLookupMaxMultiplier = template.DelayedCacheLookupMaxMultiplier;
             MaxRetriesDueToLowMemory = template.MaxRetriesDueToLowMemory;
@@ -330,10 +332,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public string TelemetryTagPrefix { get; set; }
 
         /// <inheritdoc />
-        public double? MasterCpuMultiplier { get; set; }
+        public double? OrchestratorCpuMultiplier { get; set; }
 
         /// <inheritdoc />
-        public double? MasterCacheLookupMultiplier { get; set; }
+        public double? OrchestratorCacheLookupMultiplier { get; set; }
 
         /// <inheritdoc />
         public bool SkipHashSourceFile { get; set; }
@@ -373,6 +375,9 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public int MaximumCommitUtilizationPercentage { get; set; }
+
+        /// <inheritdoc />
+        public int CriticalCommitUtilizationPercentage { get; set; }
 
         /// <inheritdoc />
         public double? DelayedCacheLookupMinMultiplier { get; set; }

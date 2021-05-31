@@ -3,71 +3,53 @@
 
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.ContractsLight;
-using System.Diagnostics.Tracing;
-using System.IO;
-using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
-using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Engine.Cache.Fingerprints;
 using BuildXL.Engine.Distribution.Grpc;
 using BuildXL.Engine.Distribution.OpenBond;
 using BuildXL.Engine.Tracing;
 using BuildXL.Pips;
-using BuildXL.Pips.Operations;
 using BuildXL.Scheduler;
-using BuildXL.Scheduler.Artifacts;
 using BuildXL.Scheduler.Distribution;
-using BuildXL.Storage;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tasks;
-using BuildXL.Utilities.Tracing;
-using static BuildXL.Utilities.FormattableStringEx;
+using static BuildXL.Engine.Distribution.Grpc.ClientConnectionManager;
 
 namespace BuildXL.Engine.Distribution
 {
     /// <summary>
+    /// Service methods called by the RPC layer as part of the RPC started in the orchestrator
+    /// </summary>
+    /// <remarks>This interface is marked internal to reduce visibility to the distribution layer only</remarks>
+    internal interface IWorkerService
+    {
+        /// <summary>
+        /// Performs attachment 
+        /// </summary>
+        void Attach(BuildStartData buildStartData, string sender);
+
+        /// <summary>
+        /// Requests execution of a pip build request
+        /// </summary>
+        /// <param name="request"></param>
+        void ExecutePips(PipBuildRequest request);
+
+        /// <summary>
+        /// Notifies the WorkerService that the orchestrator has issued an exit request
+        /// </summary>
+        /// <param name="failure">If present, the build will be considered a failure</param>
+        void ExitRequested(Optional<string> failure);
+    }
+
+    /// <summary>
     /// Defines service run on worker nodes in a distributed build.
     /// </summary>
-    /// <remarks>
-    /// There are 2 timers to make sure both master and worker are alive:
-    /// - The master timer sends heartbeat calls. The worker notes that the master is alive. It also
-    /// retries all previously failed calls back to the master.
-    /// - The service timer checks for a dead master. If it discovers that the master hasn't called
-    /// for EngineEnvironmentSettings.DistributionInactiveTimeout (or WorkerAttachTimeout if Attach is still not called),
-    /// the service will shut down.
-    /// </remarks>
-    public sealed partial class WorkerService : IDistributionService
+    public sealed partial class WorkerService : DistributionService, IWorkerService
     {
-        #region Writer Pool
-
-        private readonly ObjectPool<BuildXLWriter> m_writerPool = new ObjectPool<BuildXLWriter>(CreateWriter, (Action<BuildXLWriter>)CleanupWriter);
-
-        private static void CleanupWriter(BuildXLWriter writer)
-        {
-            writer.BaseStream.SetLength(0);
-        }
-
-        [SuppressMessage("Microsoft.Reliability", "CA2000:DisposeObjectsBeforeLosingScope", Justification = "Disposal is not needed for memory stream")]
-        private static BuildXLWriter CreateWriter()
-        {
-            return new BuildXLWriter(
-                debug: false,
-                stream: new MemoryStream(),
-                leaveOpen: false,
-                logStats: false);
-        }
-
-        #endregion Writer Pool
-
-        private readonly List<ExtendedPipCompletionData> m_executionResultList = new List<ExtendedPipCompletionData>();
-
         /// <summary>
         /// Gets the build start data from the coordinator passed after the attach operation
         /// </summary>
@@ -76,16 +58,13 @@ namespace BuildXL.Engine.Distribution
         /// <summary>
         /// Returns a task representing the completion of the exit operation
         /// </summary>
-        private Task<bool> ExitCompletion => m_exitCompletionSource.Task;
+        internal Task<bool> ExitCompletion => m_exitCompletionSource.Task;
+        private readonly TaskSourceSlim<bool> m_exitCompletionSource;
 
         /// <summary>
         /// Returns a task representing the completion of the attach operation
         /// </summary>
-        private Task<bool> AttachCompletion => m_attachCompletionSource.Task;
-
-        // The timer interval and the total inactivity after which we shut down the worker.
-        // These paraneters are made internal to allow tests speed up the checks.
-        private readonly TaskSourceSlim<bool> m_exitCompletionSource;
+        internal Task<bool> AttachCompletion => m_attachCompletionSource.Task;
         private readonly TaskSourceSlim<bool> m_attachCompletionSource;
 
         private readonly ConcurrentDictionary<(PipId, PipExecutionStep), SinglePipBuildRequest> m_pendingBuildRequests =
@@ -96,177 +75,91 @@ namespace BuildXL.Engine.Distribution
 
         private readonly ConcurrentBigSet<int> m_handledBuildRequests = new ConcurrentBigSet<int>();
 
-        private TimeSpan m_lastHeartbeatTimestamp = TimeSpan.Zero;
-        private Scheduler.Tracing.OperationTracker m_operationTracker;
-
         /// <summary>
         /// Identifies the worker
         /// </summary>
         public uint WorkerId { get; private set; }
 
-        private volatile bool m_hasFailures = false;
-        private volatile string m_masterFailureMessage;
+        private volatile bool m_hasFailures;
+        private volatile string m_failureMessage;
 
         /// <summary>
-        /// Whether master is done with the worker by sending a message to worker.
+        /// Whether orchestrator is done with the worker by sending a message to worker.
         /// </summary>
-        private volatile bool m_isMasterExited;
+        private volatile bool m_isOrchestratorExited;
 
         private LoggingContext m_appLoggingContext;
-        private ExecutionResultSerializer m_resultSerializer;
-        private PipTable m_pipTable;
-        private PipQueue m_pipQueue;
-        private Scheduler.Scheduler m_scheduler;
-        private IPipExecutionEnvironment m_environment;
-        private ForwardingEventListener m_forwardingEventListener;
-        private WorkerServicePipStateManager m_workerPipStateManager;
+        private readonly IWorkerNotificationManager m_notificationManager;
+        private readonly IWorkerPipExecutionService m_pipExecutionService;
         private readonly IConfiguration m_config;
         private readonly ushort m_port;
-        private readonly WorkerRunnablePipObserver m_workerRunnablePipObserver;
-        private readonly DistributionServices m_services;
-        private NotifyMasterExecutionLogTarget m_notifyMasterExecutionLogTarget;
-
-        private readonly Thread m_sendThread;
-        private readonly BlockingCollection<ExtendedPipCompletionData> m_buildResults = new BlockingCollection<ExtendedPipCompletionData>();
-        private readonly int m_maxMessagesPerBatch = EngineEnvironmentSettings.MaxMessagesPerBatch.Value;
-
-        private IMasterClient m_masterClient;
+        
+        private readonly IOrchestratorClient m_orchestratorClient;
         private readonly IServer m_workerServer;
 
         /// <summary>
         /// Class constructor
         /// </summary>
         /// <param name="appLoggingContext">Application-level logging context</param>
-        /// <param name="config">Build config</param>\
+        /// <param name="config">Build config</param>
         /// <param name="buildId">the build id</param>
-        public WorkerService(LoggingContext appLoggingContext, IConfiguration config, string buildId)
+        public WorkerService(LoggingContext appLoggingContext, IConfiguration config, DistributedBuildId buildId) :  
+            this(appLoggingContext,
+                config,
+                buildId,
+                executionService: null,
+                workerServer: null,
+                notificationManager: null,
+                orchestratorClient: null)
+        {
+            m_pipExecutionService = new WorkerPipExecutionService(this);
+            m_notificationManager = new WorkerNotificationManager(this, m_pipExecutionService, appLoggingContext);
+            m_orchestratorClient = new Grpc.GrpcOrchestratorClient(m_appLoggingContext, BuildId);
+            m_workerServer = new Grpc.GrpcWorkerServer(this, appLoggingContext, buildId);
+        }
+
+        internal static WorkerService CreateForTesting(
+            LoggingContext appLoggingContext,
+            IConfiguration config,
+            DistributedBuildId buildId,
+            // The following are used for testing:
+            IWorkerPipExecutionService executionService,
+            IServer server,
+            IWorkerNotificationManager notificationManager,
+            IOrchestratorClient orchestratorClient)
+        {
+            return new WorkerService(appLoggingContext, config, buildId, executionService, server, orchestratorClient, notificationManager);
+        }
+
+        private WorkerService(LoggingContext appLoggingContext, 
+            IConfiguration config,
+            DistributedBuildId buildId, 
+            IWorkerPipExecutionService executionService, 
+            IServer workerServer,
+            IOrchestratorClient orchestratorClient,
+            IWorkerNotificationManager notificationManager) : base(buildId)
         {
             m_appLoggingContext = appLoggingContext;
-            m_config = config;
             m_port = config.Distribution.BuildServicePort;
-            m_services = new DistributionServices(buildId);
-            m_workerServer = new Grpc.GrpcWorkerServer(this, appLoggingContext, buildId);
-
+            m_config = config;
             m_attachCompletionSource = TaskSourceSlim.Create<bool>();
             m_exitCompletionSource = TaskSourceSlim.Create<bool>();
-            m_workerRunnablePipObserver = new WorkerRunnablePipObserver(this);
-            m_sendThread = new Thread(SendBuildResults);
+
+            m_workerServer = workerServer;
+            m_pipExecutionService = executionService;
+            m_notificationManager = notificationManager;
+            m_orchestratorClient = orchestratorClient;
         }
 
-        private void SendBuildResults()
+        internal void Start(EngineSchedule schedule, ExecutionResultSerializer resultSerializer)
         {
-            int numBatchesSent = 0;
-
-            ExtendedPipCompletionData firstItem;
-            while (!m_buildResults.IsCompleted)
-            {
-                try
-                {
-                    firstItem = m_buildResults.Take();
-                }
-                catch (InvalidOperationException)
-                {
-                    // m_buildResults has drained and been completed.
-                    break;
-                }
-
-                m_executionResultList.Clear();
-                m_executionResultList.Add(firstItem);
-
-                while (m_executionResultList.Count < m_maxMessagesPerBatch && m_buildResults.TryTake(out var item))
-                {
-                    m_executionResultList.Add(item);
-                }
-
-                // Ensure all execution log events are flushed before reporting pip results to master
-                // to ensure dependency ordering constraints between pips are maintained inside combined
-                // execution log on master.
-                // NOTE: Actual wait for result is below to allow other serialization of execution results
-                // to run in parallel with flush.
-                var flushExecutionLogTask = EngineEnvironmentSettings.InlineWorkerXLGHandling
-                    ? m_notifyMasterExecutionLogTarget.FlushAsync()
-                    : Task.CompletedTask;
-
-                using (m_services.Counters.StartStopwatch(DistributionCounter.WorkerServiceResultSerializationDuration))
-                {
-                    Parallel.ForEach(m_executionResultList, a => SerializeExecutionResult(a));
-                }
-
-                using (m_services.Counters.StartStopwatch(DistributionCounter.WorkerFlushExecutionLogDuration))
-                {
-                    flushExecutionLogTask.GetAwaiter().GetResult();
-                }
-
-                using (m_services.Counters.StartStopwatch(DistributionCounter.ReportPipsCompletedDuration))
-                {
-                    var callResult = m_masterClient.NotifyAsync(new WorkerNotificationArgs
-                    {
-                        WorkerId = WorkerId,
-                        CompletedPips = m_executionResultList.Select(a => a.SerializedData).ToList()
-                    },
-                    m_executionResultList.Select(a => a.SemiStableHash).ToList()).GetAwaiter().GetResult();
-
-                    if (callResult.Succeeded)
-                    {
-                        foreach (var result in m_executionResultList)
-                        {
-                            m_workerPipStateManager.Transition(result.PipId, WorkerPipState.Reported);
-                            Tracing.Logger.Log.DistributionWorkerFinishedPipRequest(m_appLoggingContext, result.SemiStableHash, ((PipExecutionStep)result.SerializedData.Step).ToString());
-                        }
-
-                        numBatchesSent++;
-                    }
-                    else
-                    {
-                        // Fire-forget exit call with failure.
-                        // If we fail to send notification to master, the worker should fail.
-                        ExitAsync(failure: "Notify event failed to send to master", isUnexpected: true);
-                        break;
-                    }
-                }
-            }
-
-            m_services.Counters.AddToCounter(DistributionCounter.BuildResultBatchesSentToMaster, numBatchesSent);
-        }
-
-        private void SerializeExecutionResult(ExtendedPipCompletionData completionData)
-        {
-            using (var pooledWriter = m_writerPool.GetInstance())
-            {
-                var writer = pooledWriter.Instance;
-                PipId pipId = completionData.PipId;
-
-                m_resultSerializer.Serialize(writer, completionData.ExecutionResult, completionData.PreservePathSetCasing);
-
-                // TODO: ToArray is expensive here. Think about alternatives.
-                var dataByte = ((MemoryStream)writer.BaseStream).ToArray();
-                completionData.SerializedData.ResultBlob = new ArraySegment<byte>(dataByte);
-                m_workerPipStateManager.Transition(pipId, WorkerPipState.Reporting);
-                m_environment.Counters.AddToCounter(m_pipTable.GetPipType(pipId) == PipType.Process ? PipExecutorCounter.ProcessExecutionResultSize : PipExecutorCounter.IpcExecutionResultSize, dataByte.Length);
-            }
-        }
-
-        internal void Start(EngineSchedule schedule)
-        {
-            Contract.Requires(schedule != null);
-            Contract.Requires(schedule.Scheduler != null);
-            Contract.Requires(schedule.SchedulingQueue != null);
-            Contract.Assert(AttachCompletion.IsCompleted && AttachCompletion.GetAwaiter().GetResult(), "ProcessBuildRequests called before finishing attach on worker");
-
-            m_workerPipStateManager = new WorkerServicePipStateManager(this);
-            m_pipTable = schedule.PipTable;
-            m_pipQueue = schedule.SchedulingQueue;
-            m_scheduler = schedule.Scheduler;
-            m_operationTracker = m_scheduler.OperationTracker;
-            m_environment = m_scheduler;
-            m_environment.ContentFingerprinter.FingerprintSalt = BuildStartData.FingerprintSalt;
-            m_environment.State.PipEnvironment.MasterEnvironmentVariables = BuildStartData.EnvironmentVariables;
-            m_resultSerializer = new ExecutionResultSerializer(maxSerializableAbsolutePathIndex: schedule.MaxSerializedAbsolutePath, executionContext: m_scheduler.Context);
-            m_forwardingEventListener = new ForwardingEventListener(this);
+            Contract.Assert(AttachCompletion.IsCompleted && AttachCompletion.GetAwaiter().GetResult(), "Start called before finishing attach on worker");
+            m_pipExecutionService.Start(schedule, BuildStartData);
+            m_notificationManager.Start(m_orchestratorClient, schedule, new PipResultSerializer(resultSerializer));
         }
 
         /// <summary>
-        /// Connects to the master and enables this node to receive build requests
+        /// Connects to the orchestrator and enables this node to receive build requests
         /// </summary>
         internal async Task<bool> WhenDoneAsync()
         {
@@ -274,41 +167,38 @@ namespace BuildXL.Engine.Distribution
 
             bool success = await SendAttachCompletedAfterProcessBuildRequestStartedAsync();
 
-            // Wait until the build finishes or we discovered that the master is dead
-            success &= await ExitCompletion;
-
+            // Wait until the build finishes or we discovered that the orchestrator is dead
+            success &= await ExitCompletion; 
+            
             success &= !m_hasFailures;
-            if (m_masterFailureMessage != null)
+            if (m_failureMessage != null)
             {
-                Logger.Log.DistributionWorkerExitFailure(m_appLoggingContext, m_masterFailureMessage);
+                Logger.Log.DistributionWorkerExitFailure(m_appLoggingContext, m_failureMessage);
             }
 
-            m_pipQueue.SetAsFinalized();
+            m_pipExecutionService.WhenDone();
 
             return success;
         }
 
         /// <summary>
-        /// Waits for the master to attach synchronously
+        /// Waits for the orchestrator to attach synchronously
         /// </summary>
-        internal bool WaitForMasterAttach()
+        internal bool WaitForOrchestratorAttach()
         {
-            Logger.Log.DistributionWaitingForMasterAttached(m_appLoggingContext);
-
+            Logger.Log.DistributionWaitingForOrchestratorAttached(m_appLoggingContext);
+            
             var timeout = GrpcSettings.WorkerAttachTimeout;
-            while (!AttachCompletion.Wait(timeout))
+            if (!AttachCompletion.Wait(timeout))
             {
-                if ((TimestampUtilities.Timestamp - m_lastHeartbeatTimestamp) > timeout)
-                {
-                    Exit(failure: "Timed out waiting for attach request from master", isUnexpected: true);
-                    Logger.Log.DistributionWorkerTimeoutFailure(m_appLoggingContext);
-                    return false;
-                }
+                Logger.Log.DistributionWorkerTimeoutFailure(m_appLoggingContext);
+                Exit(failure: "Timed out waiting for attach request from orchestrator", isUnexpected: true);
+                return false;
             }
 
             if (!AttachCompletion.Result)
             {
-                Logger.Log.DistributionInactiveMaster(m_appLoggingContext, (int)timeout.TotalMinutes);
+                Logger.Log.DistributionInactiveOrchestrator(m_appLoggingContext, (int)timeout.TotalMinutes);
                 return false;
             }
 
@@ -316,62 +206,40 @@ namespace BuildXL.Engine.Distribution
         }
 
         /// <nodoc/>
-        public void ExitCallReceivedFromMaster()
+        void IWorkerService.ExitRequested(Optional<string> failure)
         {
-            m_isMasterExited = true;
+            m_isOrchestratorExited = true;
             Logger.Log.DistributionExitReceived(m_appLoggingContext);
-        }
-
-
-        /// <nodoc/>
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("AsyncUsage", "AsyncFixer03:FireForgetAsyncVoid")]
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("AsyncUsage", "AsyncFixer02:MissingAsyncOpportunity")]
-        public async void ExitAsync(string failure, bool isUnexpected = false)
-        {
-            await Task.Yield();
-            Exit(failure, isUnexpected);
+            Exit(failure);
         }
 
         /// <nodoc/>
-        public void Exit(string failure, bool isUnexpected = false)
+        public void Exit(Optional<string> failure = default, bool isUnexpected = false)
         {
-            m_buildResults.CompleteAdding();
-            if (m_sendThread.IsAlive)
-            {
-                m_sendThread.Join();
-            }
-
-            // The execution log target can be null if the worker failed to attach to master
-            if (m_notifyMasterExecutionLogTarget != null)
-            {
-                // Remove the notify master target to ensure no further events are sent to it.
-                // Otherwise, the events that are sent to a disposed target would cause crashes.
-                m_scheduler.RemoveExecutionLogTarget(m_notifyMasterExecutionLogTarget);
-                // Dispose the execution log target to ensure all events are flushed and sent to master
-                m_notifyMasterExecutionLogTarget.Dispose();
-            }
-
-            // Dispose the event listener to ensure all events are sent to master.
-            m_forwardingEventListener?.Dispose();
-
-            m_masterClient?.CloseAsync().GetAwaiter().GetResult();
+            m_notificationManager.Exit();
+            m_orchestratorClient.CloseAsync().GetAwaiter().GetResult();
 
             m_attachCompletionSource.TrySetResult(false);
-            bool reportSuccess = string.IsNullOrEmpty(failure);
-
+            var reportSuccess = !failure.HasValue;
+            
             if (!reportSuccess)
             {
-                m_masterFailureMessage = failure;
                 m_hasFailures = true;
+                m_failureMessage = failure.Value;
             }
 
-            if (isUnexpected && m_isMasterExited)
+            if (isUnexpected && m_isOrchestratorExited)
             {
-                // If the worker unexpectedly exits the build after master exits the build, 
+                // If the worker unexpectedly exits the build after orchestrator exits the build, 
                 // we should log a message to keep track of the frequency.
-                Logger.Log.DistributionWorkerUnexpectedFailureAfterMasterExits(m_appLoggingContext);
+                Logger.Log.DistributionWorkerUnexpectedFailureAfterOrchestratorExits(m_appLoggingContext);
             }
 
+            // Request server shut down before exiting, so the orchestrator stops requests our way
+            // gRPC ensures that any pending calls will still be served as part of the shutdown process,
+            // so there is no problem if we're executing this as part of an "exit" RPC (which is the normal way of exiting)
+            // Do not await, as this call to Exit may have been made as part of the exit RPC and we need to finish it.
+            m_workerServer.ShutdownAsync().Forget();
             m_exitCompletionSource.TrySetResult(reportSuccess);
         }
 
@@ -391,9 +259,10 @@ namespace BuildXL.Engine.Distribution
             return true;
         }
 
-        internal void AttachCore(BuildStartData buildStartData, string masterName)
+        /// <inheritdoc />
+        void IWorkerService.Attach(BuildStartData buildStartData, string orchestratorName)
         {
-            Logger.Log.DistributionAttachReceived(m_appLoggingContext, buildStartData.SessionId, masterName);
+            Logger.Log.DistributionAttachReceived(m_appLoggingContext, buildStartData.SessionId, orchestratorName);
             BuildStartData = buildStartData;
 
             // The app-level logging context has a wrong session id. Fix it now that we know the right one.
@@ -403,79 +272,51 @@ namespace BuildXL.Engine.Distribution
                 new LoggingContext.SessionInfo(buildStartData.SessionId, m_appLoggingContext.Session.Environment, m_appLoggingContext.Session.RelatedActivityId),
                 m_appLoggingContext);
 
-            m_masterClient = new Grpc.GrpcMasterClient(m_appLoggingContext, m_services.BuildId, buildStartData.MasterLocation.IpAddress, buildStartData.MasterLocation.Port, OnConnectionTimeOutAsync);
+            m_orchestratorClient.Initialize(buildStartData.OrchestratorLocation.IpAddress, buildStartData.OrchestratorLocation.Port, OnConnectionTimeOutAsync);
 
             WorkerId = BuildStartData.WorkerId;
-
             m_attachCompletionSource.TrySetResult(true);
         }
 
         [System.Diagnostics.CodeAnalysis.SuppressMessage("AsyncUsage", "AsyncFixer02:MissingAsyncOpportunity")]
         private async Task<bool> SendAttachCompletedAfterProcessBuildRequestStartedAsync()
         {
-            var cacheValidationContent = Guid.NewGuid().ToByteArray();
-            var cacheValidationContentHash = ContentHashingUtilities.HashBytes(cacheValidationContent);
+            var possiblyAttachCompletionInfo = await m_pipExecutionService.ConstructAttachCompletionInfo();
 
-            var possiblyStored = await m_environment.Cache.ArtifactContentCache.TryStoreAsync(
-                new MemoryStream(cacheValidationContent),
-                cacheValidationContentHash);
-
-            if (!possiblyStored.Succeeded)
+            if (!possiblyAttachCompletionInfo.Succeeded)
             {
-                Logger.Log.DistributionFailedToStoreValidationContentToWorkerCacheWithException(
-                    m_appLoggingContext,
-                    cacheValidationContentHash.ToHex(),
-                    possiblyStored.Failure.DescribeIncludingInnerFailures());
-
-                Exit("Failed to validate retrieve content from master via cache", isUnexpected: true);
+                Exit("Failed to validate retrieve content from orchestrator via cache", isUnexpected: true);
                 return false;
             }
 
-            var attachCompletionInfo = new AttachCompletionInfo
-            {
-                WorkerId = WorkerId,
-                MaxProcesses = m_config.Schedule.MaxProcesses,
-                MaxMaterialize = m_config.Schedule.MaxMaterialize,
-                AvailableRamMb = m_scheduler.LocalWorker.TotalRamMb,
-                AvailableCommitMb = m_scheduler.LocalWorker.TotalCommitMb,
-                WorkerCacheValidationContentHash = cacheValidationContentHash.ToBondContentHash(),
-            };
-
-            Contract.Assert(attachCompletionInfo.WorkerCacheValidationContentHash != null, "worker cache validation content hash is null");
-
-            var attachCompletionResult = await m_masterClient.AttachCompletedAsync(attachCompletionInfo);
+            var attachCompletionResult = await m_orchestratorClient.AttachCompletedAsync(possiblyAttachCompletionInfo.Result);
 
             if (!attachCompletionResult.Succeeded)
             {
-                Exit($"Failed to attach to master. Duration: {(int)attachCompletionResult.Duration.TotalMinutes}", isUnexpected: true);
-                return true;
-            }
-            else
-            {
-                m_notifyMasterExecutionLogTarget = new NotifyMasterExecutionLogTarget(WorkerId, m_masterClient, m_environment.Context, m_scheduler.PipGraph.GraphId, m_scheduler.PipGraph.MaxAbsolutePathIndex, m_services);
-                m_scheduler.AddExecutionLogTarget(m_notifyMasterExecutionLogTarget);
-                m_sendThread.Start();
+                Exit($"Failed to attach to orchestrator. Duration: {(int)attachCompletionResult.Duration.TotalMinutes}", isUnexpected: true);
+                return false;
             }
 
             return true;
         }
 
-        private async void OnConnectionTimeOutAsync(object sender, EventArgs e)
+        private async void OnConnectionTimeOutAsync(object sender, ConnectionTimeoutEventArgs e)
         {
+            Logger.Log.DistributionConnectionTimeout(m_appLoggingContext, "orchestrator", e?.Details ?? "");
+
+            // Stop sending messages
+            m_notificationManager.Cancel();
+           
             // Unblock caller to make it a fire&forget event handler.
             await Task.Yield();
-            Logger.Log.DistributionInactiveMaster(m_appLoggingContext, (int)EngineEnvironmentSettings.DistributionInactiveTimeout.Value.TotalMinutes);
-            ExitAsync("Connection timed out", isUnexpected: true);
+            Logger.Log.DistributionInactiveOrchestrator(m_appLoggingContext, (int)(GrpcSettings.CallTimeout.TotalMinutes * GrpcSettings.MaxRetry));
+            ExitAsync("Connection timed out", isUnexpected: true).Forget();
         }
 
-        internal void SetLastHeartbeatTimestamp()
+        /// <inheritdoc />
+        void IWorkerService.ExecutePips(PipBuildRequest request)
         {
-            m_lastHeartbeatTimestamp = TimestampUtilities.Timestamp;
-        }
-
-        internal void ExecutePipsCore(PipBuildRequest request)
-        {
-            var reportInputsResult = TryReportInputs(request.Hashes);
+            var reportInputsResult = m_pipExecutionService.TryReportInputs(request.Hashes);
 
             for (int i = 0; i < request.Pips.Count; i++)
             {
@@ -484,23 +325,18 @@ namespace BuildXL.Engine.Distribution
                 // Start the pip. Handle the case of a retry - the pip may be already started by a previous call.
                 if (m_handledBuildRequests.Add(pipBuildRequest.SequenceNumber))
                 {
-
                     var pipId = new PipId(pipBuildRequest.PipIdValue);
-                    var pip = m_pipTable.HydratePip(pipId, PipQueryContext.HandlePipStepOnWorker);
                     var pipIdStepTuple = (pipId, (PipExecutionStep)pipBuildRequest.Step);
                     m_pendingBuildRequests[pipIdStepTuple] = pipBuildRequest;
-                    var pipCompletionData = new ExtendedPipCompletionData(new PipCompletionData() { PipIdValue = pipId.Value, Step = pipBuildRequest.Step })
-                    {
-                        SemiStableHash = m_pipTable.GetPipSemiStableHash(pipId)
-                    };
 
+                    var pipCompletionData = new ExtendedPipCompletionData(new PipCompletionData() { PipIdValue = pipId.Value, Step = pipBuildRequest.Step });
                     m_pendingPipCompletions[pipIdStepTuple] = pipCompletionData;
 
-                    HandlePipStepAsync(pip, pipCompletionData, pipBuildRequest, reportInputsResult).Forget((ex)=>
+                    m_pipExecutionService.HandlePipStepAsync(pipId, pipCompletionData, pipBuildRequest, reportInputsResult).Forget((ex) =>
                     {
                         Scheduler.Tracing.Logger.Log.HandlePipStepOnWorkerFailed(
                             m_appLoggingContext,
-                            pip.GetDescription(m_environment.Context),
+                            m_pipExecutionService.GetPipDescription(pipId),
                             ex.ToString());
 
                         // HandlePipStep might throw an exception after we remove pipCompletionData from m_pendingPipCompletions.
@@ -508,7 +344,7 @@ namespace BuildXL.Engine.Distribution
                         if (m_pendingPipCompletions.ContainsKey(pipIdStepTuple))
                         {
                             ReportResult(
-                                pip,
+                                pipId,
                                 ExecutionResult.GetFailureNotRunResult(m_appLoggingContext),
                                 (PipExecutionStep)pipBuildRequest.Step);
                         }
@@ -517,206 +353,12 @@ namespace BuildXL.Engine.Distribution
             }
         }
 
-        private async Task HandlePipStepAsync(Pip pip, ExtendedPipCompletionData pipCompletionData, SinglePipBuildRequest pipBuildRequest, Possible<Unit> reportInputsResult)
+        internal void ReportResult(
+            PipId pipId,
+            ExecutionResult executionResult,
+            PipExecutionStep step)
         {
-            // Do not block the caller.
-            await Task.Yield();
-
-            var pipId = pip.PipId;
-            var pipType = pip.PipType;
-            var step = (PipExecutionStep)pipBuildRequest.Step;
-            if (!(pipType == PipType.Process || pipType == PipType.Ipc || step == PipExecutionStep.MaterializeOutputs))
-            {
-                throw Contract.AssertFailure(I($"Workers can only execute process or IPC pips for steps other than MaterializeOutputs: Step={step}, PipId={pipId}, Pip={pip.GetDescription(m_environment.Context)}"));
-            }
-
-            using (var operationContext = m_operationTracker.StartOperation(PipExecutorCounter.WorkerServiceHandlePipStepDuration, pipId, pipType, m_appLoggingContext))
-            using (operationContext.StartOperation(step))
-            {
-                var pipInfo = new PipInfo(pip, m_environment.Context);
-
-                if (!reportInputsResult.Succeeded)
-                {
-                    // Could not report inputs due to input mismatch. Fail the pip
-                    Scheduler.Tracing.Logger.Log.PipMaterializeDependenciesFailureDueToVerifySourceFilesFailed(
-                        m_appLoggingContext,
-                        pipInfo.Description,
-                        reportInputsResult.Failure.DescribeIncludingInnerFailures());
-
-                    ReportResult(
-                        pip,
-                        ExecutionResult.GetFailureNotRunResult(m_appLoggingContext),
-                        step);
-
-                    return;
-                }
-
-                if (step == PipExecutionStep.CacheLookup)
-                {
-                    // Directory dependencies need to be registered for cache lookup.
-                    // For process execution, the input materialization guarantees the registration.
-                    m_environment.State.FileContentManager.RegisterDirectoryDependencies(pipInfo.UnderlyingPip);
-                }
-
-                m_workerPipStateManager.Transition(pipId, WorkerPipState.Queued);
-                m_scheduler.HandlePipRequest(pipId, m_workerRunnablePipObserver, step, pipBuildRequest.Priority);
-
-                // Track how much time the request spent queued
-                using (var op = operationContext.StartOperation(PipExecutorCounter.WorkerServiceQueuedPipStepDuration))
-                {
-                    await pipCompletionData.StepExecutionStarted.Task;
-                    pipCompletionData.SerializedData.QueueTicks = op.Duration.Value.Ticks;
-
-                }
-
-                ExecutionResult executionResult;
-
-                // Track how much time the request spent executing
-                using (operationContext.StartOperation(PipExecutorCounter.WorkerServiceExecutePipStepDuration))
-                {
-                    executionResult = await pipCompletionData.StepExecutionCompleted.Task;
-                }
-
-                ReportResult(
-                    pip,
-                    executionResult,
-                    step);
-            }
-        }
-
-        private Guid GetActivityId(RunnablePip runnablePip)
-        {
-            return new Guid(m_pendingBuildRequests[(runnablePip.PipId, runnablePip.Step)].ActivityId);
-        }
-
-        private void StartStep(RunnablePip runnablePip)
-        {
-            var pipId = runnablePip.PipId;
-            var processRunnable = runnablePip as ProcessRunnablePip;
-
-            Tracing.Logger.Log.DistributionWorkerExecutePipRequest(
-                runnablePip.LoggingContext,
-                runnablePip.Pip.SemiStableHash,
-                runnablePip.Description,
-                runnablePip.Step.AsString());
-
-            var pipIdStepTuple = (pipId, runnablePip.Step);
-            var completionData = m_pendingPipCompletions[pipIdStepTuple];
-            completionData.StepExecutionStarted.SetResult(true);
-
-            switch (runnablePip.Step)
-            {
-                case PipExecutionStep.ExecuteProcess:
-                    if (runnablePip.PipType == PipType.Process)
-                    {
-                        SinglePipBuildRequest pipBuildRequest;
-                        bool found = m_pendingBuildRequests.TryGetValue(pipIdStepTuple, out pipBuildRequest);
-                        Contract.Assert(found, "Could not find corresponding build request for executed pip on worker");
-                        m_pendingBuildRequests[pipIdStepTuple] = null;
-
-                        // Set the cache miss result with fingerprint so ExecuteProcess step can use it
-                        var fingerprint = pipBuildRequest.Fingerprint.ToFingerprint();
-                        processRunnable.SetCacheResult(RunnableFromCacheResult.CreateForMiss(new WeakContentFingerprint(fingerprint)));
-
-                        processRunnable.ExpectedMemoryCounters = ProcessMemoryCounters.CreateFromMb(
-                            peakWorkingSetMb: pipBuildRequest.ExpectedPeakWorkingSetMb,
-                            averageWorkingSetMb: pipBuildRequest.ExpectedAverageWorkingSetMb,
-                            peakCommitSizeMb: pipBuildRequest.ExpectedPeakCommitSizeMb,
-                            averageCommitSizeMb: pipBuildRequest.ExpectedAverageCommitSizeMb);
-                    }
-
-                    break;
-            }
-        }
-
-        private void EndStep(RunnablePip runnablePip)
-        {
-            var pipId = runnablePip.PipId;
-            var loggingContext = runnablePip.LoggingContext;
-            var pip = runnablePip.Pip;
-            var description = runnablePip.Description;
-            var executionResult = runnablePip.ExecutionResult;
-
-
-            var completionData = m_pendingPipCompletions[(pipId, runnablePip.Step)];
-            completionData.SerializedData.ExecuteStepTicks = runnablePip.StepDuration.Ticks;
-            completionData.SerializedData.ThreadId = runnablePip.ThreadId;
-            completionData.SerializedData.StartTimeTicks = runnablePip.StepStartTime.Ticks;
-
-            switch (runnablePip.Step)
-            {
-                case PipExecutionStep.MaterializeInputs:
-                    if (!runnablePip.Result.HasValue ||
-                        !runnablePip.Result.Value.Status.IndicatesFailure())
-                    {
-                        m_workerPipStateManager.Transition(pipId, WorkerPipState.Prepped);
-                    }
-
-                    break;
-                case PipExecutionStep.ExecuteProcess:
-                case PipExecutionStep.ExecuteNonProcessPip:
-                    executionResult.Seal();
-                    m_workerPipStateManager.Transition(pipId, WorkerPipState.Executed);
-
-                    if (!executionResult.Result.IndicatesFailure())
-                    {
-                        foreach (var outputContent in executionResult.OutputContent)
-                        {
-                            Tracing.Logger.Log.DistributionWorkerPipOutputContent(
-                                loggingContext,
-                                pip.SemiStableHash,
-                                description,
-                                outputContent.fileArtifact.Path.ToString(m_environment.Context.PathTable),
-                                outputContent.fileInfo.Hash.ToHex());
-                        }
-                    }
-
-                    break;
-                case PipExecutionStep.CacheLookup:
-                    var runnableProcess = (ProcessRunnablePip)runnablePip;
-
-                    executionResult = new ExecutionResult();
-                    var cacheResult = runnableProcess.CacheResult;
-
-                    executionResult.SetResult(
-                        loggingContext,
-                        status: cacheResult == null ? PipResultStatus.Failed : PipResultStatus.Succeeded);
-
-                    if (cacheResult != null)
-                    {
-                        executionResult.PopulateCacheInfoFromCacheResult(cacheResult);
-                    }
-
-                    executionResult.CacheLookupPerfInfo = runnableProcess.CacheLookupPerfInfo;
-                    executionResult.Seal();
-
-                    break;
-                case PipExecutionStep.PostProcess:
-                    // Execution result is already computed during ExecuteProcess.
-                    Contract.Assert(executionResult != null);
-                    break;
-            }
-
-            if (executionResult == null)
-            {
-                executionResult = new ExecutionResult();
-
-                // If no result is set, the step succeeded
-                executionResult.SetResult(loggingContext, runnablePip.Result?.Status ?? PipResultStatus.Succeeded);
-                executionResult.Seal();
-            }
-
-            completionData.StepExecutionCompleted.SetResult(executionResult);
-        }
-
-        private void ReportResult(
-           Pip pip,
-           ExecutionResult executionResult,
-           PipExecutionStep step)
-        {
-            var pipId = pip.PipId;
-            m_workerPipStateManager.Transition(pipId, WorkerPipState.Recording);
-
+            m_pipExecutionService.Transition(pipId, WorkerPipState.Recording);
             if (executionResult.Result == PipResultStatus.Failed)
             {
                 m_hasFailures = true;
@@ -726,133 +368,36 @@ namespace BuildXL.Engine.Distribution
             Contract.Assert(found, "Could not find corresponding build completion data for executed pip on worker");
 
             pipCompletion.ExecutionResult = executionResult;
-            // To preserve the path set casing is an option only available for process pips
-            pipCompletion.PreservePathSetCasing = pip.PipType == PipType.Process ? ((Process)pip).PreservePathSetCasing : false;
 
             if (step == PipExecutionStep.MaterializeOutputs && m_config.Distribution.FireForgetMaterializeOutput)
             {
-                // We do not report 'MaterializeOutput' step results back to master.
+                // We do not report 'MaterializeOutput' step results back to orchestrator.
                 Logger.Log.DistributionWorkerFinishedPipRequest(m_appLoggingContext, pipCompletion.SemiStableHash, step.ToString());
                 return;
             }
 
-            try
-            {
-                m_buildResults.Add(pipCompletion);
-            }
-            catch (InvalidOperationException)
-            {
-                // m_buildResults is already marked as completed due to previously infrastructure errors reported (e.g., materialization errors).
-                // No need to report the other failed results as the build already failed
-            }
-        }
-
-        private Possible<Unit> TryReportInputs(List<FileArtifactKeyedHash> hashes)
-        {
-            var dynamicDirectoryMap = new Dictionary<DirectoryArtifact, List<FileArtifactWithAttributes>>();
-            var failedFiles = new List<(FileArtifact file, ContentHash hash)>();
-            var fileContentManager = m_environment.State.FileContentManager;
-
-            foreach (FileArtifactKeyedHash fileArtifactKeyedHash in hashes)
-            {
-                FileArtifactWithAttributes fileWithAttributes;
-                FileArtifact file;
-                if (fileArtifactKeyedHash.AssociatedDirectories != null && fileArtifactKeyedHash.AssociatedDirectories.Count != 0)
-                {
-                    // All workers have the same entries in the path table up to the schedule phase. Dynamic outputs add entries to the path table of the worker that generates them.
-                    // Dynamic outputs can be generated by one worker, but consumed by another, which potentially is not the master. Thus, the two workers do not have the same entries
-                    // in the path table.
-                    // The approach we have here may be sub-optimal(the worker may have had the paths already). But it ensures correctness.
-                    // Need to create absolute path because the path is potentially not in the path table.
-                    file = new FileArtifact(
-                        AbsolutePath.Create(m_environment.Context.PathTable, fileArtifactKeyedHash.PathString),
-                        fileArtifactKeyedHash.RewriteCount);
-
-                    fileWithAttributes = FileArtifactWithAttributes.Create(
-                        file,
-                        FileExistence.Required,
-                        isUndeclaredFileRewrite: fileArtifactKeyedHash.IsAllowedFileRewrite);
-
-                    foreach (var bondDirectoryArtifact in fileArtifactKeyedHash.AssociatedDirectories)
-                    {
-                        var directory = new DirectoryArtifact(
-                            new AbsolutePath(bondDirectoryArtifact.DirectoryPathValue),
-                            bondDirectoryArtifact.DirectorySealId,
-                            bondDirectoryArtifact.IsDirectorySharedOpaque);
-
-                        if (!dynamicDirectoryMap.TryGetValue(directory, out var files))
-                        {
-                            files = new List<FileArtifactWithAttributes>();
-                            dynamicDirectoryMap.Add(directory, files);
-                        }
-
-                        files.Add(fileWithAttributes);
-                    }
-                }
-                else
-                {
-                    file = fileArtifactKeyedHash.File;
-                }
-
-                if (fileArtifactKeyedHash.IsSourceAffected)
-                {
-                    fileContentManager.SourceChangeAffectedInputs.ReportSourceChangedAffectedFile(file.Path);
-                }
-
-                var materializationInfo = fileArtifactKeyedHash.GetFileMaterializationInfo(m_environment.Context.PathTable);
-                if (!fileContentManager.ReportWorkerPipInputContent(
-                    m_appLoggingContext,
-                    file,
-                    materializationInfo))
-                {
-                    failedFiles.Add((file, materializationInfo.Hash));
-                }
-            }
-
-            foreach (var directoryAndContents in dynamicDirectoryMap)
-            {
-                fileContentManager.ReportDynamicDirectoryContents(directoryAndContents.Key, directoryAndContents.Value, PipOutputOrigin.NotMaterialized);
-            }
-
-            if (failedFiles.Count != 0)
-            {
-                return new ArtifactMaterializationFailure(failedFiles.ToReadOnlyArray(), m_environment.Context.PathTable);
-            }
-
-            return Unit.Void;
-        }
-
-        private async Task SendEventMessagesAsync(List<EventMessage> forwardedEvents)
-        {
-            if (m_masterClient == null)
-            {
-                return;
-            }
-
-            using (m_services.Counters.StartStopwatch(DistributionCounter.SendEventMessagesDuration))
-            {
-                await m_masterClient.NotifyAsync(new WorkerNotificationArgs
-                {
-                    ForwardedEvents = forwardedEvents,
-                    WorkerId = WorkerId
-                },
-                null);
-            }
+            m_notificationManager.ReportResult(pipCompletion);
         }
 
         /// <inheritdoc/>
-        public void Dispose()
+        public override void Dispose()
         {
-            m_services.LogStatistics(m_appLoggingContext);
-
-            m_workerPipStateManager?.Dispose();
-
+            LogStatistics(m_appLoggingContext);
+            m_pipExecutionService.Dispose();
             m_workerServer.Dispose();
         }
 
-        bool IDistributionService.Initialize()
+        /// <nodoc/>
+        public override async Task ExitAsync(Optional<string> failure, bool isUnexpected)
         {
-            // Start listening to the port if we have remote workers
+            await Task.Yield();
+            Exit(failure, isUnexpected);
+        }
+
+        /// <inheritdoc />
+        public override bool Initialize()
+        {
+            // Start listening to the port
             try
             {
                 m_workerServer.Start(m_port);
@@ -865,132 +410,5 @@ namespace BuildXL.Engine.Distribution
             }
         }
 
-        private sealed class WorkerRunnablePipObserver : RunnablePipObserver
-        {
-            private readonly WorkerService m_workerService;
-            private readonly ConcurrentDictionary<PipId, ExecutionResult> m_processExecutionResult
-                 = new ConcurrentDictionary<PipId, ExecutionResult>();
-
-            public WorkerRunnablePipObserver(WorkerService workerService)
-            {
-                m_workerService = workerService;
-            }
-
-            public override Guid? GetActivityId(RunnablePip runnablePip)
-            {
-                return m_workerService.GetActivityId(runnablePip);
-            }
-
-            public override void StartStep(RunnablePip runnablePip)
-            {
-                if (runnablePip.Step == PipExecutionStep.PostProcess)
-                {
-                    ExecutionResult executionResult;
-                    var removed = m_processExecutionResult.TryRemove(runnablePip.PipId, out executionResult);
-                    Contract.Assert(removed, "Execution result must be stored from ExecuteProcess step for PostProcess");
-                    runnablePip.SetExecutionResult(executionResult);
-                }
-
-                m_workerService.StartStep(runnablePip);
-            }
-
-            public override void EndStep(RunnablePip runnablePip)
-            {
-                if (runnablePip.Step == PipExecutionStep.ExecuteProcess)
-                {
-                    // For successful/unsuccessful results of ExecuteProcess, store so that when master calls worker for
-                    // PostProcess it can reuse the result rather than sending it unnecessarily
-                    // The unsuccessful results are stored as well to preserve the existing behavior where PostProcess is also done for such results.
-                    // TODO: Should we skipped PostProcess when Process failed? In such a case then PipExecutor.ReportExecutionResultOutputContent should not be in PostProcess.
-                    m_processExecutionResult[runnablePip.PipId] = runnablePip.ExecutionResult;
-                }
-
-                m_workerService.EndStep(runnablePip);
-            }
-        }
-
-        private sealed class WorkerServicePipStateManager : WorkerPipStateManager, IDisposable
-        {
-            private readonly StatusReporter m_statusReporter;
-            private readonly WorkerService m_workerService;
-
-            public WorkerServicePipStateManager(WorkerService workerService)
-            {
-                m_workerService = workerService;
-                m_statusReporter = new StatusReporter(m_workerService.m_appLoggingContext, this);
-            }
-
-            private sealed class StatusReporter : BaseEventListener
-            {
-                private readonly LoggingContext m_loggingContext;
-                private Snapshot m_pipStateSnapshot;
-
-                public StatusReporter(LoggingContext loggingContext, WorkerServicePipStateManager stateManager)
-                    : base(Events.Log, warningMapper: null, eventMask: new EventMask(enabledEvents: new int[] { (int)SharedLogEventId.PipStatus }, disabledEvents: null))
-                {
-                    m_loggingContext = loggingContext;
-                    m_pipStateSnapshot = stateManager.GetSnapshot();
-                }
-
-                private void ReportStatus()
-                {
-                    var pipStateSnapshot = Interlocked.Exchange(ref m_pipStateSnapshot, null);
-                    if (pipStateSnapshot != null)
-                    {
-                        pipStateSnapshot.Update();
-                        Logger.Log.DistributionWorkerStatus(
-                            m_loggingContext,
-                            pipsQueued: pipStateSnapshot[WorkerPipState.Queued],
-                            pipsPrepping: pipStateSnapshot[WorkerPipState.Prepping],
-                            pipsPrepped: pipStateSnapshot[WorkerPipState.Prepped],
-                            pipsRecording: pipStateSnapshot[WorkerPipState.Recording],
-                            pipsReporting: pipStateSnapshot[WorkerPipState.Reporting],
-                            pipsReported: pipStateSnapshot[WorkerPipState.Reported]);
-                        m_pipStateSnapshot = pipStateSnapshot;
-                    }
-                }
-
-                protected override void OnEventWritten(EventWrittenEventArgs eventData)
-                {
-                    if (eventData.EventId == (int)SharedLogEventId.PipStatus)
-                    {
-                        ReportStatus();
-                    }
-                }
-
-                protected override void OnCritical(EventWrittenEventArgs eventData)
-                {
-                }
-
-                protected override void OnWarning(EventWrittenEventArgs eventData)
-                {
-                }
-
-                protected override void OnError(EventWrittenEventArgs eventData)
-                {
-                }
-
-                protected override void OnInformational(EventWrittenEventArgs eventData)
-                {
-                }
-
-                protected override void OnVerbose(EventWrittenEventArgs eventData)
-                {
-                }
-
-                protected override void OnAlways(EventWrittenEventArgs eventData)
-                {
-                }
-            }
-
-            #region IDisposable Members
-
-            public void Dispose()
-            {
-                m_statusReporter.Dispose();
-            }
-
-            #endregion
-        }
     }
 }

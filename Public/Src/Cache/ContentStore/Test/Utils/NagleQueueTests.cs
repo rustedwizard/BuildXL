@@ -3,11 +3,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.InterfacesTest;
-using BuildXL.Cache.ContentStore.Utils;
+using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Tasks;
 using ContentStoreTest.Test;
 using FluentAssertions;
@@ -135,6 +136,52 @@ namespace ContentStoreTest.Utils
                 batchSize: 10);
             queue.Dispose();
             Assert.Throws<ObjectDisposedException>(() => queue.Enqueue(42));
+        }
+
+
+        [Fact]
+        public async Task DisposeAsyncWaitsForCompletion()
+        {
+            var logger = TestGlobal.Logger;
+            logger.Debug("Starting...");
+            var tcs = TaskSourceSlim.Create<object>();
+            var queue = NagleQueue<int>.Create(
+                processBatch: async data =>
+                              {
+                                  await Task.Delay(1000);
+                                  tcs.SetResult(null);
+                              },
+                maxDegreeOfParallelism: 1,
+                interval: TimeSpan.FromMilliseconds(1),
+                batchSize: 3);
+            var sw = Stopwatch.StartNew();
+            queue.Enqueue(42);
+
+            await queue.DisposeAsync();
+            tcs.Task.IsCompleted.Should().BeTrue();
+
+            logger.Debug($"Disposed. Elapsed: {sw.ElapsedMilliseconds}");
+        }
+
+        [Fact]
+        public async Task DisposeAsyncShouldFailIfCallbackFails()
+        {
+            var logger = TestGlobal.Logger;
+            logger.Debug("Starting...");
+            var queue = NagleQueue<int>.Create(
+                processBatch: async data =>
+                {
+                    await Task.Yield();
+                    throw new InvalidOperationException("12");
+                },
+                maxDegreeOfParallelism: 1,
+                interval: TimeSpan.FromMilliseconds(1),
+                batchSize: 3);
+            var sw = Stopwatch.StartNew();
+            queue.Enqueue(42);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => queue.DisposeAsync());
+            logger.Debug($"Disposed. Elapsed: {sw.ElapsedMilliseconds}");
         }
 
         [Fact]

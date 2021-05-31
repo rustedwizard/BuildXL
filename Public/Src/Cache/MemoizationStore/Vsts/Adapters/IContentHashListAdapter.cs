@@ -18,7 +18,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts.Adapters
         /// <summary>
         /// Gets the selectors from the VSTS Service asynchronously.
         /// </summary>
-        Task<ObjectResult<IEnumerable<SelectorAndContentHashListWithCacheMetadata>>> GetSelectorsAsync(
+        Task<Result<IEnumerable<SelectorAndContentHashListWithCacheMetadata>>> GetSelectorsAsync(
             Context context,
             string cacheNamespace,
             Fingerprint weakFingerprint,
@@ -27,12 +27,20 @@ namespace BuildXL.Cache.MemoizationStore.Vsts.Adapters
         /// <summary>
         /// Gets a single content hashlist from the service asynchronously.
         /// </summary>
-        Task<ObjectResult<ContentHashListWithCacheMetadata>> GetContentHashListAsync(Context context, string cacheNamespace, StrongFingerprint strongFingerprint);
+        Task<Result<ContentHashListWithCacheMetadata>> GetContentHashListAsync(
+            Context context,
+            string cacheNamespace,
+            StrongFingerprint strongFingerprint);
 
         /// <summary>
         /// Adds a single content hashlist from the service asynchronously.
         /// </summary>
-        Task<ObjectResult<ContentHashListWithCacheMetadata>> AddContentHashListAsync(Context context, string cacheNamespace, StrongFingerprint strongFingerprint, ContentHashListWithCacheMetadata valueToAdd);
+        Task<Result<ContentHashListWithCacheMetadata>> AddContentHashListAsync(
+            Context context,
+            string cacheNamespace,
+            StrongFingerprint strongFingerprint,
+            ContentHashListWithCacheMetadata valueToAdd,
+            bool forceUpdate);
 
         /// <summary>
         /// Incorporates and extends lifetimes of a set of strong fingeprints.

@@ -112,7 +112,7 @@ inline bool IsDriveLetter(PathChar c)
 
 inline bool IsDriveBasedAbsolutePath(PCPathChar path)
 {
-    if (path[0] != 0 && IsDriveLetter(path[0]) && path[1] == L':' && IsDirectorySeparator(path[2]))
+    if (path[0] != 0 && IsDriveLetter(path[0]) && path[1] == NT_VOLUME_SEPARATOR && IsDirectorySeparator(path[2]))
     {
         return true;
     }
@@ -245,3 +245,18 @@ bool IsPathToNamedStream(PCPathChar const path, size_t pathLength);
 
 // Gets root length of a path.
 size_t GetRootLength(PCPathChar path);
+
+#if _WIN32
+// Returns a collection of all path atoms of the given path
+int TryDecomposePath(const std::wstring& path, std::vector<std::wstring>& elements);
+
+// Combines two path fragments into a single path separated by a directory separator.
+std::wstring PathCombine(const std::wstring& fragment1, const std::wstring& fragment2);
+
+// Normalizes path.
+// When the path is a relative path, then the path is returned as is.
+// When the path is an absolute path, then the normalization uses PathCchCanonicalizeEx with PATHCCH_ALLOW_LONG_PATHS
+// to normalize the path.
+__declspec( dllexport )
+std::wstring NormalizePath(const std::wstring& path);
+#endif

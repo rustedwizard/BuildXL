@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Threading.Tasks;
+using BuildXL.Engine.Cache.Fingerprints;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ImplementationSupport;
 using BuildXL.Cache.Interfaces;
@@ -34,7 +35,6 @@ namespace BuildXL.Cache.VerticalAggregator
         private readonly ICacheSession m_remoteSession;
         private readonly ICacheReadOnlySession m_remoteROSession;
         private readonly SessionCounters m_sessionCounters;
-        private readonly Lazy<Dictionary<string, double>> m_finalStats;
 
         internal VerticalCacheAggregatorSession(
             VerticalCacheAggregator cache,
@@ -61,7 +61,6 @@ namespace BuildXL.Cache.VerticalAggregator
             m_cacheId = new CacheId(localSession.CacheId, remoteROSession.CacheId);
             m_remoteIsReadOnly = remoteIsReadOnly;
             m_sessionCounters = new SessionCounters();
-            m_finalStats = Lazy.Create(ExportStats);
             m_remoteContentIsReadOnly = remoteContentIsReadOnly;
         }
 
@@ -111,6 +110,10 @@ namespace BuildXL.Cache.VerticalAggregator
             Contract.Requires(casEntries.IsValid);
 
             Contract.Assume(!IsReadOnly);
+
+            // Avoid using Remote Cache for Build Manifest
+            bool bypassRemoteCache = m_cache.RemoteCache.IsDisconnected || StrongContentFingerprint.BuildManifestFingerprintMarker.Equals(hashOfInputListContents);
+
             using (var counters = m_sessionCounters.AddOrGetCounter())
             {
                 using (var eventing = new AddOrGetActivity(VerticalCacheAggregator.EventSource, activityId, this))
@@ -123,7 +126,7 @@ namespace BuildXL.Cache.VerticalAggregator
                         // OR if the add is SinglePhaseDeterministic, just skip being efficient. Because we're going to want to Add it.
                         CasEntries finalCasEntries;
                         bool remoteHadBetterAnswer;
-                        if (!casEntries.Determinism.IsSinglePhaseNonDeterministic && !m_cache.RemoteCache.IsDisconnected)
+                        if (!casEntries.Determinism.IsSinglePhaseNonDeterministic && !bypassRemoteCache)
                         {
                             var sfp = new StrongFingerprint(weak, inputList, hashOfInputListContents, m_cacheId);
                             var remoteOperation = await m_remoteROSession.GetCacheEntryAsync(sfp, urgencyHint, eventing.Id);
@@ -181,7 +184,7 @@ namespace BuildXL.Cache.VerticalAggregator
                             remoteHadBetterAnswer = false;
                         }
 
-                        if (!m_remoteIsReadOnly && !remoteHadBetterAnswer && !m_cache.RemoteCache.IsDisconnected)
+                        if (!m_remoteIsReadOnly && !remoteHadBetterAnswer && !bypassRemoteCache)
                         {
                             List<CasHash> filesToUpload = new List<CasHash>(casEntries);
 
@@ -258,7 +261,7 @@ namespace BuildXL.Cache.VerticalAggregator
                         }
 
                         // If we can't talk to the remote, add to only the local cache.
-                        if ((m_remoteIsReadOnly && !remoteHadBetterAnswer) || m_cache.RemoteCache.IsDisconnected)
+                        if ((m_remoteIsReadOnly && !remoteHadBetterAnswer) || bypassRemoteCache)
                         {
                             counters.AddedLocal();
                         }
@@ -503,7 +506,7 @@ namespace BuildXL.Cache.VerticalAggregator
                 using (var eventing = new CacheActivity(VerticalCacheAggregator.EventSource, CacheActivity.StatisticOptions, activityId, "SessionStatistics", CacheId))
                 {
                     eventing.Start();
-                    eventing.WriteStatistics(m_finalStats.Value);
+                    eventing.WriteStatistics(ExportStats());
                     eventing.Stop();
                 }
             }
@@ -556,6 +559,12 @@ namespace BuildXL.Cache.VerticalAggregator
 
                         // First check the local cache.
                         var localResult = await m_localSession.GetCacheEntryAsync(strong, urgencyHint, eventing.Id);
+
+                        // Avoid using Remote Cache for Build Manifest
+                        if (strong.Equals(StrongContentFingerprint.BuildManifestFingerprintMarker))
+                        {
+                            return eventing.Returns(localResult);
+                        }
 
                         // Ok, so if that worked, and the result is deterministic don't bother with the remote
                         // cache. Also, don't bother if we have a result, and we're not trying to enforce determinism into
@@ -1456,7 +1465,7 @@ namespace BuildXL.Cache.VerticalAggregator
 
                     stats.AddRange(maybeStats.Result);
 
-                    stats.Add(new CacheSessionStatistics(CacheId, m_cache.GetType().FullName, m_finalStats.Value));
+                    stats.Add(new CacheSessionStatistics(CacheId, m_cache.GetType().FullName, ExportStats()));
 
                     eventing.Stop();
                     return stats.ToArray();

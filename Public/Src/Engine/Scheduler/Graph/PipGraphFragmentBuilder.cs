@@ -5,6 +5,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
+using System.Linq;
 using System.Threading;
 using BuildXL.Ipc;
 using BuildXL.Ipc.Interfaces;
@@ -294,6 +295,35 @@ namespace BuildXL.Scheduler.Graph
             }
 
             return false;
+        }
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Current implementation is O(n) but this method is for now only called in test contexts.
+        /// </remarks>
+        public Pip GetPipFromPipId(PipId pipId)
+        {
+            return m_pips.FirstOrDefault(pip => pip.PipId == pipId);
+        }
+
+        /// <inheritdoc/>
+        public bool TryAssertOutputExistenceInOpaqueDirectory(DirectoryArtifact outputDirectoryArtifact, AbsolutePath outputInOpaque, out FileArtifact fileArtifact)
+        {
+            Contract.Requires(outputDirectoryArtifact.IsValid);
+            Contract.Requires(outputDirectoryArtifact.IsOutputDirectory());
+            Contract.Requires(outputInOpaque.IsWithin(m_pipExecutionContext.PathTable, outputDirectoryArtifact.Path));
+
+            var producerResult = OpaqueDirectoryProducers.TryGet(outputDirectoryArtifact);
+            if (!producerResult.IsFound)
+            {
+                fileArtifact = FileArtifact.Invalid;
+                return false;
+            }
+
+            fileArtifact = FileArtifact.CreateOutputFile(outputInOpaque);
+            FileProducers.TryAdd(fileArtifact, producerResult.Item.Value);
+
+            return true;
         }
     }
 }

@@ -637,6 +637,7 @@ namespace Test.BuildXL.Scheduler
             }
 
             public bool ShouldCreateHandleWithSequentialScan(FileArtifact file) => false;
+            public Task<Optional<IEnumerable<AbsolutePath>>> GetReadPathsAsync(OperationContext context, Pip pip) => throw new NotImplementedException();
 
             IArtifactContentCache IFileContentManagerHost.ArtifactContentCache => Cache.ArtifactContentCache;
 
@@ -652,7 +653,7 @@ namespace Test.BuildXL.Scheduler
 
             public ITempCleaner TempCleaner { get; }
 
-            public SymlinkedAccessResolver SymlinkedAccessResolver => null;
+            public ReparsePointResolver ReparsePointAccessResolver => null;
 
             public PluginManager PluginManager { get; }
         }
@@ -756,7 +757,9 @@ namespace Test.BuildXL.Scheduler
                         result.MustBeConsideredPerpetuallyDirty,
                         result.DynamicallyObservedFiles,
                         result.DynamicallyProbedFiles,
-                        result.DynamicallyObservedEnumerations);
+                        result.DynamicallyObservedEnumerations,
+                        result.DynamicallyObservedAbsentPathProbes,
+                        result.ExitCode);
                 }
             }
 
@@ -772,6 +775,8 @@ namespace Test.BuildXL.Scheduler
         {
             m_pathTable = pathTable;
         }
+
+        public IReadOnlySet<FileArtifact> GetExistenceAssertionsUnderOpaqueDirectory(DirectoryArtifact directoryArtifact) => CollectionUtilities.EmptySet<FileArtifact>();
 
         public bool IsPathUnderOutputDirectory(AbsolutePath path, out bool isItUnderSharedOpaque)
         {

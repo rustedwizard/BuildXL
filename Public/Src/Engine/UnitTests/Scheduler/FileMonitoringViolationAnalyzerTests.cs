@@ -62,7 +62,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -99,7 +99,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -135,7 +135,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -171,7 +171,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -206,7 +206,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -243,7 +243,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -281,7 +281,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -318,7 +318,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
             AssertVerboseEventLogged(LogEventId.DependencyViolationReadRace);
@@ -347,7 +347,7 @@ namespace Test.BuildXL.Scheduler
                     exclusiveOpaqueDirectoryContent: null,
                     sharedOpaqueDirectoryWriteAccesses: null,
                     allowedUndeclaredReads: null,
-                    absentPathProbesUnderOutputDirectories: null,
+                    dynamicObservations: null,
                     ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                     out _); 
 
@@ -376,7 +376,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -414,7 +414,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -470,7 +470,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -511,7 +511,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -525,7 +525,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -539,7 +539,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -621,7 +621,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -761,7 +761,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -829,7 +829,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: sharedOpaqueDirectoryWriteAccesses,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 outputsContent,
                 out _);
 
@@ -840,7 +840,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: sharedOpaqueDirectoryWriteAccesses,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 outputsContent,
                 out _);
 
@@ -882,7 +882,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
             
@@ -923,7 +923,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: null,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: new ReadOnlyHashSet<AbsolutePath>(new[] { probePath }),
+                dynamicObservations: new ReadOnlyHashSet<(AbsolutePath, DynamicObservationKind)>(new[] { (probePath, DynamicObservationKind.AbsentPathProbeUnderOutputDirectory) }),
                 outputsContent: ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -940,7 +940,7 @@ namespace Test.BuildXL.Scheduler
                 exclusiveOpaqueDirectoryContent: null,
                 sharedOpaqueDirectoryWriteAccesses: sodWrites,
                 allowedUndeclaredReads: null,
-                absentPathProbesUnderOutputDirectories: null,
+                dynamicObservations: null,
                 outputsContent: ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                 out _);
 
@@ -957,6 +957,90 @@ namespace Test.BuildXL.Scheduler
                 AssertErrorEventLogged(LogEventId.FileMonitoringError);
             }
 
+            analyzer.AssertNoExtraViolationsCollected();
+        }
+
+        /// <summary>
+        /// Verifies logging of a doublewrite dependency violation by a process pip after a writefile pip has written to a file.
+        /// The purpose of this test is to verify that dependency violations for writefile pips are handled properly.
+        /// </summary>
+        [Fact]
+        public void DoubleWriteViolationWithWriteFilePip()
+        {
+            BuildXLContext context = BuildXLContext.CreateInstanceForTesting();
+            var graph = new QueryablePipDependencyGraph(context);
+            var analyzer = new TestFileMonitoringViolationAnalyzer(LoggingContext, context, graph, doLogging: true);
+
+            AbsolutePath violatorOutput = CreateAbsolutePath(context, JunkPath);
+            AbsolutePath producerOutput = CreateAbsolutePath(context, DoubleWritePath);
+
+            WriteFile producer = graph.AddWriteFilePip(producerOutput);
+            Process violator = graph.AddProcess(violatorOutput);
+
+            var res = analyzer.AnalyzePipViolations(
+                violator,
+                new[] { CreateViolation(RequestedAccess.ReadWrite, producerOutput) },
+                new ReportedFileAccess[0],
+                exclusiveOpaqueDirectoryContent: null,
+                sharedOpaqueDirectoryWriteAccesses: null,
+                allowedUndeclaredReads: null,
+                dynamicObservations: null,
+                ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
+                out _);
+
+            analyzer.AssertContainsViolation(
+                new DependencyViolation(
+                    FileMonitoringViolationAnalyzer.DependencyViolationType.DoubleWrite,
+                    FileMonitoringViolationAnalyzer.AccessLevel.Write,
+                    producerOutput,
+                    violator,
+                    producer),
+                "The violator has an undeclared output but it wasn't reported.");
+
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
+            analyzer.AssertNoExtraViolationsCollected();
+        }
+
+        /// <summary>
+        /// Verifies logging of a UndeclaredOrderedRead dependency violation by a process pip after a copyfile pip has written to a file.
+        /// The purpose of this test is to verify that dependency violations for copyfile pips are handled properly.
+        /// </summary>
+        [Fact]
+        public void ReadUndeclaredOutputViolationWithCopyFilePip()
+        {
+            BuildXLContext context = BuildXLContext.CreateInstanceForTesting();
+            var graph = new QueryablePipDependencyGraph(context);
+            var analyzer = new TestFileMonitoringViolationAnalyzer(LoggingContext, context, graph, doLogging: true);
+
+            AbsolutePath violatorOutput = CreateAbsolutePath(context, JunkPath);
+            AbsolutePath producerOutput = CreateAbsolutePath(context, ProducedPath);
+            FileArtifact producerSourceArtifact = FileArtifact.CreateSourceFile(CreateAbsolutePath(context, ProducedPath));
+            FileArtifact producerDestinationArtifact = FileArtifact.CreateSourceFile(producerOutput);
+
+            CopyFile producer = graph.AddCopyFilePip(producerSourceArtifact, producerDestinationArtifact);
+            Process violator = graph.AddProcess(violatorOutput);
+
+            var res = analyzer.AnalyzePipViolations(
+                violator,
+                new[] { CreateViolation(RequestedAccess.Read, producerOutput) },
+                new ReportedFileAccess[0],
+                exclusiveOpaqueDirectoryContent: null,
+                sharedOpaqueDirectoryWriteAccesses: null,
+                allowedUndeclaredReads: null,
+                dynamicObservations: null,
+                ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
+                out _);
+
+            analyzer.AssertContainsViolation(
+                new DependencyViolation(
+                    FileMonitoringViolationAnalyzer.DependencyViolationType.UndeclaredOrderedRead,
+                    FileMonitoringViolationAnalyzer.AccessLevel.Read,
+                    producerOutput,
+                    violator,
+                    producer),
+                "The violator has an undeclared read on the producer but it wasn't reported.");
+
+            AssertErrorEventLogged(LogEventId.FileMonitoringError);
             analyzer.AssertNoExtraViolationsCollected();
         }
 
@@ -1023,7 +1107,7 @@ namespace Test.BuildXL.Scheduler
             DependencyViolationType violationType,
             AccessLevel accessLevel,
             AbsolutePath path,
-            Process violator,
+            Pip violator,
             bool isAllowlistedViolation,
             Pip related,
             AbsolutePath processPath)
@@ -1107,14 +1191,14 @@ namespace Test.BuildXL.Scheduler
         public readonly FileMonitoringViolationAnalyzer.DependencyViolationType ViolationType;
         public readonly FileMonitoringViolationAnalyzer.AccessLevel AccessLevel;
         public readonly AbsolutePath Path;
-        public readonly Process Violator;
+        public readonly Pip Violator;
         public readonly Pip Related;
 
         public DependencyViolation(
             FileMonitoringViolationAnalyzer.DependencyViolationType violationType,
             FileMonitoringViolationAnalyzer.AccessLevel accessLevel,
             AbsolutePath path,
-            Process violator,
+            Pip violator,
             Pip related)
         {
             ViolationType = violationType;

@@ -38,8 +38,7 @@ namespace BuildXL.Cache.ContentStore.Timers
             _actionFunc = actionFunc;
             _logAction = logAction;
             _interval = new Timer(
-                // the callback is async void method, but this is safe here, because TriggerActionAsync should never fail.
-                async sender => await TriggerActionAsync(),
+                sender => TriggerActionAsync().GetAwaiter().GetResult(),
                 null,
                 dueTime ?? TimeSpan.FromMinutes(0),
                 period);

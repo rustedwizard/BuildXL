@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System;
 using System.Linq;
 using BuildXL.FrontEnd.Rush;
+using BuildXL.FrontEnd.Utilities;
 using BuildXL.FrontEnd.Workspaces.Core;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Configuration.Mutable;
@@ -131,6 +133,24 @@ namespace Test.BuildXL.FrontEnd.Rush
         }
 
         [Theory]
+        [InlineData("buildxl:bundle")]
+        [InlineData("buildxl!@#$%^&*()<>bundle")]
+        [InlineData("[]{};'<>/_+bxl")]
+        public void RedirectedUserProfileSanitizesScriptCommandName(string scriptCommandName)
+        {
+            var project = CreateRushProject(scriptCommandName : scriptCommandName);
+            var processOutputDirectories = Start()
+                .Add(project)
+                .ScheduleAll()
+                .RetrieveSuccessfulProcess(project)
+                .DirectoryOutputs;
+
+            string sanitizedPath = PipConstructionUtilities.SanitizeStringForSymbol(scriptCommandName);
+
+            XAssert.IsTrue(processOutputDirectories.Any(outputDirectory => outputDirectory.Path.ToString(PathTable).Contains(sanitizedPath)));
+        }
+
+        [Theory]
         [InlineData(true)]
         [InlineData(false)]
         public void BlockExclusionFlagIsHonored(bool blockWritesUnderNodeModules)
@@ -166,6 +186,76 @@ namespace Test.BuildXL.FrontEnd.Rush
 
             // The untracked scope should be configured under every project root
             XAssert.Contains(untrackedScopes, projectA.ProjectFolder.Combine(PathTable, relativeScopeToUntrack), projectB.ProjectFolder.Combine(PathTable, relativeScopeToUntrack));
+        }
+
+        [Fact]
+        public void DoubleWritePolicyIsHonored()
+        {
+            var project = CreateRushProject();
+
+            var rewritePolicy = Start(new RushResolverSettings { DoubleWritePolicy = global::BuildXL.Utilities.Configuration.RewritePolicy.UnsafeFirstDoubleWriteWins })
+                .Add(project)
+                .ScheduleAll()
+                .RetrieveSuccessfulProcess(project)
+                .RewritePolicy;
+
+            XAssert.AreEqual(global::BuildXL.Utilities.Configuration.RewritePolicy.UnsafeFirstDoubleWriteWins, rewritePolicy & global::BuildXL.Utilities.Configuration.RewritePolicy.UnsafeFirstDoubleWriteWins);
+        }
+
+        [Fact]
+        public void BreakawayProcessIsHonored()
+        {
+            var project = CreateRushProject();
+            var breakawayTest = PathAtom.Create(StringTable, "test.exe");
+            var breakawayProcesses = Start(new RushResolverSettings { ChildProcessesToBreakawayFromSandbox = new[] { breakawayTest } })
+                .Add(project)
+                .ScheduleAll()
+                .RetrieveSuccessfulProcess(project)
+                .ChildProcessesToBreakawayFromSandbox;
+
+            XAssert.Contains(breakawayProcesses, breakawayTest);
+        }
+
+        [Fact]
+        public void RetryCodesAreHonored()
+        {
+            var project = CreateRushProject();
+
+            var retryExitCodes = Start(new RushResolverSettings { RetryExitCodes = new[] { 42 } })
+                .Add(project)
+                .ScheduleAll()
+                .RetrieveSuccessfulProcess(project)
+                .RetryExitCodes;
+
+            XAssert.Contains(retryExitCodes, 42);
+        }
+
+        [Fact]
+        public void SuccessfulCodesAreHonored()
+        {
+            var project = CreateRushProject();
+
+            var successfullCodes = Start(new RushResolverSettings { SuccessExitCodes = new[] { 42 } })
+                .Add(project)
+                .ScheduleAll()
+                .RetrieveSuccessfulProcess(project)
+                .SuccessExitCodes;
+
+            XAssert.Contains(successfullCodes, 42);
+        }
+
+        [Fact]
+        public void ProcessRetriesAreHonored()
+        {
+            var project = CreateRushProject();
+
+            var processRetries = Start(new RushResolverSettings { ProcessRetries = 42 })
+                .Add(project)
+                .ScheduleAll()
+                .RetrieveSuccessfulProcess(project)
+                .ProcessRetries;
+
+            XAssert.AreEqual(processRetries, 42);
         }
     }
 }

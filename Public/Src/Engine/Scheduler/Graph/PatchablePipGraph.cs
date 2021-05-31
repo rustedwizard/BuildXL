@@ -368,7 +368,9 @@ namespace BuildXL.Scheduler.Graph
                 info.Kind,
                 TranslatePipIds(info.ServicePipDependencies),
                 TranslatePipId(info.ShutdownPipId),
-                TranslatePipIds(info.FinalizationPipIds));
+                TranslatePipIds(info.FinalizationPipIds),
+                info.TagToTrack,
+                info.DisplayNameForTrackableTag);
         }
 
         private IpcPip TranslatePipIds(IpcPip pip)
@@ -451,6 +453,18 @@ namespace BuildXL.Scheduler.Graph
         public bool TryGetSealDirectoryKind(DirectoryArtifact directoryArtifact, out SealDirectoryKind kind)
         {
             return m_builder.TryGetSealDirectoryKind(directoryArtifact, out kind);
+        }
+
+        /// <inheritdoc />
+        public Pip GetPipFromPipId(PipId pipId)
+        {
+            return m_builder.GetPipFromPipId(pipId);
+        }
+
+        /// <inheritdoc/>
+        public bool TryAssertOutputExistenceInOpaqueDirectory(DirectoryArtifact outputDirectoryArtifact, AbsolutePath outputInOpaque, out FileArtifact fileArtifact) 
+        {
+            return m_builder.TryAssertOutputExistenceInOpaqueDirectory(outputDirectoryArtifact, outputInOpaque, out fileArtifact);
         }
     }
 }

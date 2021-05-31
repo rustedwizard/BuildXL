@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Hashing;
@@ -16,6 +17,7 @@ using BuildXL.Ipc.ExternalApi.Commands;
 using BuildXL.Ipc.Interfaces;
 using BuildXL.Storage;
 using BuildXL.Utilities;
+using Microsoft.ManifestGenerator;
 using Test.BuildXL.TestUtilities.Xunit;
 using Xunit;
 using Xunit.Abstractions;
@@ -32,8 +34,8 @@ namespace Test.BuildXL.Ipc
         }
 
         [Theory]
-        [MemberData(nameof(CrossProduct), 
-            new object[] { 0, 1, 2 }, 
+        [MemberData(nameof(CrossProduct),
+            new object[] { 0, 1, 2 },
             new object[] { true, false },
             new object[] { 0, 1, 2 })]
         public async Task TestGetSealedDirectoryContentAsync(uint partialSealId, bool isSharedOpaque, int numSealedDirectoryFiles)
@@ -65,10 +67,10 @@ namespace Test.BuildXL.Ipc
         }
 
         [Theory]
-        [MemberData(nameof(CrossProduct), 
-            new object[] { "hi" }, 
-            new object[] { true, false }, 
-            new object[] { true, false } )]
+        [MemberData(nameof(CrossProduct),
+            new object[] { "hi" },
+            new object[] { true, false },
+            new object[] { true, false })]
         public async Task TestLogMessageAsync(string message, bool isWarning, bool expectedResult)
         {
             using var apiClient = CreateApiClient(ipcOperation =>
@@ -102,44 +104,144 @@ namespace Test.BuildXL.Ipc
         }
 
         [Fact]
-        public async Task TestRegisterFileForBuildManifestAsync()
+        public async Task TestRegisterFilesForBuildManifestAsync()
         {
             string dropName = "DropName";
-            string relativePath = "/a/b";
-            var path = X("/x/y/z");
-            var fileArtifact = OutputFile(path);
-            var hash = ContentHash.Random();
+
+            List<BuildManifestEntry> buildManifestEntries = new List<BuildManifestEntry>();
+            buildManifestEntries.Add(new BuildManifestEntry("/a/b", ContentHash.Random(), X("/x/y/z")));
+            buildManifestEntries.Add(new BuildManifestEntry("/a/c", ContentHash.Random(), X("/w/x/y/z")));
 
             using var apiClient = CreateApiClient(ipcOperation =>
             {
-                var cmd = (RegisterFileForBuildManifestCommand)Command.Deserialize(ipcOperation.Payload);
+                var cmd = (RegisterFilesForBuildManifestCommand)Command.Deserialize(ipcOperation.Payload);
                 XAssert.AreEqual(dropName, cmd.DropName);
-                XAssert.AreEqual(relativePath, cmd.RelativePath);
-                XAssert.AreEqual(hash, cmd.Hash);
-                XAssert.AreEqual(fileArtifact, cmd.File);
-                XAssert.AreEqual(path, cmd.FullFilePath);
-                return IpcResult.Success(cmd.RenderResult(true));
+                XAssert.ArrayEqual(buildManifestEntries.ToArray(), cmd.BuildManifestEntries);
+                return IpcResult.Success(cmd.RenderResult(new BuildManifestEntry[0]));
             });
-            var maybeResult = await apiClient.RegisterFileForBuildManifest(dropName, relativePath, hash, fileArtifact, path);
+
+            var maybeResult = await apiClient.RegisterFilesForBuildManifest(dropName, buildManifestEntries.ToArray());
             XAssert.PossiblySucceeded(maybeResult);
-            XAssert.AreEqual(true, maybeResult.Result);
+            XAssert.AreEqual(0, maybeResult.Result.Length);
         }
 
         [Fact]
-        public async Task TestGenerateBuildManifestDataAsync()
+        public async Task TestRegisterFilesForBuildManifestFailureAsync()
         {
             string dropName = "DropName";
-            BuildManifestData expectedData = new BuildManifestData("Version", 1598291222, new List<BuildManifestFile>());
+
+            List<BuildManifestEntry> buildManifestEntries = new List<BuildManifestEntry>();
+            buildManifestEntries.Add(new BuildManifestEntry("/a/b", ContentHash.Random(), X("/x/y/z")));
 
             using var apiClient = CreateApiClient(ipcOperation =>
             {
-                var cmd = (GenerateBuildManifestDataCommand)Command.Deserialize(ipcOperation.Payload);
+                var cmd = (RegisterFilesForBuildManifestCommand)Command.Deserialize(ipcOperation.Payload);
+                XAssert.AreEqual(dropName, cmd.DropName);
+                XAssert.ArrayEqual(buildManifestEntries.ToArray(), cmd.BuildManifestEntries);
+                return IpcResult.Success(cmd.RenderResult(buildManifestEntries.ToArray()));
+            });
+
+            var maybeResult = await apiClient.RegisterFilesForBuildManifest(dropName, buildManifestEntries.ToArray());
+            XAssert.PossiblySucceeded(maybeResult);
+            XAssert.ArrayEqual(buildManifestEntries.ToArray(), maybeResult.Result);
+        }
+
+        [Fact]
+        public async Task TestHashContentStreamAsync()
+        {
+            StreamWithLength stream = new MemoryStream(Encoding.UTF8.GetBytes("SampleString")).AssertHasLength();
+
+            ContentHash shaHash = await ContentHashingUtilities.HashContentStreamAsync(stream, HashType.SHA256);
+            ContentHash vsoHash = await ContentHashingUtilities.HashContentStreamAsync(stream, HashType.Vso0);
+
+            XAssert.AreEqual(shaHash.HashType, HashType.SHA256);
+            XAssert.AreEqual(vsoHash.HashType, HashType.Vso0);
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(1)]
+        [InlineData(5)]
+        public async Task TestGenerateBuildManifestDataAsync(int count)
+        {
+            string dropName = "DropName";
+            List<BuildManifestFileInfo> expectedData = new List<BuildManifestFileInfo>();
+
+            for (int i = 0; i < count; i++)
+            {
+                expectedData.Add(new BuildManifestFileInfo($"/path/to/{i}", $"VSO{i}", $"SHA{i}"));
+            }
+
+            using var apiClient = CreateApiClient(ipcOperation =>
+            {
+                var cmd = (GenerateBuildManifestFileListCommand)Command.Deserialize(ipcOperation.Payload);
                 XAssert.AreEqual(dropName, cmd.DropName);
                 return IpcResult.Success(cmd.RenderResult(expectedData));
             });
-            var maybeResult = await apiClient.GenerateBuildManifestData(dropName);
+
+            var maybeResult = await apiClient.GenerateBuildManifestFileList(dropName);
             XAssert.PossiblySucceeded(maybeResult);
-            XAssert.AreEqual(expectedData, maybeResult.Result);
+            XAssert.IsTrue(expectedData.SequenceEqual(maybeResult.Result));
+        }
+
+        [Fact]
+        public void TestBuildManifestFileInfoParsing()
+        {
+            BuildManifestFileInfo info1 = new BuildManifestFileInfo("/path/a", "VSOa", "SHAa");
+            BuildManifestFileInfo info2 = new BuildManifestFileInfo("/path/x", "VSOx", "SHAx");
+
+            string str1 = info1.ToString();
+            string str2 = info2.ToString();
+
+            XAssert.IsTrue(BuildManifestFileInfo.TryParse(str1, out BuildManifestFileInfo parsedInfo1));
+            XAssert.IsTrue(BuildManifestFileInfo.TryParse(str2, out BuildManifestFileInfo parsedInfo2));
+
+            XAssert.AreEqual(info1, parsedInfo1);
+            XAssert.AreEqual(info2, parsedInfo2);
+
+            XAssert.IsFalse(BuildManifestFileInfo.TryParse("123|123|123|", out _));
+            XAssert.IsFalse(BuildManifestFileInfo.TryParse("123|123", out _));
+            XAssert.IsFalse(BuildManifestFileInfo.TryParse("123", out _));
+
+            XAssert.IsTrue(ThrowsException(() => BuildManifestFileInfo.TryParse("|123|123", out _)));
+            XAssert.IsTrue(ThrowsException(() => BuildManifestFileInfo.TryParse("123||123", out _)));
+            XAssert.IsTrue(ThrowsException(() => BuildManifestFileInfo.TryParse("123|123|", out _)));
+        }
+
+        [Fact]
+        public void TestGenerateBuildManifestFileListCommandParsing()
+        {
+            GenerateBuildManifestFileListCommand cmd = new GenerateBuildManifestFileListCommand("dropName");
+            XAssert.IsTrue(cmd.TryParseResult("0", out List<BuildManifestFileInfo> temp1));
+            XAssert.AreEqual(0, temp1.Count);
+            XAssert.IsFalse(cmd.TryParseResult("NaN", out _));
+
+            using var stringBuilderPoolInstance = Pools.StringBuilderPool.GetInstance();
+            var sb = stringBuilderPoolInstance.Instance;
+            sb.AppendLine($"1");
+            sb.AppendLine($"invalid|count");
+            XAssert.IsFalse(cmd.TryParseResult(sb.ToString(), out _));
+
+            sb.Clear();
+            sb.AppendLine($"1");
+            sb.AppendLine($"/path/a|VSO|SHA");
+            XAssert.IsTrue(cmd.TryParseResult(sb.ToString(), out _));
+        }
+
+        private bool ThrowsException(Action action)
+        {
+            try
+            {
+                action();
+            }
+#pragma warning disable ERP022 // Unobserved exception in generic exception handler
+            catch
+            {
+                return true;
+            }
+#pragma warning restore ERP022 // Unobserved exception in generic exception handler
+
+            return false;
         }
 
         [Theory]
@@ -286,43 +388,21 @@ namespace Test.BuildXL.Ipc
             XAssert.IsFalse(SealedDirectoryFile.TryParse(str, out _));
         }
 
-        [Theory]
-        [InlineData("")]                  // no separators
-        [InlineData("string|1")]          // too few separators
-        [InlineData("string|not-long|0")] // 2th field not a long
-        [InlineData("string|1|not-int")]  // 3rd field not an int
-        public void TestInvalidBuildManifestData(string str)
-        {
-            XAssert.IsFalse(BuildManifestData.TryParse(str, out _));
-        }
-
-        [Theory]
-        [InlineData("string|1|0", true)]
-        [InlineData("string|1|0|string", false)]                             // too many output separators
-        [InlineData("string|1|1|string|string|string", true)]
-        [InlineData("string|1|1|string|string|string|string", false)]        // too many output separators
-        [InlineData("string|1|2|string|string|string|string|string", false)] // too few output separators
-        [InlineData("string|1|2|string|string|string|string|string|string", true)]
-        public void TestOutputCountInBuildManifestData(string str, bool isValid)
-        {
-            XAssert.AreEqual(BuildManifestData.TryParse(str, out _), isValid);
-        }
-
         [Fact]
         public void TestValidBuildManifestData()
         {
             List<BuildManifestFile> outputs = new List<BuildManifestFile>();
-            BuildManifestData data0 = new BuildManifestData("Version", 1598291222, outputs);
+            BuildManifestData data0 = new BuildManifestData("Version", 1598291222, "cbId", "Repo", "branch", "commitId", outputs);
             XAssert.IsTrue(BuildManifestData.TryParse(data0.ToString(), out var parsedData0));
             XAssert.AreEqual(data0, parsedData0);
 
             outputs.Add(new BuildManifestFile("relativePath1", "vsohash", "sha256Hash"));
-            BuildManifestData data1 = new BuildManifestData("Version", 1598291222, outputs);
+            BuildManifestData data1 = new BuildManifestData("Version", 1598291222, "cbId", "Repo", "branch", "commitId", outputs);
             XAssert.IsTrue(BuildManifestData.TryParse(data1.ToString(), out var parsedData1));
             XAssert.AreEqual(data1, parsedData1);
 
             outputs.Add(new BuildManifestFile("relativePath2", "vsohash", "sha256Hash"));
-            BuildManifestData data2 = new BuildManifestData("Version", 1598291222, outputs);
+            BuildManifestData data2 = new BuildManifestData("Version", 1598291222, "cbId", "Repo", "branch", "commitId", outputs);
             XAssert.IsTrue(BuildManifestData.TryParse(data2.ToString(), out var parsedData2));
             XAssert.AreEqual(data2, parsedData2);
         }
@@ -333,13 +413,13 @@ namespace Test.BuildXL.Ipc
             List<BuildManifestFile> outputs0 = new List<BuildManifestFile>();
             outputs0.Add(new BuildManifestFile("relativePath", "vsohash", "sha256Hash"));
 
-            BuildManifestData data0 = new BuildManifestData("Version", 1598291222, outputs0);
+            BuildManifestData data0 = new BuildManifestData("Version", 1598291222, "cbId", "Repo", "branch", "commitId", outputs0);
             int hashCode0 = data0.GetHashCode();
 
             List<BuildManifestFile> outputs1 = new List<BuildManifestFile>();
             outputs1.Add(new BuildManifestFile("relativePath", "vsohash", "sha256Hash"));
 
-            BuildManifestData data1 = new BuildManifestData("Version", 1598291222, outputs1);
+            BuildManifestData data1 = new BuildManifestData("Version", 1598291222, "cbId", "Repo", "branch", "commitId", outputs1);
             int hashCode1 = data1.GetHashCode();
 
             XAssert.AreEqual(hashCode0, hashCode1);
@@ -347,7 +427,7 @@ namespace Test.BuildXL.Ipc
 
             List<BuildManifestFile> outputs2 = new List<BuildManifestFile>();
             outputs2.Add(new BuildManifestFile("relativePath2", "vsohash", "sha256Hash"));
-            BuildManifestData data2 = new BuildManifestData("Version", 1598291222, outputs2);
+            BuildManifestData data2 = new BuildManifestData("Version", 1598291222, "cbId", "Repo", "branch", "commitId", outputs2);
 
             XAssert.AreNotEqual(data0, data2);
         }

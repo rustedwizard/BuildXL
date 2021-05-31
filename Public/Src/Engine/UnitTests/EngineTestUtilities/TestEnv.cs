@@ -398,6 +398,15 @@ namespace Test.BuildXL.TestUtilities
             {
                 throw new NotImplementedException();
             }
+
+            /// <inheritdoc />
+            public Pip GetPipFromPipId(PipId pipId) 
+            {
+                return m_pips.FirstOrDefault(pip => pip.PipId == pipId);
+            }
+
+            /// <inheritdoc />
+            public bool TryAssertOutputExistenceInOpaqueDirectory(DirectoryArtifact outputDirectoryArtifact, AbsolutePath outputInOpaque, out FileArtifact fileArtifact) => throw new NotImplementedException();
         }
 
         /// <summary>

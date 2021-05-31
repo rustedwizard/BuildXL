@@ -5,7 +5,6 @@ import * as Deployment from "Sdk.Deployment";
 import * as Shared     from "Sdk.Managed.Shared";
 import * as Frameworks from "Sdk.Managed.Frameworks";
 import * as Csc        from "Sdk.Managed.Tools.Csc";
-import * as Ilc        from "Sdk.Managed.Tools.ILCompiler";
 import * as ResGen     from "Sdk.Managed.Tools.ResGen.Lite";
 import * as AppPatcher from "Sdk.Managed.Tools.AppHostPatcher";
 import * as Xml        from "Sdk.Xml";
@@ -80,9 +79,11 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
         ...addIf(qualifier.targetRuntime === "win-x64" && qualifier.targetFramework === "net472" && qualifier.configuration === "debug", "CompileDebugNet472", "CompileWin"),
         ...addIf(qualifier.targetRuntime === "win-x64" && qualifier.targetFramework === "netstandard2.0" && qualifier.configuration === "debug", "CompileNetStandard20", "CompileWin"),
         ...addIf(qualifier.targetRuntime === "win-x64" && qualifier.targetFramework === "netcoreapp3.1" && qualifier.configuration === "debug", "CompileDebugNetCoreWin", "CompileWin"),
+        ...addIf(qualifier.targetRuntime === "win-x64" && qualifier.targetFramework === "net5.0" && qualifier.configuration === "debug", "CompileDebugNet5Win", "CompileWin"),
         ...addIf(qualifier.targetRuntime === "osx-x64" && qualifier.targetFramework === "netcoreapp3.1" && qualifier.configuration === "debug", "CompileOsx"),
+        ...addIf(qualifier.targetRuntime === "osx-x64" && qualifier.targetFramework === "net5.0" && qualifier.configuration === "debug", "CompileNet5Osx"),
         ...addIf(qualifier.targetRuntime === "linux-x64" && qualifier.targetFramework === "netcoreapp3.1" && qualifier.configuration === "debug", "CompileLinux"),
-        ];
+        ...addIf(qualifier.targetRuntime === "linux-x64" && qualifier.targetFramework === "net5.0" && qualifier.configuration === "debug", "CompileNet5Linux")];
 
     // csc
     let outputFileName = name + targetTypeToFileExtension(targetType, args.deploymentStyle);
@@ -116,6 +117,7 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
             ...framework.conditionalCompileDefines,
             ...targetRuntimeDefines,
             ...(args.defineConstants || []),
+            ...(Environment.getFlag("[Sdk.BuildXL]microsoftInternal") ? ["MICROSOFT_INTERNAL"] : [])
         ],
         nullable: args.nullable,
         nullabilityContext: args.nullabilityContext,
@@ -124,6 +126,7 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
 
     const references = [
         ...(args.references || []),
+        ...(args.runtimeReferences || []),
         ...framework.standardReferences,
     ];
 
@@ -399,6 +402,9 @@ export interface Arguments {
     /** References. */
     references?: Shared.Reference[];
 
+    /** References not used at compile-time but deployed alongside assembly and include in runtime dependencies */
+    runtimeReferences?: Shared.Reference[];
+
     /** Defined constants. */
     defineConstants?: string[];
 
@@ -487,9 +493,6 @@ export interface Arguments {
 
         /** ResGen default args */
         resgen?: ResGen.Arguments;
-
-        /** Ilc default args */
-        ilc?: Ilc.Arguments;
     };
 
     /** Options that control how this compiled assembly gets deployed */

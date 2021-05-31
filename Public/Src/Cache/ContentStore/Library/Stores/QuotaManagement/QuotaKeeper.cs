@@ -51,7 +51,7 @@ namespace BuildXL.Cache.ContentStore.Stores
 
         private readonly CancellationToken _token;
 
-        private readonly IContentStoreInternal _store;
+        private readonly FileSystemContentStoreInternal _store;
         private readonly IDistributedLocationStore? _distributedStore;
 
         private readonly BlockingCollection<QuotaRequest> _reserveQueue;
@@ -102,11 +102,11 @@ namespace BuildXL.Cache.ContentStore.Stores
             ContentStoreInternalTracer tracer,
             QuotaKeeperConfiguration configuration,
             CancellationToken token,
-            IContentStoreInternal store,
+            FileSystemContentStoreInternal store,
             IDistributedLocationStore? distributedStore)
         {
             _contentStoreTracer = tracer;
-            Tracer = new Tracer(name: Component);
+            Tracer = new Tracer(name: $"{Component}({store.RootPath})");
             _allContentSize = configuration.ContentDirectorySize;
             _token = token;
             _store = store;
@@ -122,7 +122,7 @@ namespace BuildXL.Cache.ContentStore.Stores
             IAbsFileSystem fileSystem,
             ContentStoreInternalTracer tracer,
             CancellationToken token,
-            IContentStoreInternal store,
+            FileSystemContentStoreInternal store,
             IDistributedLocationStore? distributedStore,
             QuotaKeeperConfiguration configuration)
         {
@@ -160,13 +160,13 @@ namespace BuildXL.Cache.ContentStore.Stores
 
             if (_processReserveRequestsTask != null)
             {
-                context.TraceDebug($"{Tracer.Name}: waiting for pending reservation requests.");
+                Tracer.Debug(context, $"Waiting for pending reservation requests.");
                 await _processReserveRequestsTask;
             }
 
             if (!_purgeTask.IsCompleted)
             {
-                context.TraceDebug($"{Tracer.Name}: waiting for purge task.");
+                Tracer.Debug(context, $"Waiting for purge task.");
                 return await _purgeTask;
             }
 
@@ -220,7 +220,7 @@ namespace BuildXL.Cache.ContentStore.Stores
         private List<IQuotaRule> CreateRules(
             IAbsFileSystem fileSystem,
             QuotaKeeperConfiguration configuration,
-            IContentStoreInternal store)
+            FileSystemContentStoreInternal store)
         {
             var rules = new List<IQuotaRule>();
 

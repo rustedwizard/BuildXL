@@ -35,7 +35,7 @@ namespace BuildXL.Cache.Roxis.Server
         protected override Task<BoolResult> StartupCoreAsync(OperationContext context)
         {
             var bindAddress = _configuration.BindAddress;
-            context.TraceInfo($"gRPC service binding on address {bindAddress}:{_configuration.Port}");
+            context.TracingContext.Info($"gRPC service binding on address {bindAddress}:{_configuration.Port}", component: nameof(RoxisGrpcService));
 
             _grpcServer = new GrpcCore.Server(GrpcEnvironment.GetServerOptions())
             {
@@ -80,7 +80,7 @@ namespace BuildXL.Cache.Roxis.Server
                 _service = service;
             }
 
-            public override async Task<Reply> Execute(Request request, ServerCallContext callContext)
+            public override Task<Reply> Execute(Request request, ServerCallContext callContext)
             {
                 // TODO: read-only stream wrap over a span
                 // TODO: unsafe byte string
@@ -88,12 +88,12 @@ namespace BuildXL.Cache.Roxis.Server
                 // TODO: operation context via HTTP headers
                 // TODO: resource handling here.
 
-                Guid operationId = _context.TracingContext.Id;
+                string operationId = _context.TracingContext.TraceId;
                 foreach (var header in callContext.RequestHeaders)
                 {
                     if (header.Key.Equals("X-Cache-Operation-Id", StringComparison.OrdinalIgnoreCase))
                     {
-                        Guid.TryParse(header.Value, out operationId);
+                        operationId = header.Value;
                         break;
                     }
                 }
@@ -101,7 +101,7 @@ namespace BuildXL.Cache.Roxis.Server
                 var tracingContext = new Context(operationId, _context.TracingContext.Logger);
                 var operationContext = new OperationContext(tracingContext, token: callContext.CancellationToken);
 
-                return await operationContext.PerformNonResultOperationAsync(Tracer, async () =>
+                return operationContext.PerformNonResultOperationAsync(Tracer, async () =>
                 {
                     var commandRequest = _serializationPool.Deserialize(request.Request_.ToByteArray(), reader => CommandRequest.Deserialize(reader));
 

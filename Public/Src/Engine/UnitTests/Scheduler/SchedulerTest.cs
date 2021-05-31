@@ -302,6 +302,29 @@ namespace Test.BuildXL.Scheduler
             return RunScheduler();
         }
 
+        [Feature(Features.Mount)]
+        [Fact]
+        public Task TestWarnOnOutputOutsideMount()
+        {
+            Setup();
+            string outOfMount = Path.Combine(TemporaryDirectory, "outOfMount");
+            
+            FileArtifact outputFile = CreateOutputFileArtifact(outOfMount);
+            DirectoryArtifact outputDirectory = CreateOutputDirectoryArtifact(outOfMount);
+            
+            Process process = CreateProcess(
+                dependencies: new FileArtifact[] { },
+                outputs: new[] { outputFile },
+                outputDirectoryPaths: new[] { outputDirectory.Path });
+
+            XAssert.IsTrue(PipGraphBuilder.AddProcess(process));
+
+            var result = RunScheduler();
+            AssertWarningEventLogged(PipLogEventId.WriteDeclaredOutsideOfKnownMount, 2);
+
+            return result;
+        }
+
         [Feature(Features.SealedDirectory)]
         [Fact]
         [SuppressMessage("AsyncUsage", "AsyncFixer02", Justification = "ReadAllText and WriteAllText have async versions in .NET Standard which cannot be used in full framework.")]
@@ -377,7 +400,7 @@ namespace Test.BuildXL.Scheduler
                 Contract.Assert(cacheLayer != null);
 
                 Contract.Assume(scheduler != null);
-                scheduler.InitForMaster(LoggingContext, sandboxConnectionKext: GetSandboxConnection());
+                scheduler.InitForOrchestrator(LoggingContext, sandboxConnectionKext: GetSandboxConnection());
                 scheduler.Start(LoggingContext);
 
                 bool success = scheduler.WhenDone().Result;
@@ -1312,7 +1335,7 @@ namespace Test.BuildXL.Scheduler
                 directoryTranslator: directoryTranslator,
                 testHooks: testHooks);
 
-            bool success = m_scheduler.InitForMaster(LoggingContext, filter);
+            bool success = m_scheduler.InitForOrchestrator(LoggingContext, filter);
             XAssert.IsTrue(success);
 
             m_scheduler.Start(LoggingContext);
@@ -1350,6 +1373,7 @@ namespace Test.BuildXL.Scheduler
             PipProvenance provenance = null,
             IEnumerable<DirectoryArtifact> directoryDependencies = null,
             IEnumerable<AbsolutePath> outputDirectoryPaths = null,
+            IEnumerable<DirectoryArtifact> sharedOutputDirectories = null,
             IEnumerable<PipId> orderDependencies = null,
             IEnumerable<FileArtifact> directoryDependenciesToConsume = null,
             IEnumerable<FileArtifact> directoryOutputsToProduce = null,
@@ -1367,6 +1391,7 @@ namespace Test.BuildXL.Scheduler
                 provenance,
                 directoryDependencies,
                 outputDirectoryPaths,
+                sharedOutputDirectories ?? CollectionUtilities.EmptyArray<DirectoryArtifact>(),
                 orderDependencies,
                 directoryDependenciesToConsume,
                 directoryOutputsToProduce,
@@ -1484,6 +1509,7 @@ namespace Test.BuildXL.Scheduler
             PipProvenance provenance = null,
             IEnumerable<DirectoryArtifact> directoryDependencies = null,
             IEnumerable<AbsolutePath> outputDirectoryPaths = null,
+            IEnumerable<DirectoryArtifact> sharedOutputDirectories = null,
             IEnumerable<PipId> orderDependencies = null,
             IEnumerable<FileArtifact> directoryDependenciesToConsume = null,
             IEnumerable<FileArtifact> directoryOutputsToProduce = null,
@@ -1498,11 +1524,14 @@ namespace Test.BuildXL.Scheduler
             FileArtifact executable = GetCmdExecutable();
 
             environmentVariables = environmentVariables ?? Enumerable.Empty<EnvironmentVariable>();
-            DirectoryArtifact[] outputDirectories = null;
+            IEnumerable<DirectoryArtifact> outputDirectories = CollectionUtilities.EmptyArray<DirectoryArtifact>();
 
             if (outputDirectoryPaths != null)
             {
-                outputDirectories = outputDirectoryPaths.Select(OutputDirectory.Create).ToArray();
+                outputDirectories = outputDirectoryPaths
+                    .Select(OutputDirectory.Create)
+                    .ToArray();
+
                 if (resultingSealedOutputDirectories != null)
                 {
                     foreach (var directory in outputDirectories)
@@ -1512,9 +1541,14 @@ namespace Test.BuildXL.Scheduler
                 }
             }
 
+            if (sharedOutputDirectories != null)
+            {
+                outputDirectories = outputDirectories.Union(sharedOutputDirectories);
+            }
+
             var finalDependencies = dependencies.Union(directoryDependenciesToConsume ?? ReadOnlyArray<FileArtifact>.Empty);
             var finalOutputs = outputs.Select(f => f.ToFileArtifact()).Union(directoryOutputsToProduce ?? ReadOnlyArray<FileArtifact>.Empty);
-
+            
             var process =
                 new Process(
                     executable,
@@ -1908,6 +1942,72 @@ namespace Test.BuildXL.Scheduler
             AssertSchedulerErrorEventLogged(PipLogEventId.InvalidOutputSincePreviousVersionUsedAsInput);
 
             return RunScheduler();
+        }
+
+        [Fact]
+        [Feature(Features.RewrittenFile)]
+        public void AssertedOutputUnderOpaqueIsValidated()
+        {
+            Setup();
+            FileArtifact depArtifact1 = CreateSourceFile();
+            FileArtifact outArtifact1 = CreateOutputFileArtifact();
+
+            Process process = CreateProcess(
+                new List<FileArtifact> { depArtifact1 },
+                new List<FileArtifact> { outArtifact1 });
+
+            bool addProcess = PipGraphBuilder.AddProcess(process);
+            XAssert.IsTrue(addProcess);
+
+            var outputDirectory = PipGraphBuilder.ReserveSharedOpaqueDirectory(outArtifact1.Path.GetParent(Context.PathTable));
+
+            Process processToo = CreateProcess(
+               dependencies: new List<FileArtifact> { depArtifact1 },
+               outputs: new List<FileArtifact>(),
+               sharedOutputDirectories: new List<DirectoryArtifact> { outputDirectory });
+
+            addProcess = PipGraphBuilder.AddProcess(processToo);
+            XAssert.IsTrue(addProcess);
+
+            bool existenceAsserted = PipGraphBuilder.TryAssertOutputExistenceInOpaqueDirectory(processToo.DirectoryOutputs.Single(), outArtifact1.Path, out _);
+            XAssert.IsFalse(existenceAsserted);
+
+            // Static checks on declared outputs should work as usual
+            AssertSchedulerErrorEventLogged(PipLogEventId.InvalidOutputDueToSimpleDoubleWrite);
+        }
+
+        [Fact]
+        [Feature(Features.RewrittenFile)]
+        public void CompositeOpaquesDontSupportAssertions()
+        {
+            Setup();
+            FileArtifact depArtifact1 = CreateSourceFile();
+            FileArtifact outArtifact1 = CreateOutputFileArtifact();
+
+            Process process = CreateProcess(
+                new List<FileArtifact> { depArtifact1 },
+                new List<FileArtifact> { outArtifact1 });
+
+            bool addProcess = PipGraphBuilder.AddProcess(process);
+            XAssert.IsTrue(addProcess);
+
+            var outputDirectory = PipGraphBuilder.ReserveSharedOpaqueDirectory(outArtifact1.Path.GetParent(Context.PathTable));
+
+            Process processToo = CreateProcess(
+               dependencies: new List<FileArtifact> { depArtifact1 },
+               outputs: new List<FileArtifact>(),
+               sharedOutputDirectories: new List<DirectoryArtifact> { outputDirectory });
+
+            addProcess = PipGraphBuilder.AddProcess(processToo);
+            XAssert.IsTrue(addProcess);
+
+            PipConstructionHelper.TryComposeSharedOpaqueDirectory(outputDirectory, new[] { outputDirectory }, SealDirectoryCompositionActionKind.WidenDirectoryCone, null, "Test", new string[] { }, out var compositeSharedOpaque);
+
+            bool existenceAsserted = PipGraphBuilder.TryAssertOutputExistenceInOpaqueDirectory(compositeSharedOpaque, outArtifact1.Path, out _);
+            XAssert.IsFalse(existenceAsserted);
+
+            // Static checks on declared outputs should work as usual
+            AssertSchedulerErrorEventLogged(global::BuildXL.Pips.Tracing.LogEventId.ScheduleFailAddPipAssertionNotSupportedInCompositeOpaques);
         }
 
         [Fact]
@@ -2362,12 +2462,12 @@ namespace Test.BuildXL.Scheduler
             return DoIpcTagFilteringTest(CreateGraphForTagFilterTestingWithIpcAndCopyPips, allowlistTags, blocklistTags, a1Done, a2Done, b1Done, b2Done, pDone);
         }
 
-        private async Task DoIpcTagFilteringTest(Func<IpcClientInfo, TestGraphForTagFilter> graphFactory, string allowlistTags, string blocklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
+        private Task DoIpcTagFilteringTest(Func<IpcClientInfo, TestGraphForTagFilter> graphFactory, string allowlistTags, string blocklistTags, bool a1Done, bool a2Done, bool b1Done, bool b2Done, bool pDone)
         {
             Setup(disableLazyOutputMaterialization: true);
 
             var ipcProvider = new DummyIpcProvider();
-            await WithIpcServer(
+            return WithIpcServer(
                 ipcProvider,
                 s_succeedingEchoingIpcExecutor,
                 new ServerConfig(),
@@ -2459,7 +2559,6 @@ namespace Test.BuildXL.Scheduler
 
         // when one opens a file for writing on Unix, others can still read it
         [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        [SuppressMessage("AsyncUsage", "AsyncFixer02:MissingAsyncOpportunity")]
         public async Task TestSourceFileLocked()
         {
             Setup();
@@ -2596,20 +2695,66 @@ namespace Test.BuildXL.Scheduler
         [Fact]
         public void TestRecordFileForBuildManifest()
         {
-            BuildManifestGenerator buildManifestGenerator = new BuildManifestGenerator(LoggingContext, Context.StringTable, "cbId");
+            BuildManifestGenerator buildManifestGenerator = new BuildManifestGenerator(LoggingContext, Context.StringTable ?? new StringTable());
 
             string relativePath = "/a/b";
             ContentHash hash0 = ContentHash.Random();
             ContentHash hash1 = ContentHash.Random();
 
-            buildManifestGenerator.RecordFileForBuildManifest("drop0", relativePath, hash0, hash0);     // Will be added
-            buildManifestGenerator.RecordFileForBuildManifest("drop0", relativePath, hash0, hash0);     // Duplicate entry will be ignored
-            buildManifestGenerator.RecordFileForBuildManifest("drop0", relativePath, hash1, hash1);     // Records duplicate entry
-            buildManifestGenerator.RecordFileForBuildManifest("drop1", relativePath, hash0, hash0);     // Will be added
-            buildManifestGenerator.RecordFileForBuildManifest("drop2", relativePath, hash0, hash0);     // Will be added
+            List<BuildManifestEntry> targets = new List<BuildManifestEntry>();
+            targets.Add(new BuildManifestEntry("drop0", relativePath, hash0, hash0));     // Will be added
+            targets.Add(new BuildManifestEntry("drop0", relativePath, hash0, hash0));     // Duplicate entry will be ignored
+            targets.Add(new BuildManifestEntry("drop0", relativePath, hash1, hash1));     // Records duplicate entry
+            targets.Add(new BuildManifestEntry("drop1", relativePath, hash0, hash0));     // Will be added
+            targets.Add(new BuildManifestEntry("drop2", relativePath, hash0, hash0));     // Will be added
+
+            buildManifestGenerator.RecordFileForBuildManifest(targets);
 
             XAssert.AreEqual(3, buildManifestGenerator.BuildManifestEntries.Count);
             XAssert.AreEqual(1, buildManifestGenerator.DuplicateEntries("drop0").Count);
+        }
+
+        [Fact]
+        public void TestGenerateBuildManifest()
+        {
+            BuildManifestGenerator buildManifestGenerator = new BuildManifestGenerator(LoggingContext, new StringTable());
+
+            string dropName = "drop0";
+
+            List<BuildManifestEntry> targets = new List<BuildManifestEntry>();
+            targets.Add(new BuildManifestEntry(dropName, "/a/b", ContentHash.Random(), ContentHash.Random()));
+            targets.Add(new BuildManifestEntry(dropName, "/a/c", ContentHash.Random(), ContentHash.Random()));
+            targets.Add(new BuildManifestEntry(dropName, "/a/d", ContentHash.Random(), ContentHash.Random()));
+            targets.Add(new BuildManifestEntry(dropName, "/b/c", ContentHash.Random(), ContentHash.Random()));
+
+            buildManifestGenerator.RecordFileForBuildManifest(targets);
+
+            XAssert.IsTrue(buildManifestGenerator.TryGenerateBuildManifestFileList(dropName, out string error, out var buildManifestFileList), $"Failure during Build Manifest generation: {error}");
+            XAssert.IsNull(error);
+            XAssert.AreEqual(4, buildManifestFileList.Count);
+        }
+
+        [Fact]
+        public void TestGenerateBuildManifestFailure()
+        {
+            BuildManifestGenerator buildManifestGenerator = new BuildManifestGenerator(LoggingContext, new StringTable());
+
+            string dropName = "drop0";
+
+            List<BuildManifestEntry> targets = new List<BuildManifestEntry>();
+            targets.Add(new BuildManifestEntry(dropName, "/a/b", ContentHash.Random(), ContentHash.Random()));
+            targets.Add(new BuildManifestEntry(dropName, "/a/b", ContentHash.Random(), ContentHash.Random()));      // Register same path with different Hash value
+            targets.Add(new BuildManifestEntry(dropName, "/a/b", ContentHash.Random(), ContentHash.Random()));      // Register same path with different Hash value
+            targets.Add(new BuildManifestEntry(dropName, "/a/c", ContentHash.Random(), ContentHash.Random()));
+
+            buildManifestGenerator.RecordFileForBuildManifest(targets);
+
+            XAssert.AreEqual(2, buildManifestGenerator.DuplicateEntries(dropName).Count);
+            XAssert.IsFalse(buildManifestGenerator.TryGenerateBuildManifestFileList(dropName, out string error, out var buildManifestFileList));
+            XAssert.IsNull(buildManifestFileList);
+            XAssert.IsNotNull(error);
+            AssertWarningEventLogged(LogEventId.BuildManifestGeneratorFoundDuplicateHash, 2);
+            AssertErrorEventLogged(LogEventId.GenerateBuildManifestFileListFoundDuplicateHashes, 1);
         }
 
         #region ProtoBufEnumsTests
@@ -2738,6 +2883,65 @@ namespace Test.BuildXL.Scheduler
         }
 
         /// <summary>
+        /// Tests whether registering a static directory will fail when one of the files to be scrubbed
+        /// within the directory is still in use.
+        /// </summary>
+        /// <remarks> 
+        /// Due to the way file IO is handled in unix, this test does not apply. Once a file handle is
+        /// opened, it can still be moved/deleted/renamed without throwing an exception.
+        /// Therefore we shouldn't see this exception thrown on unix.
+        /// </remarks>
+        [FactIfSupported(requiresWindowsBasedOperatingSystem: true)]
+        public async Task TestIOExceptionOnSealDirectory()
+        {
+            Setup();
+            var dirPath = CreateUniqueSourcePath();
+            var sealFile = CreateSourceFile(dirPath.ToString(Context.PathTable));
+            var fileToBeScrubbed = CreateSourceFile(dirPath.ToString(Context.PathTable));
+            var sealDirectory = CreateSealDirectory(dirPath, SealDirectoryKind.Full, true, sealFile);
+
+            PipGraphBuilder.AddSealDirectory(sealDirectory);
+
+            using (File.Open(fileToBeScrubbed.Path.ToString(Context.PathTable), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                bool success = await RunScheduler();
+
+                XAssert.IsFalse(success);
+                AssertSchedulerErrorEventLogged(LogEventId.FailedToSealDirectory);
+                AssertLogContains(false, "Deleting a file failed");
+            }
+        }
+
+        /// <summary>
+        /// Tests the DumpFailedPips flag to ensure that the execution log target is
+        /// added when the flag is enabled.
+        /// </summary>
+        /// <param name="enableLogging"> Test with the flag enabled or disabled </param>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task TestDumpFailedPipsFlagLoggingTarget(bool enableLogging)
+        {
+            Setup();
+            m_configuration.Logging.DumpFailedPips = enableLogging;
+            await RunScheduler();
+
+            var logTargets = ((MultiExecutionLogTarget)m_scheduler.ExecutionLog).LogTargets;
+            bool containsDumpPipLiteTarget = false;
+
+            foreach (var target in logTargets)
+            {
+                if (target.GetType().Equals(typeof(DumpPipLiteExecutionLogTarget)))
+                {
+                    containsDumpPipLiteTarget = true;
+                    break;
+                }
+            }
+
+            XAssert.IsTrue(containsDumpPipLiteTarget == enableLogging);
+        }
+
+        /// <summary>
         /// Helper method to check that a BXL enum matches its corresponding ProtoBuf Enum, and the two enums are not shifted
         /// </summary>
         private void VerifyNonShiftedEnumsAreEqual(Type bxlEnum, Type protobufEnum)
@@ -2808,7 +3012,7 @@ namespace Test.BuildXL.Scheduler
                 tempCleaner: MoveDeleteCleaner,
                 testHooks: new SchedulerTestHooks());
 
-            newScheduler.InitForMaster(LoggingContext, filter);
+            newScheduler.InitForOrchestrator(LoggingContext, filter);
 
             testQueue.Unpause();
             newScheduler.Start(LoggingContext);

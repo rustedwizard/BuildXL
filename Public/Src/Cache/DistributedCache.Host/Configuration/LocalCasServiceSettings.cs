@@ -3,6 +3,7 @@
 
 using System.Runtime.Serialization;
 using BuildXL.Cache.ContentStore.Grpc;
+#nullable disable
 
 namespace BuildXL.Cache.Host.Configuration
 {
@@ -28,8 +29,7 @@ namespace BuildXL.Cache.Host.Configuration
             string scenarioName = null,
             uint grpcPort = 0,
             string grpcPortFileName = null,
-            int? bufferSizeForGrpcCopies = null,
-            int? gzipBarrierSizeForGrpcCopies = null
+            int? bufferSizeForGrpcCopies = null
             )
         {
             DefaultSingleInstanceTimeoutSec = defaultSingleInstanceTimeoutSec;
@@ -39,7 +39,6 @@ namespace BuildXL.Cache.Host.Configuration
             GrpcPort = grpcPort;
             GrpcPortFileName = grpcPortFileName;
             BufferSizeForGrpcCopies = bufferSizeForGrpcCopies;
-            GzipBarrierSizeForGrpcCopies = gzipBarrierSizeForGrpcCopies;
         }
 
         /// <summary>
@@ -86,13 +85,13 @@ namespace BuildXL.Cache.Host.Configuration
         /// Period of inactivity after which sessions are shutdown and forgotten.
         /// </summary>
         [DataMember]
-        public int? UnusedSessionTimeoutMinutes { get; set; } = null;
+        public double? UnusedSessionTimeoutMinutes { get; set; } = null;
 
         /// <summary>
         /// Period of inactivity after which sessions with a heartbeat are shutdown and forgotten.
         /// </summary>
         [DataMember]
-        public int? UnusedSessionHeartbeatTimeoutMinutes { get; set; } = null;
+        public double? UnusedSessionHeartbeatTimeoutMinutes { get; set; } = null;
 
         /// <summary>
         /// Gets the buffer size used during streaming for GRPC copies.
@@ -101,16 +100,27 @@ namespace BuildXL.Cache.Host.Configuration
         public int? BufferSizeForGrpcCopies { get; set; } = null;
 
         /// <summary>
-        /// Gets or sets the the max number of proactive pushes requests handled at the same time by a server.
+        /// Gets or sets the max number of proactive pushes requests handled at the same time by a server.
         /// </summary>
         [DataMember]
         public int? MaxProactivePushRequestHandlers { get; set; }
 
         /// <summary>
-        /// Files greater than this size will be compressed via GZip when GZip is enabled.
+        /// Gets or sets the max number of copy operations that can happen at the same time from this machine.
         /// </summary>
         [DataMember]
-        public int? GzipBarrierSizeForGrpcCopies { get; set; } = null;
+        public int? MaxCopyFromHandlers { get; set; }
+
+        /// <summary>
+        /// Whether to ensure long-running actions keep their sessions open.
+        /// </summary>
+        /// <remarks>
+        /// If the heartbeat for a session is equals to the session's TTL, and a single operation runs longer then the TTL, then
+        /// the backend will close the session due to the expiry.
+        /// If this flag is set, the session won't be closed in this case.
+        /// </remarks>
+        [DataMember]
+        public bool? DoNotShutdownSessionsInUse { get; set; }
 
         /// <nodoc />
         [DataMember]

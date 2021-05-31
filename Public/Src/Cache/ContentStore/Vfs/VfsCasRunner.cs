@@ -25,7 +25,7 @@ namespace BuildXL.Cache.ContentStore.Vfs
     /// </summary>
     public class VfsCasRunner
     {
-        private Tracer Tracer { get; } = new Tracer(nameof(VfsCasRunner));
+        private static readonly Tracer Tracer= new Tracer(nameof(VfsCasRunner));
 
         public async Task RunAsync(VfsServiceConfiguration configuration)
         {
@@ -35,12 +35,6 @@ namespace BuildXL.Cache.ContentStore.Vfs
             {
                 var fileSystem = new PassThroughFileSystem(logger);
                 var context = new OperationContext(new Context(logger));
-
-                // Map junctions into VFS root
-                foreach (var mount in configuration.CasConfiguration.VirtualizationMounts)
-                {
-                    CreateJunction(context, source: mount.Value, target: configuration.CasConfiguration.VfsMountRootPath / mount.Key);
-                }
 
                 var clientContentStore = new ServiceClientContentStore(
                     logger,
@@ -82,7 +76,7 @@ namespace BuildXL.Cache.ContentStore.Vfs
 
             Console.CancelKeyPress += (sender, args) =>
             {
-                context.Debug("Terminating due to cancellation request on console.");
+                Tracer.Debug(context, "Terminating due to cancellation request on console.");
                 termination.TrySetResult(true);
             };
 
@@ -93,13 +87,13 @@ namespace BuildXL.Cache.ContentStore.Vfs
                 {
                     if (line.Equals("exit", StringComparison.OrdinalIgnoreCase))
                     {
-                        context.Debug("Terminating due to exit request on console.");
+                        Tracer.Debug(context, "Terminating due to exit request on console.");
                         termination.TrySetResult(true);
                         break;
                     }
                 }
 
-                context.Debug("Terminating due to end of standard input.");
+                Tracer.Debug(context, "Terminating due to end of standard input.");
                 termination.TrySetResult(true);
             }).FireAndForget(context);
 

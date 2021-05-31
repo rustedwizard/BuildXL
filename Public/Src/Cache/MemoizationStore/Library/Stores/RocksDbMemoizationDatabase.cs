@@ -46,18 +46,18 @@ namespace BuildXL.Cache.MemoizationStore.Stores
         }
 
         /// <inheritdoc />
-        public override Task<IEnumerable<StructResult<StrongFingerprint>>> EnumerateStrongFingerprintsAsync(OperationContext context)
+        public override Task<IEnumerable<Result<StrongFingerprint>>> EnumerateStrongFingerprintsAsync(OperationContext context)
         {
             return Task.FromResult(Database.EnumerateStrongFingerprints(context));
         }
 
         /// <inheritdoc />
-        protected override Task<Result<(ContentHashListWithDeterminism contentHashListInfo, string replacementToken)>> GetContentHashListCoreAsync(OperationContext context, StrongFingerprint strongFingerprint, bool preferShared)
+        protected override Task<ContentHashListResult> GetContentHashListCoreAsync(OperationContext context, StrongFingerprint strongFingerprint, bool preferShared)
         {
             var contentHashListResult = Database.GetContentHashList(context, strongFingerprint);
             return contentHashListResult.Succeeded
-                ? Task.FromResult(new Result<(ContentHashListWithDeterminism, string)>((contentHashListResult.ContentHashListWithDeterminism, string.Empty)))
-                : Task.FromResult(new Result<(ContentHashListWithDeterminism, string)>(contentHashListResult));
+                ? Task.FromResult(new ContentHashListResult(contentHashListResult.ContentHashListWithDeterminism, string.Empty))
+                : Task.FromResult(new ContentHashListResult(contentHashListResult));
         }
 
         /// <inheritdoc />
@@ -80,7 +80,7 @@ namespace BuildXL.Cache.MemoizationStore.Stores
                 return result;
             }
 
-            Database.SetDatabaseMode(isDatabaseWriteable: true);
+            await Database.SetDatabaseModeAsync(isDatabaseWriteable: true);
             return BoolResult.Success;
         }
 

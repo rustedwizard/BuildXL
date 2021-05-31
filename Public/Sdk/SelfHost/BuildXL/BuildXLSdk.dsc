@@ -59,7 +59,7 @@ export interface Arguments extends Managed.Arguments {
     generateLogs?: boolean;
 
     /** If the log generation needs external references, one can explicitly declare them. */
-    generateLogBinaryRefs?: Managed.Binary[],
+    generateLogBinaryRefs?: Managed.Binary[];
 
     /** Disables assembly signing with the BuildXL key. */
     skipAssemblySigning?: boolean;
@@ -68,7 +68,7 @@ export interface Arguments extends Managed.Arguments {
     contractsLevel?: Contracts.ContractsLevel;
 
     /** The assemblies that are internal visible for this assembly */
-    internalsVisibleTo?: string[];
+    internalsVisibleTo?: (string|InternalsVisibleToArguments)[];
 
     /**
      * Whether to use the compiler's strict mode or not.
@@ -76,6 +76,16 @@ export interface Arguments extends Managed.Arguments {
      * For instance, the compiler will warn on empty lock statements or when a value type instance potentially may be used in lock statement etc.
      */
     strictMode?: boolean;
+
+    /**
+     * A set of source generators used by the project.
+     */
+    sourceGenerators?: NugetPackage[];
+
+    /**
+     * A set of Roslyn analyzers used by the project.
+     */
+    analyzers?: NugetPackage[];
 }
 
 @@public
@@ -91,14 +101,20 @@ export interface TestResult extends Managed.TestResult {
     adminTestResults?: TestResult;
 }
 
+@@public
+export interface InternalsVisibleToArguments {
+    assembly: string,
+    publicKey?: string,
+}
+
 /**
  * Returns if the current qualifier is targeting .NET Core
  */
 @@public
-export const isDotNetCoreBuild : boolean = qualifier.targetFramework === "netcoreapp3.1" || qualifier.targetFramework === "netstandard2.0";
+export const isDotNetCoreBuild : boolean = qualifier.targetFramework === "netcoreapp3.1" || qualifier.targetFramework === "netstandard2.0" || qualifier.targetFramework === "net5.0";
 
 @@public
-export const isDotNetCoreApp : boolean = qualifier.targetFramework === "netcoreapp3.1";
+export const isDotNetCoreApp : boolean = qualifier.targetFramework === "netcoreapp3.1" || qualifier.targetFramework === "net5.0";
 
 @@public
 export const isFullFramework : boolean = qualifier.targetFramework === "net472" || qualifier.targetFramework === "net462";
@@ -128,8 +144,8 @@ export const targetFrameworkMatchesCurrentHost =
 @@public
 export const restrictTestRunToSomeQualifiers =
     qualifier.configuration !== "debug" ||
-    // Running tests for .NET Core App 3.0 and 4.7.2 frameworks only.
-    (qualifier.targetFramework !== "netcoreapp3.1" && qualifier.targetFramework !== "net472") ||
+    // Running tests for .NET Core App 3.0, .NET 5 and 4.7.2 frameworks only.
+    (qualifier.targetFramework !== "netcoreapp3.1" && qualifier.targetFramework !== "net5.0" && qualifier.targetFramework !== "net472") ||
     !targetFrameworkMatchesCurrentHost;
 
 /***
@@ -231,6 +247,12 @@ namespace Flags {
      */
     @@public
     export const embedSources = Environment.hasVariable("[Sdk.BuildXL]embedSources") ? Environment.getFlag("[Sdk.BuildXL]embedSources") : false;
+
+    /**
+     * Gets the default value for whether the C# compiler will report additional analyzer information, such as execution time.
+     */
+    @@public
+    export const reportAnalyzer = Environment.getFlag("[Sdk.BuildXL]reportAnalyzer");
 }
 
 @@public
@@ -259,36 +281,38 @@ export const bclAsyncPackages : Managed.ManagedNugetPackage[] = [
         importFrom("System.Threading.Tasks.Extensions").pkg,
         importFrom("System.Linq.Async").pkg,
         // .NET Core version is tricky, because there are some crucial differences between .netcoreapp and netstandard
-        (qualifier.targetFramework === "netcoreapp3.1" 
+        (isDotNetCoreApp 
           ? importFrom("Microsoft.Bcl.AsyncInterfaces").withQualifier({targetFramework: "netstandard2.1"}).pkg
           : importFrom("Microsoft.Bcl.AsyncInterfaces").pkg)
     ];
 
 @@public
 export const systemThreadingTasksDataflowPackageReference : Managed.ManagedNugetPackage[] = 
-    qualifier.targetFramework === "netcoreapp3.1" ? [] : [
+    isDotNetCoreApp ? [] : [
             importFrom("System.Threading.Tasks.Dataflow").pkg,
         ];
 
-@@public
-export function nativeExecutable(args: Arguments): CoreRT.NativeExecutableResult {
-    if (!isHostOsOsx) {
-        const asm = executable(args);
-        return asm.override<CoreRT.NativeExecutableResult>({
-            getExecutable: () => asm.runtime.binary
-        });
-    }
+@@public 
+export const systemMemoryDeployment = getSystemMemoryPackages(true);
 
-    /** Override framework.applicationDeploymentStyle to make sure we don't use apphost */
-    args = args.override<Arguments>({
-        deploymentStyle:  "frameworkDependent",
-    });
-
-    /** Compile to MSIL */
-    const asm = executable(args);
-
-    /** Compie to native */
-    return CoreRT.compileToNative(asm);
+// This is meant to be used only when declaring NuGet packages' dependencies. In that particular case, you should be
+// calling this function with includeNetStandard: false
+@@public 
+export function getSystemMemoryPackages(includeNetStandard: boolean) {
+    return [
+        ...(isDotNetCoreApp ? [] : [
+            importFrom("System.Memory").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+            importFrom("System.Buffers").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+            importFrom("System.Runtime.CompilerServices.Unsafe").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+            importFrom("System.Numerics.Vectors").withQualifier({targetFramework: "netstandard2.0"}).pkg,
+            ...(includeNetStandard ? [
+                // It works to reference .NET472 all the time because netstandard.dll targets .NET4 so it's safe for .NET462 to do so.
+                $.withQualifier({targetFramework: "net472"}).NetFx.Netstandard.dll,
+            ]
+            : []),
+        ]
+        ),
+    ];
 }
 
 /**
@@ -412,6 +436,10 @@ export function test(args: TestArguments) : TestResult {
 @@public
 export const notNullAttributesFile = f`NotNullAttributes.cs`;
 
+ const isExternalInit = f`IsExternalInit.cs`;
+
+ const emptyAppConfig = f`App.config`;
+
 /**
  * Builds and runs an xunit test
  */
@@ -429,6 +457,18 @@ export function cacheTest(args: TestArguments) : TestResult {
             }
         },
     }, args);
+
+    // Adding binding redirects to allow running the tests in the IDE.
+    if (args.assemblyBindingRedirects === undefined) {
+        args = Object.merge<Managed.TestArguments>({
+            assemblyBindingRedirects: cacheBindingRedirects()
+        }, args);
+    }
+
+    if (args.appConfig === undefined) {
+        // Need to add an empty app.config because otherwise the redirects won't have any effects.
+        args = Object.merge<Managed.TestArguments>({appConfig: emptyAppConfig}, args);
+    }
 
     return test(args);
 }
@@ -456,7 +496,7 @@ export function cacheBindingRedirects() {
                 publicKeyToken: "b03f5f7f11d50a3a",
                 culture: "neutral",
                 oldVersion: "0.0.0.0-5.0.0.0",
-                newVersion: "4.0.6.0",  // Corresponds to: { id: "System.Runtime.CompilerServices.Unsafe", version: "4.7.0" },
+                newVersion: "5.0.0.0",  // Corresponds to: { id: "System.Runtime.CompilerServices.Unsafe", version: "5.0.0" },
             },
             {
                 name: "System.Numerics.Vectors",
@@ -465,12 +505,20 @@ export function cacheBindingRedirects() {
                 oldVersion: "0.0.0.0-4.1.4.0",
                 newVersion: "4.1.4.0", // Corresponds to: { id: "System.Numerics.Vectors", version: "4.5.0" },
             },
+
             {
-                name: "System.IO.Pipelines",
+                name: "Microsoft.Bcl.AsyncInterfaces",
+                publicKeyToken: "cc7b13ffcd2ddd51",
+                culture: "neutral",
+                oldVersion: "0.0.0.0-5.0.0.0",
+                newVersion: "5.0.0.0", // Corresponds to: { id: "Microsoft.Bcl.AsyncInterfaces", version: "5.0.0" },
+            },
+            {
+                name: "System.Threading.Tasks.Extensions", // Version=4.2.0.1, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51
                 publicKeyToken: "cc7b13ffcd2ddd51",
                 culture: "neutral",
                 oldVersion: "0.0.0.0-4.99.99.99",
-                newVersion: "4.0.2.1", // Corresponds to: { id: "System.IO.Pipelines", version: "4.7.2", dependentPackageIdsToSkip: ["System.Threading.Tasks.Extensions"] },
+                newVersion: "4.2.0.1", // Corresponds to: { id: "System.Threading.Tasks.Extensions" },
             },
             {
                 name: "System.Memory",
@@ -493,6 +541,13 @@ export function cacheBindingRedirects() {
                 oldVersion: "0.0.0.0-4.5.1.0",
                 newVersion: "4.5.1.0", // Corresponds to: { id: "Microsoft.IdentityModel.Clients.ActiveDirectory", version: "5.2.6",
             },
+            {
+                name: "System.Text.Encodings.Web",
+                publicKeyToken: "cc7b13ffcd2ddd51",
+                culture: "neutral",
+                oldVersion: "0.0.0.0-4.0.5.1",
+                newVersion: "4.0.5.1", // Corresponds to { id: "System.Text.Encodings.Web", version: "4.7.2" },
+            }
         ];
 }
 
@@ -541,6 +596,12 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
 
     let embedSources = args.embedSources !== false && Flags.embedSources === true;
 
+    let analyzers = [
+        ...getAnalyzers(args), 
+        ...(args.sourceGenerators !== undefined ? args.sourceGenerators.mapMany(s => getAnalyzerDlls(s.contents)) : []),
+        ...(args.analyzers !== undefined ? args.analyzers.mapMany(s => getAnalyzerDlls(s.contents)) : [])
+        ];
+
     args = Object.merge<Arguments>(
         {
             framework: framework,
@@ -583,7 +644,7 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
                     languageVersion: "preview", // Allow us using new features like non-nullable types and switch expressions.
 
                     // TODO: Make analyzers supported in regular references by undestanding the structure in nuget packages
-                    analyzers: getAnalyzers(args),
+                    analyzers: analyzers,
 
                     features: features,
                     codeAnalysisRuleset: args.enableStyleCopAnalyzers ? f`BuildXL.ruleset` : undefined,
@@ -591,6 +652,7 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
                     keyFile: args.skipAssemblySigning ? undefined : devKey,
                     shared: Flags.useManagedSharedCompilation,
                     embed: embedSources,
+                    reportAnalyzer: Flags.reportAnalyzer,
                 }
             },
             runCrossgenIfSupported: Flags.enableCrossgen,
@@ -653,12 +715,15 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
 
     // Add the file with non-nullable attributes for non-dotnet core projects
     // if nullable flag is set, but a special flag is false.
-    if (args.nullable && qualifier.targetFramework !== "netcoreapp3.1" && args.addNotNullAttributeFile !== false) {
-        
+    if (args.nullable && qualifier.targetFramework !== "net5.0" && args.addNotNullAttributeFile !== false) {
         args = args.merge({
             sources: [notNullAttributesFile],
         });
     }
+
+    args = args.merge({
+        sources: [isExternalInit],
+    });
     
     // Handle internalsVisibleTo
     if (args.internalsVisibleTo) {
@@ -667,8 +732,18 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
             lines: [
                 "using System.Runtime.CompilerServices;",
                 "",
-                ...args.internalsVisibleTo.map(assemblyName =>
-                    `[assembly: InternalsVisibleTo("${assemblyName}, PublicKey=${publicKey}")]`)
+                ...args.internalsVisibleTo.map(declaration =>
+                {
+                    if (typeof(declaration) === "string")
+                    {
+                        return `[assembly: InternalsVisibleTo("${declaration}, PublicKey=${publicKey}")]`;
+                    }
+                    
+                    let dec = declaration as InternalsVisibleToArguments;
+                    return dec.publicKey === undefined
+                        ? `[assembly: InternalsVisibleTo("${dec.assembly}")]`
+                        : `[assembly: InternalsVisibleTo("${dec.assembly}, PublicKey=${dec.publicKey}")]`;
+                })
             ]
         });
 
@@ -693,6 +768,7 @@ const testFrameworkOverrideAttribute = Transformer.writeAllLines({
 /** Returns true if test should use QTest framework. */
 function shouldUseQTest(runTestArgs: Managed.TestRunArguments) {
     return Flags.isQTestEnabled                               // Flag to use QTest is enabled.
+        && !(qualifier.targetFramework === "net5.0")          // Disable QTest for .net 5 for now.
         && !(runTestArgs && runTestArgs.parallelBucketCount); // QTest does not support passing environment variables to the underlying process
 }
 
@@ -747,7 +823,6 @@ function processTestArguments(args: Managed.TestArguments) : Managed.TestArgumen
         ]
     }, 
     args);
-
 
     return args;
 }

@@ -220,7 +220,7 @@ namespace BuildXL.Execution.Analyzer
                             exclusiveOpaqueDirectoryContent: ReadOnlyArray<(DirectoryArtifact, ReadOnlyArray<FileArtifactWithAttributes>)>.Empty,
                             sharedOpaqueDirectoryWriteAccesses: null,
                             allowedUndeclaredReads: null,
-                            absentPathProbesUnderOutputDirectories: null,
+                            dynamicObservations: null,
                             ReadOnlyArray<(FileArtifact, FileMaterializationInfo, PipOutputOrigin)>.Empty,
                             out _);
                         ;
@@ -296,7 +296,7 @@ namespace BuildXL.Execution.Analyzer
             FileMonitoringViolationAnalyzer.DependencyViolationType violationType,
             FileMonitoringViolationAnalyzer.AccessLevel accessLevel,
             AbsolutePath path,
-            Process violator,
+            Pip violator,
             Pip related)
         {
             MultiWriter targetWriter = m_allViolationsWriter;
@@ -382,7 +382,7 @@ namespace BuildXL.Execution.Analyzer
                 DependencyViolationType violationType, 
                 AccessLevel accessLevel, 
                 AbsolutePath path, 
-                Process violator,
+                Pip violator,
                 bool isAllowlistedViolation,
                 Pip related,
                 AbsolutePath processPath)

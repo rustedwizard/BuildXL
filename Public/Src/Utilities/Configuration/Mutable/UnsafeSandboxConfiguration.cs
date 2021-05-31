@@ -25,6 +25,7 @@ namespace BuildXL.Utilities.Configuration.Mutable
             IgnoreSetFileInformationByHandle = false;
             PreserveOutputs = PreserveOutputsMode.Disabled;
             PreserveOutputsTrustLevel = (int)PreserveOutputsTrustValue.Lowest;
+            IgnorePreserveOutputsPrivatization = false;
             IgnoreGetFinalPathNameByHandle = false;
             MonitorZwCreateOpenQueryFile = true;
             IgnoreDynamicWritesOnAbsentProbes = DynamicWriteOnAbsentProbePolicy.IgnoreDirectoryProbes; // TODO: eventually change this to IgnoreNothing
@@ -69,13 +70,13 @@ namespace BuildXL.Utilities.Configuration.Mutable
             ExistingDirectoryProbesAsEnumerations = template.ExistingDirectoryProbesAsEnumerations;
             PreserveOutputs = template.PreserveOutputs;
             PreserveOutputsTrustLevel = template.PreserveOutputsTrustLevel;
+            IgnorePreserveOutputsPrivatization = template.IgnorePreserveOutputsPrivatization;
             IgnoreGetFinalPathNameByHandle = template.IgnoreGetFinalPathNameByHandle;
             IgnoreDynamicWritesOnAbsentProbes = template.IgnoreDynamicWritesOnAbsentProbes;
             DoubleWritePolicy = template.DoubleWritePolicy;
             IgnoreUndeclaredAccessesUnderSharedOpaques = template.IgnoreUndeclaredAccessesUnderSharedOpaques;
             IgnoreCreateProcessReport = template.IgnoreCreateProcessReport;
             ProbeDirectorySymlinkAsDirectory = template.ProbeDirectorySymlinkAsDirectory;
-            ProcessSymlinkedAccesses = template.ProcessSymlinkedAccesses;
             SkipFlaggingSharedOpaqueOutputs = template.SkipFlaggingSharedOpaqueOutputs;
             EnableFullReparsePointResolving = template.EnableFullReparsePointResolving;
         }
@@ -144,13 +145,12 @@ namespace BuildXL.Utilities.Configuration.Mutable
         public bool ProbeDirectorySymlinkAsDirectory { get; set; }
 
         /// <inheritdoc />
-        public bool? ProcessSymlinkedAccesses { get; set; }
-
-        /// <inheritdoc />
         public bool? EnableFullReparsePointResolving { get; set; }
 
         /// <inheritdoc/>
         public bool? SkipFlaggingSharedOpaqueOutputs { get; set; }
 
+        /// <inheritdoc/>
+        public bool IgnorePreserveOutputsPrivatization { get; set; }
     }
 }

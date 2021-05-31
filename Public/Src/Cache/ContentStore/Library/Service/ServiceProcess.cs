@@ -11,21 +11,35 @@ using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Stores;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
+using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Utils;
 
 namespace BuildXL.Cache.ContentStore.Service
 {
+
     /// <summary>
     ///     Helper for managing the launching and shutdown of the cache in a separate process.
     /// </summary>
-    public sealed class ServiceProcess : IStartupShutdown
+    public class ServiceProcess : IStartupShutdown
     {
-        private readonly ServiceConfiguration _configuration;
-        private readonly LocalServerConfiguration _localContentServerConfiguration;
-        private readonly string _scenario;
-        private readonly int _waitForServerReadyTimeoutMs;
-        private readonly int _waitForExitTimeoutMs;
-        private readonly bool _logAutoFlush;
+        /// <nodoc />
+        protected virtual Tracer Tracer { get; } = new Tracer(nameof(ServiceProcess));
+
+        /// <nodoc />
+        protected readonly ServiceConfiguration Configuration;
+
+        /// <nodoc />
+        protected readonly string Scenario;
+
+        /// <nodoc />
+        protected readonly int WaitForServerReadyTimeoutMs;
+
+        /// <nodoc />
+        protected readonly int WaitForExitTimeoutMs;
+
+        /// <nodoc />
+        protected readonly bool LogAutoFlush;
+
         private ProcessUtility? _process;
         private string? _args;
 
@@ -35,7 +49,6 @@ namespace BuildXL.Cache.ContentStore.Service
         public ServiceProcess
             (
             ServiceConfiguration configuration,
-            LocalServerConfiguration localContentServerConfiguration,
             string scenario,
             int waitForServerReadyTimeoutMs,
             int waitForExitTimeoutMs,
@@ -44,12 +57,11 @@ namespace BuildXL.Cache.ContentStore.Service
         {
             Contract.Requires(configuration != null);
 
-            _configuration = configuration;
-            _localContentServerConfiguration = localContentServerConfiguration;
-            _scenario = scenario;
-            _waitForServerReadyTimeoutMs = waitForServerReadyTimeoutMs;
-            _waitForExitTimeoutMs = waitForExitTimeoutMs;
-            _logAutoFlush = logAutoFlush;
+            Configuration = configuration;
+            Scenario = scenario;
+            WaitForServerReadyTimeoutMs = waitForServerReadyTimeoutMs;
+            WaitForExitTimeoutMs = waitForExitTimeoutMs;
+            LogAutoFlush = logAutoFlush;
         }
 
         /// <inheritdoc />
@@ -69,16 +81,15 @@ namespace BuildXL.Cache.ContentStore.Service
         {
             StartupStarted = true;
             BoolResult result = BoolResult.Success;
-            context.Debug("Starting service process");
+            Tracer.Debug(context, "Starting service process");
 
             await Task.Run(() =>
             {
-                AbsolutePath appExeDirPath = new AbsolutePath(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!);
-                var appExePath = appExeDirPath / (OperatingSystemHelper.IsUnixOS ? "ContentStoreApp" : "ContentStoreApp.exe");
+                var appExePath = GetExecutablePath();
 
-                _args = _configuration.GetCommandLineArgs(scenario: _scenario);
+                _args = GetCommandLineArgs();
 
-                context.Debug($"Running cmd=[{appExePath} {_args}]");
+                Tracer.Debug(context, $"Running cmd=[{appExePath} {_args}]");
 
                 const bool CreateNoWindow = true;
                 _process = new ProcessUtility(appExePath.Path, _args, CreateNoWindow);
@@ -110,12 +121,12 @@ namespace BuildXL.Cache.ContentStore.Service
                     }
                 }
 
-                context.Debug("Process output: " + processOutput);
+                Tracer.Debug(context, "Process output: " + processOutput);
             });
 
-            if (result.Succeeded && !LocalContentServer.EnsureRunning(context, _scenario, _waitForServerReadyTimeoutMs))
+            if (result.Succeeded && !LocalContentServer.EnsureRunning(context, Scenario, WaitForServerReadyTimeoutMs))
             {
-                result = new BoolResult($"Failed to detect server ready in separate process for scenario {_scenario}. Process has {(_process!.HasExited ? string.Empty : "not")} exited.");
+                result = new BoolResult($"Failed to detect server ready in separate process for scenario {Scenario}. Process has {(_process!.HasExited ? string.Empty : "not")} exited.");
             }
 
             StartupCompleted = true;
@@ -126,7 +137,7 @@ namespace BuildXL.Cache.ContentStore.Service
         public async Task<BoolResult> ShutdownAsync(Context context)
         {
             ShutdownStarted = true;
-            context.Debug($"Stopping service process {_process?.Id} for scenario {_scenario}");
+            Tracer.Debug(context, $"Stopping service process {_process?.Id} for scenario {Scenario}");
 
             if (_process == null)
             {
@@ -135,11 +146,11 @@ namespace BuildXL.Cache.ContentStore.Service
 
             await Task.Run(() =>
             {
-                IpcUtilities.SetShutdown(_scenario);
+                IpcUtilities.SetShutdown(Scenario);
 
-                if (!_process.WaitForExit(_waitForExitTimeoutMs))
+                if (!_process.WaitForExit(WaitForExitTimeoutMs))
                 {
-                    context.Warning("Service process failed to exit, killing hard");
+                    Tracer.Warning(context, "Service process failed to exit, killing hard");
                     try
                     {
                         _process.Kill();
@@ -168,6 +179,19 @@ namespace BuildXL.Cache.ContentStore.Service
         public string? GetLogs()
         {
             return _process?.GetLogs();
+        }
+
+        /// <nodoc />
+        protected virtual AbsolutePath GetExecutablePath()
+        {
+            AbsolutePath appExeDirPath = new AbsolutePath(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!);
+            return appExeDirPath / (OperatingSystemHelper.IsUnixOS ? "ContentStoreApp" : "ContentStoreApp.exe");
+        }
+
+        /// <nodoc />
+        protected virtual string GetCommandLineArgs()
+        {
+            return Configuration.GetCommandLineArgs(scenario: Scenario);
         }
 
         /// <inheritdoc />

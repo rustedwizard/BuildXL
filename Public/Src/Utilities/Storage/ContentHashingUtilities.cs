@@ -42,7 +42,7 @@ namespace BuildXL.Storage
                 return s_hasher;
             }
 
-            return s_contentHasherByHashType.GetOrAdd(hashType, (_) => HashInfoLookup.Find(hashType).CreateContentHasher());
+            return s_contentHasherByHashType.GetOrAdd(hashType, static ht => HashInfoLookup.Find(ht).CreateContentHasher());
         }
 
         /// <summary>
@@ -298,28 +298,14 @@ namespace BuildXL.Storage
         /// <summary>
         /// Returns a <see cref="ContentHash" /> of the file at the given absolute path.
         /// </summary>
-        public static async Task<ContentHash> HashFileAsync(string absoluteFilePath)
+        public static async Task<ContentHash> HashFileAsync(string absoluteFilePath, HashType hashType = HashType.Unknown)
         {
             Contract.Requires(Path.IsPathRooted(absoluteFilePath), "File path must be absolute");
 
             // TODO: Specify a small buffer size here (see HashFileAsync(SafeFileHandle))
             using (var fileStream = FileUtilities.CreateAsyncFileStream(absoluteFilePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
             {
-                return await HashContentStreamAsync(fileStream).ConfigureAwait(false);
-            }
-        }
-
-        /// <summary>
-        /// Returns a <see cref="ContentHash" /> of the file at the given absolute path for the Build Manifest.
-        /// </summary>
-        public static async Task<ContentHash> HashFileForBuildManifestAsync(string absoluteFilePath)
-        {
-            Contract.Requires(Path.IsPathRooted(absoluteFilePath), "File path must be absolute");
-
-            // TODO: Specify a small buffer size here (see HashFileAsync(SafeFileHandle))
-            using (var fileStream = FileUtilities.CreateAsyncFileStream(absoluteFilePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
-            {
-                return await HashContentStreamAsync(fileStream, BuildManifestHashType).ConfigureAwait(false);
+                return await HashContentStreamAsync(fileStream, hashType).ConfigureAwait(false);
             }
         }
 

@@ -8,6 +8,7 @@ using BuildXL.Pips.Builders;
 using BuildXL.Pips.Operations;
 using BuildXL.Scheduler.Tracing;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Instrumentation.Common;
 using Test.BuildXL.Executables.TestProcess;
 using Test.BuildXL.Scheduler;
 using Test.BuildXL.TestUtilities;
@@ -383,7 +384,7 @@ namespace IntegrationTest.BuildXL.Scheduler
             var directorySymlinkPath = ArtifactToString(directorySymlink);
             XAssert.PossiblySucceeded(FileUtilities.TryCreateSymbolicLink(directorySymlinkPath, ArtifactToString(targetDirForSymlink), isTargetFile: false));
 
-            FileUtilities.DeleteFile(directorySymlinkPath, waitUntilDeletionFinished: true);
+            FileUtilities.DeleteFile(directorySymlinkPath, retryOnFailure: true);
             var symDirExistence = FileUtilities.TryProbePathExistence(directorySymlinkPath, followSymlink: false);
             XAssert.IsTrue(Directory.Exists(ArtifactToString(targetDirForSymlink)) && symDirExistence.Succeeded && symDirExistence.Result == PathExistence.Nonexistent);
 
@@ -394,7 +395,7 @@ namespace IntegrationTest.BuildXL.Scheduler
                 var junctionPath = ArtifactToString(junction);
                 FileUtilities.CreateJunction(junctionPath, ArtifactToString(targetDirForSymlink));
 
-                FileUtilities.DeleteFile(junctionPath, waitUntilDeletionFinished: true);
+                FileUtilities.DeleteFile(junctionPath, retryOnFailure: true);
                 var junctionExistence = FileUtilities.TryProbePathExistence(junctionPath, followSymlink: false);
                 XAssert.IsTrue(Directory.Exists(ArtifactToString(targetDirFoJunction)) && junctionExistence.Succeeded && junctionExistence.Result == PathExistence.Nonexistent);
             }
@@ -892,30 +893,41 @@ namespace IntegrationTest.BuildXL.Scheduler
             XAssert.AreNotEqual(checkpoint1, File.ReadAllText(ArtifactToString(copiedFile)));
         }
 
+        public enum IgnoreReparsePointMode
+        {
+            // Ignore all reparse point.
+            All,
+
+            // Ignore only non CreateFile API.
+            NonCreateFile,
+
+            // Do not ignore any reparse point.
+            None
+        }
+
         /// <summary>
         /// Validates that Detours does not follow symlinks when IgnoreReparsePoints and IgnoreNonCreateFileReparsePoints options are enabled
         /// </summary>
-        /// <param name="ignoreOnlyNonCreateFileReparsePoints">
-        /// When true, enables IgnoreNonCreateFileReparse which ignores symlinks for CreateFile and NtCreateFile/OpenFile APIs
-        /// When false, enables IgnoreReparsePoints which ignores symlinks for all file management APIs
-        /// </param>
+        /// <param name="ignoreReparsePointMode"/>
         /// <param name="useCreateFileAPI">
         /// When true, a pip is created that passes a symlink into a CreateFile or NtCreateFile/OpenFile API
         /// When false, a pip is created that passes a symlink into a filemanagement API other than CreateFile or NtCreateFile/OpenFile
         /// </param>
         [TheoryIfSupported(requiresWindowsBasedOperatingSystem: true)]
-        [InlineData(true, true)]
-        [InlineData(true, false)]
-        [InlineData(false, true)]
-        [InlineData(false, false)]
-        public void ValidateCachingUnsafeIgnoreReparsePointReadFile(bool ignoreOnlyNonCreateFileReparsePoints, bool useCreateFileAPI)
+        [InlineData(IgnoreReparsePointMode.All, true)]
+        [InlineData(IgnoreReparsePointMode.All, false)]
+        [InlineData(IgnoreReparsePointMode.NonCreateFile, true)]
+        [InlineData(IgnoreReparsePointMode.NonCreateFile, false)]
+        [InlineData(IgnoreReparsePointMode.None, true)]
+        [InlineData(IgnoreReparsePointMode.None, false)]
+        public void ValidateCachingUnsafeIgnoreReparsePointReadFile(IgnoreReparsePointMode ignoreReparsePointMode, bool useCreateFileAPI)
         {
             // Allows pips to input and output symlink files without declaring the corresponding target files
-            if (ignoreOnlyNonCreateFileReparsePoints)
+            if (ignoreReparsePointMode == IgnoreReparsePointMode.NonCreateFile)
             {
                 Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreNonCreateFileReparsePoints = true;
             }
-            else
+            else if (ignoreReparsePointMode == IgnoreReparsePointMode.All)
             {
                 Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreReparsePoints = true;
             }
@@ -937,15 +949,28 @@ namespace IntegrationTest.BuildXL.Scheduler
                 Operation.WriteFile(outFile),
             }).Process;
 
-            if (ignoreOnlyNonCreateFileReparsePoints && useCreateFileAPI)
+            if (ignoreReparsePointMode == IgnoreReparsePointMode.None
+                || (ignoreReparsePointMode == IgnoreReparsePointMode.NonCreateFile && useCreateFileAPI))
             {
                 // Detours is only ignoring symlinks for APIs other than CreateFile and NtCreateFile/OpenFile
                 // Since ReadFile calls CreateFile, expect a disallowed file access on undeclared underlying /targetFile
+
                 RunScheduler().AssertFailure();
-                AssertVerboseEventLogged(ProcessesLogEventId.PipProcessDisallowedFileAccess);
+                AssertVerboseEventLogged(
+                    ProcessesLogEventId.PipProcessDisallowedFileAccess,
+                    count: useCreateFileAPI
+                    ? 1 
+                    : 2 /* File.Copy internally calls CreateFileW upon failure */);
                 AssertVerboseEventLogged(LogEventId.DependencyViolationMissingSourceDependency);
-                AssertWarningEventLogged(LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations);
+                AssertWarningEventLogged(
+                    LogEventId.ProcessNotStoredToCacheDueToFileMonitoringViolations,
+                    count: useCreateFileAPI ? 1 : 0 /* The process execution exit with non 0 exit code. */);
                 AssertErrorEventLogged(LogEventId.FileMonitoringError);
+
+                if (!useCreateFileAPI)
+                {
+                    AssertErrorEventLogged(ProcessesLogEventId.PipProcessError);
+                }
             }
             else
             {
@@ -1273,13 +1298,10 @@ namespace IntegrationTest.BuildXL.Scheduler
             }
         }
 
-        [TheoryIfSupported(requiresSymlinkPermission: true, requiresWindowsBasedOperatingSystem: true)]
-        [InlineData(true)]
-        [InlineData(false)]
-        public void ResolvedSymlinkCachingBehavior(bool managedReparsePointProcessing)
+        [FactIfSupported(requiresSymlinkPermission: true, requiresWindowsBasedOperatingSystem: true)]
+        public void ResolvedSymlinkCachingBehavior()
         {
-            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.ProcessSymlinkedAccesses = managedReparsePointProcessing;
-            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = managedReparsePointProcessing;
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
 
             string symlinkDir = Path.Combine(SourceRoot, "symlinkDir");
             FileArtifact symlinkDirArtifact = FileArtifact.CreateSourceFile(AbsolutePath.Create(Context.PathTable, symlinkDir));
@@ -1318,13 +1340,10 @@ namespace IntegrationTest.BuildXL.Scheduler
             RunScheduler().AssertSuccess().AssertCacheMiss(pip.PipId);
         }
 
-        [TheoryIfSupported(requiresAdmin: true, requiresWindowsBasedOperatingSystem: true)]
-        [InlineData(true)]
-        [InlineData(false)]
-        public void ManifestOfResolvedAccessIsProperlyComputed(bool managedReparsePointProcessing)
+        [FactIfSupported(requiresAdmin: true, requiresWindowsBasedOperatingSystem: true)]
+        public void ManifestOfResolvedAccessIsProperlyComputed()
         {
-            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.ProcessSymlinkedAccesses = managedReparsePointProcessing;
-            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = managedReparsePointProcessing;
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
 
             // Create the following layout
             // sodA
@@ -1369,6 +1388,119 @@ namespace IntegrationTest.BuildXL.Scheduler
             var reader = SchedulePipBuilder(readerBuilder);
 
             RunScheduler().AssertSuccess();
+        }
+
+        [FactIfSupported(requiresAdmin: true, requiresWindowsBasedOperatingSystem: true)]
+        public void DirectoryRemovalInvalidatesTheCache()
+        {
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
+
+            // Create the following layout
+            // sodA 
+            //  -- nestedDir
+            //    -- output.txt 
+            // sodB 
+            //  -- junction -> sodA 
+            // Then change the layout to:
+            // sodA 
+            //  -- nestedDir
+            //    -- output.txt 
+            // sodB 
+            //  -- nestedDir
+            //    -- symlink -> output.txt
+
+
+            AbsolutePath sodA = CreateUniqueDirectory(prefix: "sodA");
+            AbsolutePath sodB = CreateUniqueDirectory(prefix: "sodB");
+
+            var nestedDirPath = sodA.Combine(Context.PathTable, "nestedDir").ToString(Context.PathTable);
+            FileUtilities.CreateDirectory(nestedDirPath);
+
+            DirectoryArtifact nestedDir = DirectoryArtifact.CreateWithZeroPartialSealId(sodA.Combine(Context.PathTable, "nestedDir"));
+            DirectoryArtifact junctionDir = DirectoryArtifact.CreateWithZeroPartialSealId(sodB.Combine(Context.PathTable, "junction"));
+            DirectoryArtifact nestedDirViaJunction = DirectoryArtifact.CreateWithZeroPartialSealId(junctionDir.Path.Combine(Context.PathTable, "nestedDir"));
+
+            FileArtifact outputViaJunction = FileArtifact.CreateOutputFile(nestedDirViaJunction.Path.Combine(Context.PathTable, "output.txt"));
+            FileArtifact outputViaRealPath = FileArtifact.CreateOutputFile(nestedDir.Path.Combine(Context.PathTable, "output.txt"));
+
+
+            FileUtilities.CreateDirectory(ArtifactToString(nestedDir));
+            File.WriteAllText(ArtifactToString(outputViaRealPath), System.Guid.NewGuid().ToString());
+
+            var writerBuilder = CreatePipBuilder(new Operation[]
+            {
+                // absent, and therefore cached as not needing reparse point resolution 
+                Operation.Probe(outputViaJunction, doNotInfer: true), 
+                // the junction creation should invalidate the reparse point cache, and also invalidate its
+                // descendants, which includes the above probe
+                Operation.CreateJunction(junctionDir, DirectoryArtifact.CreateWithZeroPartialSealId(sodA), doNotInfer: true),
+                // If not done correctly, the mapping in the cache for the juntion will still exist, and writing under this path will be like writing under sodA and produce an error.
+                Operation.DeleteDir(junctionDir, doNotInfer: true),
+                Operation.CreateDir(junctionDir, doNotInfer: true),
+                Operation.WriteFile(outputViaJunction, System.Guid.NewGuid().ToString(), doNotInfer: true)
+            });
+
+            writerBuilder.AddOutputDirectory(sodB, SealDirectoryKind.Opaque);
+            writerBuilder.Options |= Process.Options.AllowPreserveOutputs;
+
+            var writer = SchedulePipBuilder(writerBuilder);
+
+            // If this fails, then detours likely thinks the junction is still there.
+            RunScheduler().AssertSuccess();
+        }
+
+        [FactIfSupported(requiresAdmin: true, requiresWindowsBasedOperatingSystem: true)]
+        public void ReparsePointCreationInvalidatesTheCache()
+        {
+            Configuration.Sandbox.UnsafeSandboxConfigurationMutable.IgnoreFullReparsePointResolving = false;
+
+            // Create the following layout
+            // sodA 
+            //  -- nestedDir
+            //    -- output.txt 
+            // sodB 
+            //  -- junction -> sodA 
+
+            AbsolutePath sodA = CreateUniqueDirectory(prefix: "sodA");
+            AbsolutePath sodB = CreateUniqueDirectory(prefix: "sodB");
+
+            var nestedDirPath = sodA.Combine(Context.PathTable, "nestedDir").ToString(Context.PathTable);
+            FileUtilities.CreateDirectory(nestedDirPath);
+
+            DirectoryArtifact nestedDir = DirectoryArtifact.CreateWithZeroPartialSealId(sodA.Combine(Context.PathTable, "nestedDir"));
+            DirectoryArtifact junctionDir = DirectoryArtifact.CreateWithZeroPartialSealId(sodB.Combine(Context.PathTable, "junction"));
+            DirectoryArtifact nestedDirViaJunction = DirectoryArtifact.CreateWithZeroPartialSealId(junctionDir.Path.Combine(Context.PathTable, "nestedDir"));
+
+            FileArtifact outputViaJunction = FileArtifact.CreateOutputFile(nestedDirViaJunction.Path.Combine(Context.PathTable, "output.txt"));
+            FileArtifact outputViaRealPath = FileArtifact.CreateOutputFile(nestedDir.Path.Combine(Context.PathTable, "output.txt"));
+
+            var writerBuilder = CreatePipBuilder(new Operation[]
+            {
+                // absent, and therefore cached as not needing reparse point resolution 
+                Operation.Probe(outputViaJunction, doNotInfer: true), 
+                // the junction creation should invalidate the reparse point cache, and also invalidate its
+                // descendants, which includes the above probe
+                Operation.CreateJunction(junctionDir, DirectoryArtifact.CreateWithZeroPartialSealId(sodA), doNotInfer: true),  
+                Operation.WriteFile(outputViaRealPath, doNotInfer: true),
+                // present now via the creation of the junction and the output. Since the cache should have 
+                // invalidated this entry, now this should be flagged as needing resolution
+                Operation.ReadFile(outputViaJunction, doNotInfer: true), 
+            });
+
+            writerBuilder.AddOutputDirectory(sodA, SealDirectoryKind.SharedOpaque); 
+            writerBuilder.AddOutputDirectory(sodB, SealDirectoryKind.SharedOpaque);
+            writerBuilder.Options |= Process.Options.AllowUndeclaredSourceReads;
+
+            var writer = SchedulePipBuilder(writerBuilder);
+
+            RunScheduler().AssertSuccess();
+
+            // Simulate scrubbing
+            FileUtilities.DeleteFile(junctionDir.Path.ToString(Context.PathTable));
+            FileUtilities.DeleteFile(outputViaRealPath.Path.ToString(Context.PathTable));
+
+            // A cache hit guarantees that all paths that need resolution are actually resolved
+            RunScheduler().AssertCacheHit(writer.Process.PipId);
         }
 
         /// <summary>

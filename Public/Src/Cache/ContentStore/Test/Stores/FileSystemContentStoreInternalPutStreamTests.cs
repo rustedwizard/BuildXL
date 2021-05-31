@@ -13,10 +13,11 @@ using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest.FileSystem;
 using BuildXL.Cache.ContentStore.InterfacesTest.Results;
 using BuildXL.Cache.ContentStore.InterfacesTest.Time;
+using BuildXL.Cache.ContentStore.UtilitiesCore;
+using BuildXL.Utilities.Tasks;
 using ContentStoreTest.Test;
 using FluentAssertions;
 using Xunit;
-using BuildXL.Cache.ContentStore.UtilitiesCore;
 
 namespace ContentStoreTest.Stores
 {
@@ -105,36 +106,36 @@ namespace ContentStoreTest.Stores
         }
 
         [Fact(Skip = "Skip until pending PR to fix flakiness.")]
-        public async Task PutStreamParallelAdds()
+        public Task PutStreamParallelAdds()
         {
             const int PutSize = 30;
 
-            await TestStore(Context, Clock, async store =>
-            {
-                var putTasks = Enumerable.Range(0, 20).Select(async i =>
-                {
-                    ContentHash hashFromPut;
-                    using (var dataStream = new MemoryStream(ThreadSafeRandom.GetBytes(PutSize)))
-                    {
-                        var r = await store.PutStreamAsync(Context, dataStream, ContentHashType, null).ShouldBeSuccess();
-                        hashFromPut = r.ContentHash;
-                        Clock.Increment();
-                    }
-                    return hashFromPut;
-                }).ToArray();
+            return TestStore(Context, Clock, async store =>
+             {
+                 var putTasks = Enumerable.Range(0, 20).Select(async i =>
+                 {
+                     ContentHash hashFromPut;
+                     using (var dataStream = new MemoryStream(ThreadSafeRandom.GetBytes(PutSize)))
+                     {
+                         var r = await store.PutStreamAsync(Context, dataStream, ContentHashType, null).ShouldBeSuccess();
+                         hashFromPut = r.ContentHash;
+                         Clock.Increment();
+                     }
+                     return hashFromPut;
+                 }).ToArray();
 
-                ContentHash[] puthashes = await TaskSafetyHelpers.WhenAll(putTasks);
+                 ContentHash[] puthashes = await TaskUtilities.SafeWhenAll(putTasks);
 
-                await store.SyncAsync(Context);
+                 await store.SyncAsync(Context);
 
-                var filesStillInCache = 0;
-                foreach (var hash in puthashes)
-                {
-                    filesStillInCache += (await store.ContainsAsync(Context, hash, null)) ? 1 : 0;
-                }
+                 var filesStillInCache = 0;
+                 foreach (var hash in puthashes)
+                 {
+                     filesStillInCache += (await store.ContainsAsync(Context, hash, null)) ? 1 : 0;
+                 }
 
-                Assert.Equal(20, filesStillInCache);
-            });
+                 Assert.Equal(20, filesStillInCache);
+             });
         }
 
         [Fact]
@@ -171,7 +172,7 @@ namespace ContentStoreTest.Stores
             {
                 store.Announcer.Should().NotBeNull();
 
-                var cas = store as IContentStoreInternal;
+                var cas = store as FileSystemContentStoreInternal;
                 var blobSize = BlobSizeToStartSoftPurging(2);
 
                 using (var stream1 = new MemoryStream(ThreadSafeRandom.GetBytes(blobSize)))

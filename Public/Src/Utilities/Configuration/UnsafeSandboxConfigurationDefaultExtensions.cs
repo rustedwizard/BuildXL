@@ -17,9 +17,6 @@ namespace BuildXL.Utilities.Configuration
         public const RewritePolicy DefaultSourceRewritePolicy = Configuration.RewritePolicy.SourceRewritesAreErrors;
 
         /// <nodoc/>
-        public const bool DefaultProcessSymlinkedAccesses = false;
-
-        /// <nodoc/>
         public const bool DefaultEnableFullReparsePointResolving = false;
 
         /// <nodoc/>
@@ -36,16 +33,13 @@ namespace BuildXL.Utilities.Configuration
             configuration.DoubleWritePolicy ?? DefaultSourceRewritePolicy;
 
         /// <summary>
-        /// Whether <see cref="IUnsafeSandboxConfiguration.ProcessSymlinkedAccesses"/> is enabled and we are in a Windows-based OS
-        /// </summary>
-        public static bool ProcessSymlinkedAccesses(this IUnsafeSandboxConfiguration configuration) =>
-            (configuration.ProcessSymlinkedAccesses ?? DefaultProcessSymlinkedAccesses) && !OperatingSystemHelper.IsUnixOS;
-
-        /// <summary>
         /// Whether <see cref="IUnsafeSandboxConfiguration.EnableFullReparsePointResolving"/> is enabled and we are in a Windows-based OS
         /// </summary>
+        /// <remarks>
+        /// Mac already resolves all reparse point in its sandbox, and doesn't need post-processing since MacLookup operations are just ignored.
+        /// </remarks>
         public static bool EnableFullReparsePointResolving(this IUnsafeSandboxConfiguration configuration) =>
-            ((configuration.EnableFullReparsePointResolving ?? DefaultEnableFullReparsePointResolving) || !configuration.IgnoreFullReparsePointResolving) && !OperatingSystemHelper.IsUnixOS;
+            ((configuration.EnableFullReparsePointResolving ?? DefaultEnableFullReparsePointResolving) || !configuration.IgnoreFullReparsePointResolving);
 
         /// <nodoc/>
         public static bool SkipFlaggingSharedOpaqueOutputs(this IUnsafeSandboxConfiguration configuration) =>

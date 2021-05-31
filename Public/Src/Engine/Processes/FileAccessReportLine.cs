@@ -25,69 +25,70 @@ namespace BuildXL.Processes
         internal static readonly Dictionary<string, ReportedFileOperation> Operations =
             new Dictionary<string, ReportedFileOperation>(StringComparer.Ordinal)
             {
-                    { "CreateFile", ReportedFileOperation.CreateFile },
-                    { "CreateDirectory", ReportedFileOperation.CreateDirectory },
-                    { "RemoveDirectory", ReportedFileOperation.RemoveDirectory },
-                    { "GetFileAttributes", ReportedFileOperation.GetFileAttributes },
-                    { "GetFileAttributesEx", ReportedFileOperation.GetFileAttributesEx },
-                    { "FindFirstFileEx", ReportedFileOperation.FindFirstFileEx },
-                    { "FindNextFile", ReportedFileOperation.FindNextFile },
-                    { "CopyFile_Source", ReportedFileOperation.CopyFileSource },
-                    { "CopyFile_Dest", ReportedFileOperation.CopyFileDestination },
-                    { "CreateHardLink_Source", ReportedFileOperation.CreateHardLinkSource },
-                    { "CreateHardLink_Dest", ReportedFileOperation.CreateHardLinkDestination },
-                    { "MoveFile_Source", ReportedFileOperation.MoveFileSource },
-                    { "MoveFile_Dest", ReportedFileOperation.MoveFileDestination },
-                    { "ZwSetRenameInformationFile_Source", ReportedFileOperation.ZwSetRenameInformationFileSource },
-                    { "ZwSetRenameInformationFile_Dest", ReportedFileOperation.ZwSetRenameInformationFileDest },
-                    { "ZwSetLinkInformationFile", ReportedFileOperation.ZwSetLinkInformationFile },
-                    { "ZwSetDispositionInformationFile", ReportedFileOperation.ZwSetDispositionInformationFile },
-                    { "ZwSetModeInformationFile", ReportedFileOperation.ZwSetModeInformationFile },
-                    { "ZwSetFileNameInformationFile_Source", ReportedFileOperation.ZwSetFileNameInformationFileSource },
-                    { "ZwSetFileNameInformationFile_Dest", ReportedFileOperation.ZwSetFileNameInformationFileDest },
-                    { "SetFileInformationByHandle_Source", ReportedFileOperation.SetFileInformationByHandleSource },
-                    { "SetFileInformationByHandle_Dest", ReportedFileOperation.SetFileInformationByHandleDest },
-                    { "DeleteFile", ReportedFileOperation.DeleteFile },
-                    { "Process", ReportedFileOperation.Process },
-                    { "ProcessExit", ReportedFileOperation.ProcessExit },
-                    { "NtQueryDirectoryFile", ReportedFileOperation.NtQueryDirectoryFile },
-                    { "ZwQueryDirectoryFile", ReportedFileOperation.ZwQueryDirectoryFile },
-                    { "NtCreateFile", ReportedFileOperation.NtCreateFile },
-                    { "ZwCreateFile", ReportedFileOperation.ZwCreateFile },
-                    { "ZwOpenFile", ReportedFileOperation.ZwOpenFile },
-                    { "CreateSymbolicLink_Source", ReportedFileOperation.CreateSymbolicLinkSource },
-                    { "ReparsePointTarget", ReportedFileOperation.ReparsePointTarget },
-                    { "ReparsePointTargetCached", ReportedFileOperation.ReparsePointTargetCached },
-                    { "ChangedReadWriteToReadAccess", ReportedFileOperation.ChangedReadWriteToReadAccess },
-                    { "FirstAllowWriteCheckInProcess", ReportedFileOperation.FirstAllowWriteCheckInProcess },
-                    { "MoveFileWithProgress_Source", ReportedFileOperation.MoveFileWithProgressSource },
-                    { "MoveFileWithProgress_Dest", ReportedFileOperation.MoveFileWithProgressDest },
-                    { "MultipleOperations", ReportedFileOperation.MultipleOperations },
-                    { "CreateProcess", ReportedFileOperation.CreateProcess },
-                    { FileOperation.OpMacLookup.GetName(), ReportedFileOperation.MacLookup },
-                    { FileOperation.OpMacReadlink.GetName(), ReportedFileOperation.MacReadlink },
-                    { FileOperation.OpMacVNodeCreate.GetName(), ReportedFileOperation.MacVNodeCreate },
-                    { FileOperation.OpMacVNodeWrite.GetName(), ReportedFileOperation.MacVNodeWrite },
-                    { FileOperation.OpMacVNodeCloneSource.GetName(), ReportedFileOperation.MacVNodeCloneSource },
-                    { FileOperation.OpMacVNodeCloneDest.GetName(), ReportedFileOperation.MacVNodeCloneDest },
-                    { FileOperation.OpKAuthMoveSource.GetName(), ReportedFileOperation.KAuthMoveSource },
-                    { FileOperation.OpKAuthMoveDest.GetName(), ReportedFileOperation.KAuthMoveDest },
-                    { FileOperation.OpKAuthCreateHardlinkSource.GetName(), ReportedFileOperation.KAuthCreateHardlinkSource },
-                    { FileOperation.OpKAuthCreateHardlinkDest.GetName(), ReportedFileOperation.KAuthCreateHardlinkDest },
-                    { FileOperation.OpKAuthCopySource.GetName(), ReportedFileOperation.KAuthCopySource },
-                    { FileOperation.OpKAuthCopyDest.GetName(), ReportedFileOperation.KAuthCopyDest },
-                    { FileOperation.OpKAuthDeleteDir.GetName(), ReportedFileOperation.KAuthDeleteDir },
-                    { FileOperation.OpKAuthDeleteFile.GetName(), ReportedFileOperation.KAuthDeleteFile },
-                    { FileOperation.OpKAuthOpenDir.GetName(), ReportedFileOperation.KAuthOpenDir },
-                    { FileOperation.OpKAuthReadFile.GetName(), ReportedFileOperation.KAuthReadFile },
-                    { FileOperation.OpKAuthCreateDir.GetName(), ReportedFileOperation.KAuthCreateDir },
-                    { FileOperation.OpKAuthWriteFile.GetName(), ReportedFileOperation.KAuthWriteFile },
-                    { FileOperation.OpKAuthClose.GetName(), ReportedFileOperation.KAuthClose },
-                    { FileOperation.OpKAuthCloseModified.GetName(), ReportedFileOperation.KAuthCloseModified },
-                    { FileOperation.OpKAuthVNodeExecute.GetName(), ReportedFileOperation.KAuthVNodeExecute },
-                    { FileOperation.OpKAuthVNodeWrite.GetName(), ReportedFileOperation.KAuthVNodeWrite },
-                    { FileOperation.OpKAuthVNodeRead.GetName(), ReportedFileOperation.KAuthVNodeRead },
-                    { FileOperation.OpKAuthVNodeProbe.GetName(), ReportedFileOperation.KAuthVNodeProbe },
+                { "CreateFile", ReportedFileOperation.CreateFile },
+                { "CreateDirectory", ReportedFileOperation.CreateDirectory },
+                { "RemoveDirectory", ReportedFileOperation.RemoveDirectory },
+                { "RemoveDirectory_Source", ReportedFileOperation.RemoveDirectorySource },
+                { "GetFileAttributes", ReportedFileOperation.GetFileAttributes },
+                { "GetFileAttributesEx", ReportedFileOperation.GetFileAttributesEx },
+                { "FindFirstFileEx", ReportedFileOperation.FindFirstFileEx },
+                { "FindNextFile", ReportedFileOperation.FindNextFile },
+                { "CopyFile_Source", ReportedFileOperation.CopyFileSource },
+                { "CopyFile_Dest", ReportedFileOperation.CopyFileDestination },
+                { "CreateHardLink_Source", ReportedFileOperation.CreateHardLinkSource },
+                { "CreateHardLink_Dest", ReportedFileOperation.CreateHardLinkDestination },
+                { "MoveFile_Source", ReportedFileOperation.MoveFileSource },
+                { "MoveFile_Dest", ReportedFileOperation.MoveFileDestination },
+                { "ZwSetRenameInformationFile_Source", ReportedFileOperation.ZwSetRenameInformationFileSource },
+                { "ZwSetRenameInformationFile_Dest", ReportedFileOperation.ZwSetRenameInformationFileDest },
+                { "ZwSetLinkInformationFile", ReportedFileOperation.ZwSetLinkInformationFile },
+                { "ZwSetDispositionInformationFile", ReportedFileOperation.ZwSetDispositionInformationFile },
+                { "ZwSetModeInformationFile", ReportedFileOperation.ZwSetModeInformationFile },
+                { "ZwSetFileNameInformationFile_Source", ReportedFileOperation.ZwSetFileNameInformationFileSource },
+                { "ZwSetFileNameInformationFile_Dest", ReportedFileOperation.ZwSetFileNameInformationFileDest },
+                { "SetFileInformationByHandle_Source", ReportedFileOperation.SetFileInformationByHandleSource },
+                { "SetFileInformationByHandle_Dest", ReportedFileOperation.SetFileInformationByHandleDest },
+                { "DeleteFile", ReportedFileOperation.DeleteFile },
+                { "Process", ReportedFileOperation.Process },
+                { "ProcessExit", ReportedFileOperation.ProcessExit },
+                { "NtQueryDirectoryFile", ReportedFileOperation.NtQueryDirectoryFile },
+                { "ZwQueryDirectoryFile", ReportedFileOperation.ZwQueryDirectoryFile },
+                { "NtCreateFile", ReportedFileOperation.NtCreateFile },
+                { "ZwCreateFile", ReportedFileOperation.ZwCreateFile },
+                { "ZwOpenFile", ReportedFileOperation.ZwOpenFile },
+                { "CreateSymbolicLink_Source", ReportedFileOperation.CreateSymbolicLinkSource },
+                { "ReparsePointTarget", ReportedFileOperation.ReparsePointTarget },
+                { "ReparsePointTargetCached", ReportedFileOperation.ReparsePointTargetCached },
+                { "ChangedReadWriteToReadAccess", ReportedFileOperation.ChangedReadWriteToReadAccess },
+                { "FirstAllowWriteCheckInProcess", ReportedFileOperation.FirstAllowWriteCheckInProcess },
+                { "MoveFileWithProgress_Source", ReportedFileOperation.MoveFileWithProgressSource },
+                { "MoveFileWithProgress_Dest", ReportedFileOperation.MoveFileWithProgressDest },
+                { "MultipleOperations", ReportedFileOperation.MultipleOperations },
+                { "CreateProcess", ReportedFileOperation.CreateProcess },
+                { FileOperation.OpMacLookup.GetName(), ReportedFileOperation.MacLookup },
+                { FileOperation.OpMacReadlink.GetName(), ReportedFileOperation.MacReadlink },
+                { FileOperation.OpMacVNodeCreate.GetName(), ReportedFileOperation.MacVNodeCreate },
+                { FileOperation.OpMacVNodeWrite.GetName(), ReportedFileOperation.MacVNodeWrite },
+                { FileOperation.OpMacVNodeCloneSource.GetName(), ReportedFileOperation.MacVNodeCloneSource },
+                { FileOperation.OpMacVNodeCloneDest.GetName(), ReportedFileOperation.MacVNodeCloneDest },
+                { FileOperation.OpKAuthMoveSource.GetName(), ReportedFileOperation.KAuthMoveSource },
+                { FileOperation.OpKAuthMoveDest.GetName(), ReportedFileOperation.KAuthMoveDest },
+                { FileOperation.OpKAuthCreateHardlinkSource.GetName(), ReportedFileOperation.KAuthCreateHardlinkSource },
+                { FileOperation.OpKAuthCreateHardlinkDest.GetName(), ReportedFileOperation.KAuthCreateHardlinkDest },
+                { FileOperation.OpKAuthCopySource.GetName(), ReportedFileOperation.KAuthCopySource },
+                { FileOperation.OpKAuthCopyDest.GetName(), ReportedFileOperation.KAuthCopyDest },
+                { FileOperation.OpKAuthDeleteDir.GetName(), ReportedFileOperation.KAuthDeleteDir },
+                { FileOperation.OpKAuthDeleteFile.GetName(), ReportedFileOperation.KAuthDeleteFile },
+                { FileOperation.OpKAuthOpenDir.GetName(), ReportedFileOperation.KAuthOpenDir },
+                { FileOperation.OpKAuthReadFile.GetName(), ReportedFileOperation.KAuthReadFile },
+                { FileOperation.OpKAuthCreateDir.GetName(), ReportedFileOperation.KAuthCreateDir },
+                { FileOperation.OpKAuthWriteFile.GetName(), ReportedFileOperation.KAuthWriteFile },
+                { FileOperation.OpKAuthClose.GetName(), ReportedFileOperation.KAuthClose },
+                { FileOperation.OpKAuthCloseModified.GetName(), ReportedFileOperation.KAuthCloseModified },
+                { FileOperation.OpKAuthVNodeExecute.GetName(), ReportedFileOperation.KAuthVNodeExecute },
+                { FileOperation.OpKAuthVNodeWrite.GetName(), ReportedFileOperation.KAuthVNodeWrite },
+                { FileOperation.OpKAuthVNodeRead.GetName(), ReportedFileOperation.KAuthVNodeRead },
+                { FileOperation.OpKAuthVNodeProbe.GetName(), ReportedFileOperation.KAuthVNodeProbe },
             };
 
         /// <summary>
@@ -109,6 +110,7 @@ namespace BuildXL.Processes
             out ShareMode shareMode,
             out CreationDisposition creationDisposition,
             out FlagsAndAttributes flagsAndAttributes,
+            out FlagsAndAttributes openedFileOrDirectoryAttributes,
             out AbsolutePath absolutePath,
             out string path,
             out string enumeratePattern,
@@ -128,6 +130,7 @@ namespace BuildXL.Processes
             shareMode = ShareMode.FILE_SHARE_NONE;
             creationDisposition = 0;
             flagsAndAttributes = 0;
+            openedFileOrDirectoryAttributes = 0;
             absolutePath = AbsolutePath.Invalid;
             path = null;
             enumeratePattern = null;
@@ -154,7 +157,7 @@ namespace BuildXL.Processes
                 if (operation == ReportedFileOperation.Process)
                 {
                     // Make sure the formatting happens only if the condition is false.
-                    if (items.Length < 12)
+                    if (items.Length < 13)
                     {
                         errorMessage = I($"Unexpected message items (potentially due to pipe corruption) for {operation.ToString()} operation. Message '{line}'. Expected >= 12 items, Received {items.Length} items");
                         return false;
@@ -165,7 +168,7 @@ namespace BuildXL.Processes
                     // An ill behaved tool can try to do GetFileAttribute on a file with '|' char. This will result in a failure of the API, but we get a report for the access.
                     // Allow that by handling such case.
                     // In Office build there is a call to GetFileAttribute with a small xml document as a file name.
-                    if (items.Length < 12)
+                    if (items.Length < 13)
                     {
                         errorMessage = I($"Unexpected message items (potentially due to pipe corruption) for {operation.ToString()} operation. Message '{line}'. Expected >= 12 items, Received {items.Length} items");
                         return false;
@@ -185,6 +188,7 @@ namespace BuildXL.Processes
                     uint.TryParse(items[index++], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var shareModeValue) &&
                     uint.TryParse(items[index++], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var creationDispositionValue) &&
                     uint.TryParse(items[index++], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var flagsAndAttributesValue) &&
+                    uint.TryParse(items[index++], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var openedFileOrDirectoryAttributesValue) &&
                     uint.TryParse(items[index++], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var absolutePathValue))
                 {
                     if (statusValue > (uint)FileAccessStatus.CannotDeterminePolicy)
@@ -206,6 +210,7 @@ namespace BuildXL.Processes
                     shareMode = (ShareMode)shareModeValue;
                     creationDisposition = (CreationDisposition)creationDispositionValue;
                     flagsAndAttributes = (FlagsAndAttributes)flagsAndAttributesValue;
+                    openedFileOrDirectoryAttributes = (FlagsAndAttributes)openedFileOrDirectoryAttributesValue;
                     absolutePath = new AbsolutePath(unchecked((int)absolutePathValue));
                     path = items[index++];
                     // Detours is only guaranteed to sent at least 12 items, so here (since we are at index 12), we must check if this item is included
@@ -249,19 +254,20 @@ namespace BuildXL.Processes
         /// can happen here as long as they are kept in sync with <see cref="SandboxedProcessReports.TryParseAugmentedFileAccess"/>
         /// </remarks>
         internal static string GetReportLineForAugmentedFileAccess(
-            ReportedFileOperation reportedFileOperation, 
+            ReportedFileOperation reportedFileOperation,
             uint processId,
-            RequestedAccess requestedAccess, 
-            FileAccessStatus fileAccessStatus, 
-            uint errorCode, 
-            Usn usn, 
-            DesiredAccess desiredAccess, 
+            RequestedAccess requestedAccess,
+            FileAccessStatus fileAccessStatus,
+            uint errorCode,
+            Usn usn,
+            DesiredAccess desiredAccess,
             ShareMode shareMode,
             CreationDisposition creationDisposition,
             FlagsAndAttributes flagsAndAttributes,
+            FlagsAndAttributes openedFileOrDirectoryAttributes,
             string absolutePath,
-            [CanBeNull]string enumeratePattern,
-            [CanBeNull]string processArgs)
+            [CanBeNull] string enumeratePattern,
+            [CanBeNull] string processArgs)
         {
             var result = new System.Text.StringBuilder();
 
@@ -280,6 +286,7 @@ namespace BuildXL.Processes
             result.Append($"{(uint)shareMode:x}|");
             result.Append($"{(uint)creationDisposition:x}|");
             result.Append($"{(uint)flagsAndAttributes:x}|");
+            result.Append($"{(uint)openedFileOrDirectoryAttributes:x}|");
             // The manifest path is always written as invalid
             result.Append($"{AbsolutePath.Invalid.Value.Value:x}|");
             result.Append(absolutePath);

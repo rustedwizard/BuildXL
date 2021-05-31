@@ -37,37 +37,75 @@ namespace BuildXL.Utilities.Tasks
 
         /// <summary>
         /// This is a variant of Task.WhenAll which ensures that all exceptions thrown by the tasks are
-        /// propagated back through a single AggregateException. This is necessary because the default awaiter
-        /// (as used by 'await') only takes the *first* exception inside of a task's aggregate exception.
-        /// All BuildXL code should use this method instead of the standard WhenAll.
+        /// propagated back through a single <see cref="AggregateException"/>. This is necessary because
+        /// the default awaiter (as used by 'await') only takes the *first* exception inside of a task's
+        /// aggregate exception. All BuildXL code should use this method instead of the standard WhenAll.
         /// </summary>
-        public static async Task SafeWhenAll(IEnumerable<Task> tasks, bool wrapSingleException = true)
+        /// <exception cref="System.AggregateException">Thrown when any of the tasks failed.</exception>
+        public static async Task SafeWhenAll(IEnumerable<Task> tasks)
         {
             Contract.Requires(tasks != null);
 
             var whenAllTask = Task.WhenAll(tasks);
-            
-            // 'WhenAll' is not very 'async/await' friendly, but in some cases the original behavior is good:
-            // If there is only one error it doesn't make any sense to wrap it in two AggregateExceptions.
-            // So we can just 're-throw' an original exception without any changes.
-            // But if more than one task failed, than we can wrap the error into a separate AggregateException.
+
             try
             {
                 await whenAllTask;
             }
             catch
             {
-                var exception = whenAllTask.Exception;
-                if (exception!.InnerExceptions.Count == 1 && !wrapSingleException)
+                if (whenAllTask.Exception != null)
                 {
-                    // Just propagate a single error but only when a flag to wrap a single exception is not set.
-                    throw;
+                    // Rethrowing the error preserving the stack trace.
+                    ExceptionDispatchInfo.Capture(whenAllTask.Exception).Throw();
                 }
 
-                // More than one error occurred, re-throw 'AggregateException' and wrap it into another AggregateException instance.
-                ExceptionDispatchInfo.Capture(exception).Throw();
-                throw; // This line is unreachable.
+                // whenAllTask is in the canceled state, we caught TaskCancelledException
+                throw;
             }
+        }
+
+        /// <summary>
+        /// This is a variant of Task.WhenAll which ensures that all exceptions thrown by the tasks are
+        /// propagated back through a single <see cref="AggregateException"/>. This is necessary because
+        /// the default awaiter (as used by 'await') only takes the *first* exception inside of a task's
+        /// aggregate exception. All BuildXL code should use this method instead of the standard WhenAll.
+        /// </summary>
+        /// <exception cref="System.AggregateException">Thrown when any of the tasks failed.</exception>
+        public static async Task<TResult[]> SafeWhenAll<TResult>(IEnumerable<Task<TResult>> tasks)
+        {
+            Contract.RequiresNotNull(tasks);
+
+            var whenAllTask = Task.WhenAll(tasks);
+            try
+            {
+                return await whenAllTask;
+            }
+            catch
+            {
+                if (whenAllTask.Exception != null)
+                {
+                    // Rethrowing the error preserving the stack trace.
+                    ExceptionDispatchInfo.Capture(whenAllTask.Exception).Throw();
+                }
+
+                // whenAllTask is in the canceled state, we caught TaskCancelledException
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// This is a variant of Task.WhenAll which ensures that all exceptions thrown by the tasks are
+        /// propagated back through a single <see cref="AggregateException"/>. This is necessary because
+        /// the default awaiter (as used by 'await') only takes the *first* exception inside of a task's
+        /// aggregate exception. All BuildXL code should use this method instead of the standard WhenAll.
+        /// </summary>
+        /// <exception cref="System.AggregateException">Thrown when any of the tasks failed.</exception>
+        public static Task<TResult[]> SafeWhenAll<TResult>(params Task<TResult>[] tasks)
+        {
+            Contract.Requires(tasks != null);
+
+            return SafeWhenAll((IEnumerable<Task<TResult>>)tasks);
         }
 
         /// <summary>
@@ -78,9 +116,9 @@ namespace BuildXL.Utilities.Tasks
         {
             // If one of the tasks passed here fails, we want to make sure that the task created by 'Task.WhenAll(tasks)' is observed
             // in order to avoid unobserved task errors.
-            
+
             var whenAllTask = Task.WhenAll(tasks);
-            
+
             var completedTask = await Task.WhenAny(
                 Task.Delay(Timeout.InfiniteTimeSpan, token),
                 whenAllTask);
@@ -100,40 +138,53 @@ namespace BuildXL.Utilities.Tasks
         }
 
         /// <summary>
-        /// Waits for cancellation to be triggered.
+        /// Gets <see cref="CancellationTokenAwaitable"/> from a given <paramref name="token"/> that can be used in async methods to await the cancellation.
         /// </summary>
-        public static async Task WaitForCancellationAsync(this CancellationToken token)
+        /// <remarks>
+        /// The method returns a special disposable type instead of just returning a Task.
+        /// This is important, because the client code need to "unregister" the callback from the token when some other operations are done and the cancellation is no longer relevant.
+        /// Just returning a task on a token that is never trigerred will effectively cause a memory leak.
+        /// Here is a previous implementation of this method:
+        /// <code>public static async Task ToAwaitable(this CancellationToken token) { try {await Task.Delay(Timeout.Infinite, token);} catch(TaskCanceledException) {} }</code>
+        /// The `Delay` impelmentaiton checks if the timeout is infinite and won't start the timer, but it still will create a `DelayPromise` instance
+        /// and will register for the cancellation.
+        /// It means that if we call such a method many times with the same cancellation token, the registration list will grow indefinitely causing potential performance issues.
+        /// </remarks>
+        public static CancellationTokenAwaitable ToAwaitable(this CancellationToken token)
         {
-            try
+            if (!token.CanBeCanceled)
             {
-                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                // If the token can not be canceled, return a special global instance with a task that will never be finished.
+                return CancellationTokenAwaitable.NonCancellableAwaitable;
             }
-            catch (TaskCanceledException)
-            {
-            }
+
+            var tcs = new TaskCompletionSource<object>();
+            var registration = token.Register(static tcs => ((TaskCompletionSource<object>)tcs).SetResult(null), tcs);
+            return new CancellationTokenAwaitable(tcs.Task, registration);
         }
 
-        /// <summary>
-        /// This is a variant of Task.WhenAll which ensures that all exceptions thrown by the tasks are
-        /// propagated back through a single AggregateException. This is necessary because the default awaiter
-        /// (as used by 'await') only takes the *first* exception inside of a task's aggregate exception.
-        /// All BuildXL code should use this method instead of the standard WhenAll.
-        /// </summary>
-        public static async Task<TResult[]> SafeWhenAll<TResult>(IEnumerable<Task<TResult>> tasks)
+        /// <nodoc />
+        public readonly struct CancellationTokenAwaitable : IDisposable
         {
-            Contract.RequiresNotNull(tasks);
+            private readonly CancellationTokenRegistration? m_registration;
 
-            var whenAllTask = Task.WhenAll(tasks);
-            try
+            /// <nodoc />
+            public CancellationTokenAwaitable(Task completionTask, CancellationTokenRegistration? registration)
             {
-                return await whenAllTask;
+                m_registration = registration;
+                CompletionTask = completionTask;
             }
-            catch
+
+            /// <nodoc />
+            public static CancellationTokenAwaitable NonCancellableAwaitable { get; } = new CancellationTokenAwaitable(new TaskCompletionSource<object>().Task, registration: null);
+
+            /// <nodoc />
+            public Task CompletionTask { get; }
+
+            /// <inheritdoc />
+            void IDisposable.Dispose()
             {
-                if (whenAllTask.Exception != null)
-                    throw whenAllTask.Exception;
-                else
-                    throw;
+                m_registration?.Dispose();
             }
         }
 
@@ -485,7 +536,7 @@ namespace BuildXL.Utilities.Tasks
         /// </param>
         /// <param name="period">Period at which to call <paramref name="action"/>.</param>
         /// <param name="reportImmediately">Whether <paramref name="action"/> should be called immediately.</param>
-        /// <returns>The results of inidvidual tasks.</returns>
+        /// <returns>The results of individual tasks.</returns>
         public static async Task<TResult[]> AwaitWithProgressReporting<TItem, TResult>(
             IReadOnlyCollection<TItem> collection,
             Func<TItem, Task<TResult>> taskSelector,
@@ -520,44 +571,35 @@ namespace BuildXL.Utilities.Tasks
         /// <summary>
         /// Awaits for a given task while periodically calling <paramref name="action"/>.
         /// </summary>
-        /// <typeparam name="TResult">Return type of the task</typeparam>
+        /// <typeparam name="T">Return type of the task</typeparam>
         /// <param name="task">The task to await</param>
         /// <param name="period">Period at which to call <paramref name="action"/></param>
         /// <param name="action">Action to periodically call.  The action receives elapsed time since this method was called.</param>
         /// <param name="reportImmediately">Whether <paramref name="action"/> should be called immediately.</param>
         /// <param name="reportAtEnd">Whether <paramref name="action"/> should be called at when </param>
         /// <returns>The result of the task.</returns>
-        public static async Task<TResult> AwaitWithProgressReporting<TResult>(
-            Task<TResult> task,
+        public static async Task<T> AwaitWithProgressReportingAsync<T>(
+            Task<T> task,
             TimeSpan period,
             Action<TimeSpan> action,
             bool reportImmediately = true,
             bool reportAtEnd = true)
         {
             var startTime = DateTime.UtcNow;
-            var timer = new StoppableTimer(
-                () =>
-                {
-                    action(DateTime.UtcNow.Subtract(startTime));
-                },
+            using var timer = new StoppableTimer(
+                () => action(DateTime.UtcNow.Subtract(startTime)),
                 dueTime: reportImmediately ? 0 : (int)period.TotalMilliseconds,
                 period: (int)period.TotalMilliseconds);
 
-            using (timer)
+            await task.ContinueWith(_ => timer.StopAsync()).Unwrap();
+
+            // report once at the end
+            if (reportAtEnd)
             {
-                await task.ContinueWith(t =>
-                {
-                    return timer.StopAsync();
-                }).Unwrap();
-
-                // report once at the end
-                if (reportAtEnd)
-                {
-                    action(DateTime.UtcNow.Subtract(startTime));
-                }
-
-                return await task;
+                action(DateTime.UtcNow.Subtract(startTime));
             }
+
+            return await task;
         }
 
         /// <summary>

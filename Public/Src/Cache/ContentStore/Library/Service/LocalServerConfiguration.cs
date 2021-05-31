@@ -23,24 +23,28 @@ namespace BuildXL.Cache.ContentStore.Service
             int grpcPort,
             IAbsFileSystem fileSystem,
             int? bufferSizeForGrpcCopies = null,
-            int? gzipBarrierSizeForGrpcCopies = null,
             int? proactivePushCountLimit = null,
             TimeSpan? logIncrementalStatsInterval = null,
             TimeSpan? logMachineStatsInterval = null,
-            bool traceGrpcOperations = false
+            bool traceGrpcOperations = false,
+            int? copyRequestHandlingCountLimit = null,
+            bool doNotShutdownSessionsInUse = false,
+            TimeSpan? asyncSessionShutdownTimeout = null
         )
         {
             DataRootPath = dataRootPath;
             NamedCacheRoots = namedCacheRoots;
             GrpcPort = grpcPort;
             BufferSizeForGrpcCopies = bufferSizeForGrpcCopies;
-            GzipBarrierSizeForGrpcCopies = gzipBarrierSizeForGrpcCopies;
             ProactivePushCountLimit = proactivePushCountLimit;
+            CopyRequestHandlingCountLimit = copyRequestHandlingCountLimit;
             FileSystem = fileSystem;
 
             LogIncrementalStatsInterval = logIncrementalStatsInterval ?? DefaultLogIncrementalStatsInterval;
             LogMachineStatsInterval = logMachineStatsInterval ?? DefaultLogMachineStatsInterval;
             TraceGrpcOperations = traceGrpcOperations;
+            DoNotShutdownSessionsInUse = doNotShutdownSessionsInUse;
+            AsyncSessionShutdownTimeout = asyncSessionShutdownTimeout ?? DefaultWaitForShutdownTimeout;
         }
 
         /// <nodoc />
@@ -53,12 +57,14 @@ namespace BuildXL.Cache.ContentStore.Service
             GrpcPort = (int)serviceConfiguration.GrpcPort;
             GrpcPortFileName = serviceConfiguration.GrpcPortFileName ?? DefaultFileName;
             BufferSizeForGrpcCopies = serviceConfiguration.BufferSizeForGrpcCopies;
-            GzipBarrierSizeForGrpcCopies = serviceConfiguration.GzipBarrierSizeForGrpcCopies;
             ProactivePushCountLimit = serviceConfiguration.ProactivePushCountLimit;
+            CopyRequestHandlingCountLimit = serviceConfiguration.CopyRequestHandlingCountLimit;
             LogMachineStatsInterval = serviceConfiguration.LogMachineStatsInterval ?? DefaultLogMachineStatsInterval;
             LogIncrementalStatsInterval = serviceConfiguration.LogIncrementalStatsInterval ?? DefaultLogIncrementalStatsInterval;
             TraceGrpcOperations = serviceConfiguration.TraceGrpcOperation;
+            DoNotShutdownSessionsInUse = serviceConfiguration.DoNotShutdownSessionsInUse;
             IncrementalStatsCounterNames = serviceConfiguration.IncrementalStatsCounterNames ?? new string[0];
+            AsyncSessionShutdownTimeout = serviceConfiguration.AsyncSessionShutdownTimeout ?? DefaultWaitForShutdownTimeout;
         }
 
         /// <nodoc />
@@ -70,12 +76,14 @@ namespace BuildXL.Cache.ContentStore.Service
             GrpcPort = (int)serviceConfiguration.GrpcPort;
             GrpcPortFileName = serviceConfiguration.GrpcPortFileName ?? DefaultFileName;
             BufferSizeForGrpcCopies = serviceConfiguration.BufferSizeForGrpcCopies;
-            GzipBarrierSizeForGrpcCopies = serviceConfiguration.GzipBarrierSizeForGrpcCopies;
             ProactivePushCountLimit = serviceConfiguration.ProactivePushCountLimit;
+            CopyRequestHandlingCountLimit = serviceConfiguration.CopyRequestHandlingCountLimit;
             LogMachineStatsInterval = serviceConfiguration.LogMachineStatsInterval ?? DefaultLogMachineStatsInterval;
             LogIncrementalStatsInterval = serviceConfiguration.LogIncrementalStatsInterval ?? DefaultLogIncrementalStatsInterval;
             TraceGrpcOperations = serviceConfiguration.TraceGrpcOperation;
+            DoNotShutdownSessionsInUse = serviceConfiguration.DoNotShutdownSessionsInUse;
             IncrementalStatsCounterNames = serviceConfiguration.IncrementalStatsCounterNames ?? new string[0];
+            AsyncSessionShutdownTimeout = serviceConfiguration.AsyncSessionShutdownTimeout ?? DefaultWaitForShutdownTimeout;
             return this;
         }
 
@@ -154,6 +162,11 @@ namespace BuildXL.Cache.ContentStore.Service
         /// <nodoc />
         public int? BufferSizeForGrpcCopies { get; private set; }
 
+        /// <summary>
+        /// If true, then the unsafe version of ByteString construction is used that avoids extra copy of the byte[].
+        /// </summary>
+        public bool UseUnsafeByteStringConstruction { get; set; }
+
         /// <nodoc />
         public const int DefaultProactivePushCountLimit = 128;
 
@@ -162,10 +175,16 @@ namespace BuildXL.Cache.ContentStore.Service
         /// </summary>
         public int? ProactivePushCountLimit { get; private set; }
 
+        /// <nodoc />
+        public const int DefaultCopyRequestHandlingCountLimit = 128;
+
         /// <summary>
-        /// Files greater than this size will be compressed via GZip when GZip is enabled.
+        /// The max number of copy operations that can happen at the same time from this machine.
         /// </summary>
-        public int? GzipBarrierSizeForGrpcCopies { get; private set; }
+        /// <remarks>
+        /// Once the limit is reached the server starts returning error responses but only when the client is willing to fail fast.
+        /// </remarks>
+        public int? CopyRequestHandlingCountLimit { get; private set; }
 
         /// <nodoc />
         public static readonly string DefaultFileName = "CASaaS GRPC port";
@@ -185,6 +204,24 @@ namespace BuildXL.Cache.ContentStore.Service
         /// Whether to trace the operation's start and stop messages on the grpc level.
         /// </summary>
         public bool TraceGrpcOperations { get; set; }
+
+        /// <summary>
+        /// Whether to respect the fact the sessions is being used and not shut it down.
+        /// </summary>
+        /// <remarks>
+        /// If the heartbeat for the session is equals to the sessions TTL, and a single operation runs longer then the TTL, then
+        /// the backend will close the session due to the expiry.
+        /// If this flag is set, the session won't be closed in this case.
+        /// </remarks>
+        public bool DoNotShutdownSessionsInUse { get; set; }
+
+        private static TimeSpan DefaultWaitForShutdownTimeout = TimeSpan.FromHours(1);
+
+        /// <summary>
+        /// For sessions that should not shut down until their async operations are completed, we should set a limit to how much we're willing to wait
+        /// until we force shutdown.
+        /// </summary>
+        public TimeSpan AsyncSessionShutdownTimeout { get; set; }
 
         /// <inheritdoc />
         public override string ToString()
@@ -210,7 +247,6 @@ namespace BuildXL.Cache.ContentStore.Service
             sb.Append($", GrpcPort={GrpcPort}");
             sb.Append($", GrpcPortFileName={GrpcPortFileName}");
             sb.Append($", BufferSizeForGrpcCopies={BufferSizeForGrpcCopies}");
-            sb.Append($", GzipBarrierSizeForGrpcCopies={GzipBarrierSizeForGrpcCopies}");
             sb.Append($", TraceGrpcOperations={TraceGrpcOperations}");
 
             return sb.ToString();

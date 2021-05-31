@@ -49,10 +49,9 @@ namespace BuildXL.Engine
             pipGraph = null;
             IPipGraphBuilder pipGraphBuilder = null;
 
-            if (!AddConfigurationMountsAndCompleteInitialization(loggingContext, mountsTable))
-            {
-                return false;
-            }
+            // Observe the mount table is not finalized here since there might be extra mounts coming
+            // from DScript modules
+            AddConfigurationMounts(mountsTable);
 
             IDictionary<ModuleId, MountsTable> moduleMountsTableMap;
             if (!mountsTable.PopulateModuleMounts(Configuration.ModulePolicies.Values, out moduleMountsTableMap))
@@ -95,14 +94,17 @@ namespace BuildXL.Engine
             return pipGraphBuilder == null || (pipGraph = pipGraphBuilder.Build()) != null;
         }
 
-        private bool AddConfigurationMountsAndCompleteInitialization(LoggingContext loggingContext, MountsTable mountsTable)
+        private void AddConfigurationMounts(MountsTable mountsTable)
         {
             // Add configuration mounts
             foreach (var mount in Configuration.Mounts)
             {
                 mountsTable.AddResolvedMount(mount, new LocationData(Configuration.Layout.PrimaryConfigFile, 0, 0));
             }
+        }
 
+        private bool CompleteInitialization(LoggingContext loggingContext, MountsTable mountsTable)
+        {
             if (!mountsTable.CompleteInitialization())
             {
                 Contract.Assume(loggingContext.ErrorWasLogged, "An error should have been logged after MountTable.CompleteInitialization()");
@@ -157,7 +159,7 @@ namespace BuildXL.Engine
         /// There are 3 opportunities to determine a graph match. The applicability of each depends on the distributed build roles.
         ///   (1) from engine cache,
         ///   (2) from content cache, and
-        ///   (3) from master node (if running on a worker node in a distributed build)
+        ///   (3) from orchestrator node (if running on a worker node in a distributed build)
         /// </summary>
         private GraphCacheCheckStatistics CheckGraphCacheReuse(
             LoggingContext outerLoggingContext,
@@ -196,9 +198,10 @@ namespace BuildXL.Engine
             {
                 var loggingContext = timeBlock.LoggingContext;
                 var effectiveEnvironmentVariables = FrontEndEngineImplementation.PopulateFromEnvironmentAndApplyOverrides(loggingContext, properties);
-                var availableMounts = MountsTable.CreateAndRegister(loggingContext, Context, Configuration, m_initialCommandLineConfiguration.Startup.Properties);
+                var mainConfigAvailableMounts = MountsTable.CreateAndRegister(loggingContext, Context, Configuration, m_initialCommandLineConfiguration.Startup.Properties);
 
-                if (!AddConfigurationMountsAndCompleteInitialization(loggingContext, availableMounts))
+                AddConfigurationMounts(mainConfigAvailableMounts);
+                if (!CompleteInitialization(loggingContext, mainConfigAvailableMounts))
                 {
                     return cacheGraphStats;
                 }
@@ -209,8 +212,8 @@ namespace BuildXL.Engine
                 // 1. Engine cache check:
                 // ************************************************************
                 // * Single machine builds
-                // Distributed builds rely on the graph being available via the cache for it to be shared between master
-                // and workers. So even if the master could have had a hit from the engine cache, it must be ignored
+                // Distributed builds rely on the graph being available via the cache for it to be shared between orchestrator
+                // and workers. So even if the orchestrator could have had a hit from the engine cache, it must be ignored
                 // since the workers would not be able to retrieve it.
                 if (!HasExplicitlyLoadedGraph(Configuration.Cache) &&
                     !Configuration.Schedule.ForceUseEngineInfoFromCache &&
@@ -218,14 +221,14 @@ namespace BuildXL.Engine
                 {
                     Contract.Assume(
                         graphFingerprint != null,
-                        "When looking up a cached graph on a distributed master or single-machine build, a graph fingerprint must be computed");
+                        "When looking up a cached graph on a distributed orchestrator or single-machine build, a graph fingerprint must be computed");
 
                     InputTracker.MatchResult engineCacheMatchResult = CheckIfAvailableInputsToGraphMatchPreviousRun(
                         loggingContext,
                         serializer,
                         graphFingerprint: graphFingerprint,
                         availableEnvironmentVariables: effectiveEnvironmentVariables,
-                        availableMounts: availableMounts,
+                        mainConfigAvailableMounts: mainConfigAvailableMounts,
                         journalState: journalState,
                         maxDegreeOfParallelism: maxDegreeOfParallelism);
                     cacheGraphStats.ObjectDirectoryHit = engineCacheMatchResult.Matches;
@@ -256,8 +259,8 @@ namespace BuildXL.Engine
                 // 2. Content cache check:
                 // ************************************************************
                 // * Single machine builds that missed earlier
-                // * Distributed masters
-                // This is the only valid place for the master to get a hit since it must be in the cache for the
+                // * Distributed orchestrators
+                // This is the only valid place for the orchestrator to get a hit since it must be in the cache for the
                 // workers to get it.
                 if (shouldTryContentCache)
                 {
@@ -277,8 +280,10 @@ namespace BuildXL.Engine
                                 FileContentTable,
                                 maxDegreeOfParallelism);
 
+                            // Module-defined mounts won't be available at this point, but it is safe to only use the main config ones since module defined ones are driven
+                            // by the content of module files and environment variables registered through the engine
                             var cachedGraphDescriptor =
-                                cacheGraphProvider.TryGetPipGraphCacheDescriptorAsync(graphFingerprint, effectiveEnvironmentVariables, availableMounts.MountsByName).Result;
+                                cacheGraphProvider.TryGetPipGraphCacheDescriptorAsync(graphFingerprint, effectiveEnvironmentVariables, mainConfigAvailableMounts.MountsByName).Result;
 
                             if (cachedGraphDescriptor == null)
                             {
@@ -304,11 +309,11 @@ namespace BuildXL.Engine
                                 return cacheGraphStats;
                             }
 
-                            // If a distributed master, take note of the graph fingerprint
-                            if (Configuration.Distribution.BuildRole == DistributedBuildRoles.Master)
+                            // If a distributed orchestrator, take note of the graph fingerprint
+                            if (Configuration.Distribution.BuildRole.IsOrchestrator())
                             {
                                 Contract.Assert(cachedGraphDescriptor != null);
-                                m_masterService.CachedGraphDescriptor = cachedGraphDescriptor;
+                                m_orchestratorService.CachedGraphDescriptor = cachedGraphDescriptor;
                             }
 
                             Logger.Log.FetchedSerializedGraphFromCache(outerLoggingContext);
@@ -327,14 +332,14 @@ namespace BuildXL.Engine
                 }
 
                 // ************************************************************
-                // 3. Query distributed master
+                // 3. Query distributed orchestrator
                 // ************************************************************
                 // * Distributed workers only
                 if (Configuration.Distribution.BuildRole == DistributedBuildRoles.Worker)
                 {
                     Contract.Assume(
                         graphFingerprint == null,
-                        "Distributed workers should request a graph fingerprint from the master (not compute one locally)");
+                        "Distributed workers should request a graph fingerprint from the orchestrator (not compute one locally)");
                     Possible<CacheInitializer> possibleCacheInitializerForWorker = cacheInitializationTask.GetAwaiter().GetResult();
                     Contract.Assume(possibleCacheInitializerForWorker.Succeeded, "Workers must have a valid cache");
                     CacheInitializer cacheInitializerForWorker = possibleCacheInitializerForWorker.Result;
@@ -352,7 +357,7 @@ namespace BuildXL.Engine
                                 FileContentTable,
                                 m_tempCleaner).Result)
                         {
-                            cacheGraphStats.CacheMissReason = GraphCacheMissReason.NoFingerprintFromMaster;
+                            cacheGraphStats.CacheMissReason = GraphCacheMissReason.NoFingerprintFromOrchestrator;
                             cacheGraphStats.MissReason = cacheGraphStats.CacheMissReason;
                             return cacheGraphStats;
                         }
@@ -602,7 +607,7 @@ namespace BuildXL.Engine
             // Copy the graph files to the session output
             if (Configuration.Distribution.BuildRole != DistributedBuildRoles.Worker)
             {
-                // No need to link these files to the logs directory on workers since they are redundant with what's on the master
+                // No need to link these files to the logs directory on workers since they are redundant with what's on the orchestrator
                 m_executionLogGraphCopy = TryCreateHardlinksToScheduleFilesInSessionFolder(loggingContext, serializer);
                 m_previousInputFilesCopy = TryCreateHardlinksToPreviousInputFilesInSessionFolder(loggingContext, serializer);
             }

@@ -4,7 +4,6 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Extensions;
 using BuildXL.Cache.ContentStore.Hashing;
@@ -45,7 +44,7 @@ namespace ContentStoreTest.Stores
             
             if (!AbsolutePath.LongPathsSupported)
             {
-                context.Debug($"The test '{nameof(PutFileWithLongPath)}' is skipped because long paths are not supported by the current version of .net framework.");
+                context.Debug($"The test '{nameof(PutFileWithLongPath)}' is skipped because long paths are not supported by the current version of .net framework.", component: nameof(FileSystemContentStoreInternalPutFileTests));
                 return Task.FromResult(1);
             }
 
@@ -108,6 +107,38 @@ namespace ContentStoreTest.Stores
                     }
 
                     await store.EnsureContentIsNotPinned(context, Clock, hashFromPut);
+                }
+            });
+        }
+
+        [Fact]
+        public Task PutFileMoveAppliesDenyWrites()
+        {
+            var context = new Context(Logger);
+            return TestStore(context, Clock, async store =>
+            {
+                byte[] bytes = ThreadSafeRandom.GetBytes(ValueSize);
+                ContentHash contentHash = bytes.CalculateHash(ContentHashType);
+
+                // Verify content doesn't exist yet in store
+                Assert.False(await store.ContainsAsync(context, contentHash, null));
+
+                using (var tempDirectory = new DisposableDirectory(FileSystem))
+                {
+                    AbsolutePath pathToContent = tempDirectory.Path / "tempContent.txt";
+                    FileSystem.WriteAllBytes(pathToContent, bytes);
+
+                    // Put the content into the store w/ hard link
+                    var r = await store.PutFileAsync(
+                        context, pathToContent, FileRealizationMode.Move, ContentHashType, null);
+
+                    // File should be deleted from original location
+                    FileSystem.FileExists(pathToContent).Should().BeFalse();
+
+                    r.ContentHash.Should().Be(contentHash);
+                    var pathInStore = store.GetPrimaryPathFor(r.ContentHash);
+
+                    AbsFileSystemTests.VerifyThrowsOnOpenForWriteOfDenyWriteFile(FileSystem, pathInStore);
                 }
             });
         }
@@ -307,7 +338,7 @@ namespace ContentStoreTest.Stores
 
                     var result = await store.PutFileAsync(context, sourcePath2, FileRealizationMode.HardLink, contentHash, null);
                     result.ContentHash.Should().Be(contentHash);
-                    using (StreamWithLength? stream = await FileSystem.OpenAsync(
+                    using (StreamWithLength? stream = FileSystem.TryOpen(
                         sourcePath2, FileAccess.Read, FileMode.Open, FileShare.Read))
                     {
                         (await stream.Value.CalculateHashAsync(ContentHashType)).Should().Be(contentHash);
@@ -435,7 +466,7 @@ namespace ContentStoreTest.Stores
                     Assert.Equal(originalFileId, FileSystem.GetFileId(pathToContent));
 
                     // Ensure we can open it
-                    using (await FileSystem.OpenAsync(
+                    using (FileSystem.TryOpen(
                         pathToContent, FileAccess.Write, FileMode.Open, FileShare.None))
                     {
                     }
@@ -447,7 +478,7 @@ namespace ContentStoreTest.Stores
 
                     Assert.NotEqual(originalFileId, FileSystem.GetFileId(pathToContent));
 
-                    Func<Task> writeFunc = async () => await FileSystem.OpenAsync(
+                    Action writeFunc = () => FileSystem.TryOpen(
                         pathToContent, FileAccess.Write, FileMode.Open, FileShare.None);
                     writeFunc.Should().Throw<UnauthorizedAccessException>();
                 }
@@ -489,8 +520,7 @@ namespace ContentStoreTest.Stores
             Func<PutResult, bool> checkResult)
         {
             // This only works when we have multiple drives.
-            var memoryFileSystem = FileSystem as MemoryFileSystem;
-            if (memoryFileSystem == null)
+            if (FileSystem is not MemoryFileSystem)
             {
                 return;
             }

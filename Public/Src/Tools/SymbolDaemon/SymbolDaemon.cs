@@ -18,6 +18,7 @@ using BuildXL.Storage;
 using BuildXL.Utilities;
 using BuildXL.Utilities.CLI;
 using BuildXL.Utilities.Tasks;
+using Microsoft.VisualStudio.Services.Common;
 using Microsoft.VisualStudio.Services.Symbol.App.Core.Tracing;
 using Microsoft.VisualStudio.Services.Symbol.Common;
 using Microsoft.VisualStudio.Services.Symbol.WebApi;
@@ -30,7 +31,7 @@ namespace Tool.SymbolDaemon
     /// <summary>
     /// Daemon responsible for handling symbol-related requests.
     /// </summary>
-    public sealed class SymbolDaemon : ServicePipDaemon.ServicePipDaemon, IDisposable, IIpcOperationExecutor
+    public sealed class SymbolDaemon : ServicePipDaemon.FinalizedByCreatorServicePipDaemon, IDisposable, IIpcOperationExecutor
     {
         private const string LogFileName = "SymbolDaemon";
         private const int s_servicePointParallelism = 200;
@@ -120,8 +121,46 @@ namespace Tool.SymbolDaemon
             IsMultiValue = false,
         };
 
+        internal static readonly NullableIntOption OptionalDomainId = RegisterSymbolConfigOption(new NullableIntOption("domainId")
+        {
+            ShortName = "ddid",
+            HelpText = "Optional domain id setting.",
+            IsRequired = false,
+            DefaultValue = null,
+        });
+
+        internal static readonly IntOption BatchSize = RegisterSymbolConfigOption(new IntOption("batchSize")
+        {
+            ShortName = "bs",
+            HelpText = "Size of batches in which to send 'associate' requests",
+            IsRequired = false,
+            DefaultValue = SymbolConfig.DefaultBatchSize,
+        });
+
+        internal static readonly IntOption MaxParallelUploads = RegisterSymbolConfigOption(new IntOption("maxParallelUploads")
+        {
+            ShortName = "mpu",
+            HelpText = "Maximum number of uploads to issue to the service endpoint in parallel",
+            IsRequired = false,
+            DefaultValue = SymbolConfig.DefaultMaxParallelUploads,
+        });
+
+        internal static readonly IntOption NagleTimeMs = RegisterSymbolConfigOption(new IntOption("nagleTimeMillis")
+        {
+            ShortName = "nt",
+            HelpText = "Maximum time in milliseconds to wait before triggering a batch 'associate' request",
+            IsRequired = false,
+            DefaultValue = (int)SymbolConfig.DefaultNagleTime.TotalMilliseconds,
+        });
+
         internal static SymbolConfig CreateSymbolConfig(ConfiguredCommand conf)
         {
+            byte? domainId;
+            checked
+            {
+                domainId = (byte?)conf.Get(OptionalDomainId);
+            }
+
             return new SymbolConfig(
                 requestName: conf.Get(SymbolRequestNameOption),
                 serviceEndpoint: conf.Get(ServiceEndpoint),
@@ -130,7 +169,11 @@ namespace Tool.SymbolDaemon
                 httpSendTimeout: TimeSpan.FromMilliseconds(conf.Get(HttpSendTimeoutMillis)),
                 verbose: conf.Get(Verbose),
                 enableTelemetry: conf.Get(EnableTelemetry),
-                logDir: conf.Get(LogDir));
+                logDir: conf.Get(LogDir),
+                domainId: domainId,
+                batchSize: conf.Get(BatchSize),
+                maxParallelUploads: conf.Get(MaxParallelUploads),
+                nagleTimeMs: conf.Get(NagleTimeMs));
         }
 
         private static Client CreateClient(string serverMoniker, IClientConfig config)
@@ -391,7 +434,7 @@ namespace Tool.SymbolDaemon
                 {
                     ContentHash.TryParse(reader.ReadLine(), out var hash);
                     Contract.Assert(hash.HashType == HashType.Vso0);
-                    var blobIdentifier = new Microsoft.VisualStudio.Services.BlobStore.Common.BlobIdentifier(hash.ToHashByteArray());
+                    var blobIdentifier = new BlobIdentifier(hash.ToHashByteArray());
                     int debugEntryCount = int.Parse(reader.ReadLine());
 
                     var symbols = new HashSet<DebugEntryData>(debugEntryCount, DebugEntryDataComparer.Instance);
@@ -437,7 +480,7 @@ namespace Tool.SymbolDaemon
 
             var result = new DebugEntryData()
             {
-                BlobIdentifier = blocks[0].Length == 0 ? null : Microsoft.VisualStudio.Services.BlobStore.Common.BlobIdentifier.Deserialize(blocks[0]),
+                BlobIdentifier = blocks[0].Length == 0 ? null : BlobIdentifier.Deserialize(blocks[0]),
                 ClientKey = string.IsNullOrEmpty(blocks[1]) ? null : blocks[1],
                 InformationLevel = (DebugInformationLevel)int.Parse(blocks[2])
             };
@@ -662,17 +705,9 @@ namespace Tool.SymbolDaemon
         }
 
         /// <summary>
-        /// Synchronous version of <see cref="CreateAsync"/>
-        /// </summary>
-        public IIpcResult Create()
-        {
-            return CreateAsync().GetAwaiter().GetResult();
-        }
-
-        /// <summary>
         /// Creates a symbol request.
         /// </summary>
-        public async Task<IIpcResult> CreateAsync()
+        protected override async Task<IIpcResult> DoCreateAsync()
         {
             // TODO(olkonone): add logging
             Request createRequestResult;
@@ -717,17 +752,9 @@ namespace Tool.SymbolDaemon
         }
 
         /// <summary>
-        /// Synchronous version of <see cref="FinalizeAsync"/>
-        /// </summary>
-        public IIpcResult Finalize()
-        {
-            return FinalizeAsync().GetAwaiter().GetResult();
-        }
-
-        /// <summary>
         /// Finalizes the symbol request. 
         /// </summary>
-        public async Task<IIpcResult> FinalizeAsync()
+        protected override async Task<IIpcResult> DoFinalizeAsync()
         {
             // TODO(olkonone): add logging
             Request finalizeRequestResult;
@@ -749,6 +776,8 @@ namespace Tool.SymbolDaemon
         {
             if (m_symbolServiceClientTask.IsCompleted && !m_symbolServiceClientTask.IsFaulted)
             {
+                ReportStatisticsAsync().GetAwaiter().GetResult();
+
                 m_symbolServiceClientTask.Result.Dispose();
             }
 
@@ -774,6 +803,37 @@ namespace Tool.SymbolDaemon
             Contract.Assert(result.ExpirationDate.HasValue);
 
             return result;
+        }
+
+        private async Task ReportStatisticsAsync()
+        {
+            var symbolClient = await m_symbolServiceClientTask;
+            var stats = symbolClient.GetStats();
+            if (stats != null && stats.Any())
+            {
+                // log stats
+                stats.AddRange(m_counters.AsStatistics("SymbolDaemon"));
+                m_logger.Info($"Statistics:{string.Join(string.Empty, stats.Select(s => $"{Environment.NewLine}{s.Key}={s.Value}"))}");
+
+                // report stats to BuildXL
+                if (ApiClient != null)
+                {
+                    var possiblyReported = await ApiClient.ReportStatistics(stats);
+                    if (possiblyReported.Succeeded && possiblyReported.Result)
+                    {
+                        m_logger.Info("Statistics successfully reported to BuildXL.");
+                    }
+                    else
+                    {
+                        var errorDescription = possiblyReported.Succeeded ? string.Empty : possiblyReported.Failure.Describe();
+                        m_logger.Warning("Reporting stats to BuildXL failed. " + errorDescription);
+                    }
+                }
+            }
+            else
+            {
+                m_logger.Warning("No stats recorded by symbol client of type " + symbolClient.GetType().Name);
+            }
         }
     }
 }

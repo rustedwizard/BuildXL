@@ -34,7 +34,7 @@ namespace BuildXL.Utilities.Configuration
         /// {command: "localize", dependsOn: {kind: "project", command: "build"}} makes the 'localize' script depend on 
         /// the 'build' script of all of the project declared dependencies
         /// </summary>
-        IReadOnlyList<DiscriminatingUnion<string, IJavaScriptCommand>> Execute { get; }
+        IReadOnlyList<DiscriminatingUnion<string, IJavaScriptCommand, IJavaScriptCommandGroupWithDependencies, IJavaScriptCommandGroup>> Execute { get; }
 
         /// <summary>
         /// Defines a collection of custom JavaScript commands that can later be used as part of 'execute'.
@@ -65,20 +65,80 @@ namespace BuildXL.Utilities.Configuration
         /// Defaults to false.
         /// </remarks>
         bool? BlockWritesUnderNodeModules { get; }
+
+        /// <summary>
+        /// Policy to apply when a double write occurs.
+        /// </summary>
+        /// <remarks>
+        /// By default double writes are only allowed if the produced content is the same.
+        /// </remarks>
+        RewritePolicy? DoubleWritePolicy { get; }
+
+        /// <summary>
+        /// When specified, the resolver will give this callback an opportunity to schedule pips based on each project information. 
+        /// </summary>
+        /// <remarks>
+        /// The callback will be executed for every project discovered by this resolver. When the callback is present, the resolver won't schedule the given 
+        /// project and the callback is responsible for doing it.
+        /// The callback defines the location a function whose expected type is (JavaScriptProject) => TransformerExecuteResult.The
+        /// resolver will create an instance of an JavaScriptProject for each discovered project and pass it along.
+        /// The callback can decide not to schedule a given project by returning 'undefined', in which case the resolver will schedule it in the
+        /// regular way
+        /// </remarks>
+        ICustomSchedulingCallback CustomScheduling { get; }
+
+        /// <summary>
+        /// Callback specifying custom scripts
+        /// </summary>
+        /// <remarks>
+        /// The object is a closure, enforced by the DScript type checker. The Closure type is defined in the TypeScript DLL, not easily accessible from here.
+        /// </remarks>
+        object CustomScripts { get; }
+
+        /// <summary>
+        /// A custom set of success exit codes that applies to all pips scheduled by this resolver. 
+        /// </summary>
+        /// <remarks>
+        /// Any other exit code would indicate failure. If unspecified, by default, 0 is the only successful exit code. 
+        /// </remarks>
+        IReadOnlyList<int> SuccessExitCodes { get; }
+
+        /// <summary>
+        /// A custom set of exit codes that causes pips to be retried by BuildXL. 
+        /// </summary>
+        /// <remarks>
+        /// Applies to all pips scheduled by this resolver. 
+        /// If an exit code is also in the successExitCode, then the pip is not retried on exiting with that exit code.
+        /// </remarks>
+        IReadOnlyList<int> RetryExitCodes { get; }
+
+        /// <summary>
+        /// Maximum number of retries for processes.
+        /// </summary>
+        /// <remarks>
+        /// Applies to all processes scheduled by this resolver.
+        /// A process returning an exit code specified in 'retryExitCodes' will be retried at most the specified number of times.
+        /// </remarks>
+        int? ProcessRetries { get; }
     }
 
     /// <nodoc/>
     public static class IJavaScriptResolverSettingsExtensions
     {
         /// <nodoc/>
-        public static string GetCommandName(this DiscriminatingUnion<string, IJavaScriptCommand> command)
+        public static string GetCommandName(this DiscriminatingUnion<string, IJavaScriptCommand, IJavaScriptCommandGroupWithDependencies, IJavaScriptCommandGroup> command)
         {
-            if (command.GetValue() is string simpleCommand)
+            object value = command.GetValue();
+            if (value is string simpleCommand)
             {
                 return simpleCommand;
             }
+            else if (value is IJavaScriptCommand)
+            {
+                return ((IJavaScriptCommand)command.GetValue()).Command;
+            }
 
-            return ((IJavaScriptCommand)command.GetValue()).Command;
+            return ((IJavaScriptCommandGroup)command.GetValue()).CommandName;
         }
     }
 }

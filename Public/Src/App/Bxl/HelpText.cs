@@ -382,6 +382,18 @@ namespace BuildXL
                 Strings.HelpText_DisplayHelp_ScriptShowLargest,
                 HelpLevel.Verbose);
 
+            hw.WriteOption(
+                "/dumpFailedPips[+|-]",
+                Strings.HelpText_DisplayHelp_DumpFailedPips);
+
+            hw.WriteOption(
+                "/dumpFailedPipsWithDynamicData[+|-]",
+                Strings.HelpText_DisplayHelp_DumpFailedPipsWithDynamicData);
+
+            hw.WriteOption(
+                "/dumpFailedPipsLogLimit:<number>",
+                Strings.HelpText_DisplayHelp_DumpFailedPipsLogLimit);
+            
             #endregion
 
             hw.WriteBanner(Strings.HelpText_DisplayHelp_ErrorsAndWarningsBanner);
@@ -869,13 +881,13 @@ namespace BuildXL
                 HelpLevel.Verbose);
 
             hw.WriteOption(
-                "/masterCpuMultiplier:<double>",
-                Strings.HelpText_DisplayHelp_MasterCpuMultiplier,
+                "/orchestratorCpuMultiplier:<double>",
+                Strings.HelpText_DisplayHelp_OrchestratorCpuMultiplier,
                 HelpLevel.Verbose);
 
             hw.WriteOption(
-                "/masterCacheLookupMultiplier:<double>",
-                Strings.HelpText_DisplayHelp_MasterCacheLookupMultiplier,
+                "/orchestratorCacheLookupMultiplier:<double>",
+                Strings.HelpText_DisplayHelp_OrchestratorCacheLookupMultiplier,
                 HelpLevel.Verbose);
 
             hw.WriteOption(
@@ -1093,6 +1105,10 @@ namespace BuildXL
                 "/maxTypeCheckingConcurrency[+|-]",
                 Strings.HelpText_DisplayHelp_MaxTypeCheckingConcurrency);
 
+            hw.WriteOption(
+                "/allowMissingSpecs[+|-]",
+                Strings.HelpText_DisplayHelp_AllowMissingSpecs);
+
             #endregion
 
             #region Component Governance Manifest
@@ -1216,6 +1232,10 @@ namespace BuildXL
             hw.WriteOption("/pluginPaths:<path>",
                Strings.HelpText_DisplayHelp_PluginPaths,
                HelpLevel.Verbose);
+
+            hw.WriteOption("/exitOnNewGraph",
+                Strings.HelpText_DisplayHelp_ExitOnNewGraph,
+                HelpLevel.Verbose);
 
             #endregion
 

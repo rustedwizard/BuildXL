@@ -29,8 +29,9 @@ namespace BuildXL.Cache.MemoizationStore.Service
             ServiceClientContentSessionTracer tracer,
             IAbsFileSystem fileSystem,
             ServiceClientRpcConfiguration configuration,
-            string scenario)
-            : base(tracer, fileSystem, configuration, scenario, Capabilities.All)
+            string scenario,
+            Capabilities capabilities = Capabilities.AllNonPublishing)
+            : base(tracer, fileSystem, configuration, scenario, capabilities)
         {
         }
 
@@ -93,7 +94,7 @@ namespace BuildXL.Cache.MemoizationStore.Service
             {
                 var request = new GetSelectorsRequest()
                 {
-                    Header = new RequestHeader(context.TracingContext.Id, sessionContext.SessionId),
+                    Header = new RequestHeader(context.TracingContext.TraceId, sessionContext.SessionId),
                     WeakFingerprint = FromGrpc(weakFingerprint),
                     Level = level,
                 };
@@ -119,7 +120,7 @@ namespace BuildXL.Cache.MemoizationStore.Service
                 {
                     var request = new IncorporateStrongFingerprintsRequest()
                     {
-                        Header = new RequestHeader(context.TracingContext.Id, sessionContext.SessionId),
+                        Header = new RequestHeader(context.TracingContext.TraceId, sessionContext.SessionId),
                     };
 
                     request.StrongFingerprints.AddRange(sfBatch.Select(sf => sf.ToGrpc()));

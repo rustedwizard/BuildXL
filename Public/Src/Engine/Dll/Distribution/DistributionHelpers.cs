@@ -37,18 +37,18 @@ namespace BuildXL.Engine.Distribution
         /// Set of event ids for distribution warning messages
         /// </summary>
         public static readonly ReadOnlyArray<int> DistributionWarnings = ReadOnlyArray<int>.FromWithoutCopy(
-                (int)LogEventId.DistributionFailedToCallMaster,
+                (int)LogEventId.DistributionFailedToCallOrchestrator,
                 (int)LogEventId.DistributionCallWorkerCodeException,
-                (int)LogEventId.DistributionCallMasterCodeException,
+                (int)LogEventId.DistributionCallOrchestratorCodeException,
                 (int)LogEventId.DistributionSuccessfulRetryCallToWorker,
-                (int)LogEventId.DistributionSuccessfulRetryCallToMaster);
+                (int)LogEventId.DistributionSuccessfulRetryCallToOrchestrator);
 
         /// <summary>
         /// Set of event ids for distribution informational messages
         /// </summary>
         public static readonly ReadOnlyArray<int> DistributionInfoMessages = ReadOnlyArray<int>.FromWithoutCopy(
                 (int)LogEventId.DistributionDisableServiceProxyInactive,
-                (int)LogEventId.DistributionWaitingForMasterAttached,
+                (int)LogEventId.DistributionWaitingForOrchestratorAttached,
                 (int)LogEventId.DistributionHostLog,
                 (int)LogEventId.DistributionDebugMessage,
                 (int)LogEventId.DistributionServiceInitializationError,
@@ -123,12 +123,12 @@ namespace BuildXL.Engine.Distribution
 
                 if (notificationArgs.ExecutionLogData.Count > 0)
                 {
-                    sb.AppendFormat("ExecutionLogData: Size={0}, SequenceNumber={1}", notificationArgs.ExecutionLogData.Count, notificationArgs.ExecutionLogBlobSequenceNumber);
+                    sb.AppendFormat(" ExecutionLogData: Size={0}, SequenceNumber={1}", notificationArgs.ExecutionLogData.Count, notificationArgs.ExecutionLogBlobSequenceNumber);
                 }
 
                 if (notificationArgs.ForwardedEvents?.Count > 0)
                 {
-                    sb.AppendFormat("ForwardedEvents: Count={0}", notificationArgs.ForwardedEvents.Count);
+                    sb.AppendFormat(" ForwardedEvents: Count={0}", notificationArgs.ForwardedEvents.Count);
                 }
 
                 return sb.ToString();

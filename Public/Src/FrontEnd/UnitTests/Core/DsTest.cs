@@ -11,30 +11,30 @@ using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using BuildXL.Engine;
-using BuildXL.Pips;
-using BuildXL.Pips.Filter;
-using BuildXL.Pips.Graph;
-using BuildXL.Utilities;
-using BuildXL.Utilities.Instrumentation.Common;
-using BuildXL.FrontEnd.Script.Incrementality;
-using BuildXL.FrontEnd.Script.Constants;
-using BuildXL.FrontEnd.Workspaces.Core;
-using JetBrains.Annotations;
-using BuildXL.Utilities.Configuration;
-using BuildXL.Utilities.Configuration.Mutable;
 using BuildXL.FrontEnd.Core;
+using BuildXL.FrontEnd.Download;
 using BuildXL.FrontEnd.Script;
-using BuildXL.FrontEnd.Script.Expressions;
-using BuildXL.FrontEnd.Script.RuntimeModel.AstBridge;
-using BuildXL.FrontEnd.Script.Values;
+using BuildXL.FrontEnd.Script.Constants;
 using BuildXL.FrontEnd.Script.Evaluator;
+using BuildXL.FrontEnd.Script.Expressions;
+using BuildXL.FrontEnd.Script.Incrementality;
 using BuildXL.FrontEnd.Script.RuntimeModel;
+using BuildXL.FrontEnd.Script.RuntimeModel.AstBridge;
 using BuildXL.FrontEnd.Script.Util;
+using BuildXL.FrontEnd.Script.Values;
 using BuildXL.FrontEnd.Sdk;
-using BuildXL.FrontEnd.Sdk.Evaluation;
 using BuildXL.FrontEnd.Sdk.FileSystem;
 using BuildXL.FrontEnd.Sdk.Mutable;
 using BuildXL.FrontEnd.Sdk.Tracing;
+using BuildXL.FrontEnd.Workspaces.Core;
+using BuildXL.Native.IO;
+using BuildXL.Pips.Filter;
+using BuildXL.Utilities;
+using BuildXL.Utilities.Configuration;
+using BuildXL.Utilities.Configuration.Mutable;
+using BuildXL.Utilities.Instrumentation.Common;
+using BuildXL.ViewModel;
+using JetBrains.Annotations;
 using Test.BuildXL.TestUtilities;
 using Test.BuildXL.TestUtilities.Xunit;
 using Test.BuildXL.Utilities;
@@ -47,8 +47,6 @@ using FileType = BuildXL.FrontEnd.Script.FileType;
 using InitializationLogger = global::BuildXL.FrontEnd.Core.Tracing.Logger;
 using LogEventId = BuildXL.FrontEnd.Script.Tracing.LogEventId;
 using Logger = BuildXL.FrontEnd.Script.Tracing.Logger;
-using Test.DScript.Workspaces.Utilities;
-using BuildXL.ViewModel;
 
 namespace Test.BuildXL.FrontEnd.Core
 {
@@ -150,10 +148,20 @@ namespace Test.BuildXL.FrontEnd.Core
         {
             // This is not the best solution to rely on the global state, but this is not a long term solution.
             var pathTable = new PathTable();
+
             FileSystem = usePassThroughFileSystem
                 ? (IMutableFileSystem)new PassThroughMutableFileSystem(pathTable)
                 : new InMemoryFileSystem(pathTable);
+
             FrontEndContext = CreateFrontEndContext(pathTable, FileSystem);
+
+            // The in-memory file system needs to be aware of the in-box SDKs since we implicitly add a
+            // DSCript resolver that owns those by default
+            if (!usePassThroughFileSystem && !DisableInBoxSDKResolver)
+            {
+                PopulateInBoxSdksForInMemoryFileSystem();
+            }
+
             Engine = new BasicFrontEndEngineAbstraction(FrontEndContext.PathTable, FileSystem);
             Output = output;
 
@@ -164,6 +172,26 @@ namespace Test.BuildXL.FrontEnd.Core
             // TODO: This should go away when all statics become non-statics.
             FrontEndContext.SetContextForDebugging(FrontEndContext);
 #endif
+        }
+
+        private void PopulateInBoxSdksForInMemoryFileSystem()
+        {
+            // Follow a similar logic than the in-box SDK resolver: grab all DSCript files unders the SDK folder
+            // on the deployment test dir (excluding the prelude)
+            var sdkRoot = Path.Combine(TestDeploymentDir, "Sdk");
+            if (Directory.Exists(sdkRoot))
+            {
+                FileUtilities.EnumerateFiles(sdkRoot, recursive: true, pattern: "*", (filePath, fileName, attributes, fileSize) => 
+                {
+                    if ((attributes & FileAttributes.Directory) == 0 && 
+                        ExtensionUtilities.IsScriptExtension(Path.GetExtension(fileName)) &&
+                        !fileName.Equals("Sdk.Prelude", OperatingSystemHelper.PathComparison))
+                    {
+                        string pathToFile = Path.Combine(filePath, fileName);
+                        FileSystem.WriteAllText(AbsolutePath.Create(PathTable, pathToFile), File.ReadAllText(pathToFile));
+                    }
+                });
+            }
         }
 
         protected virtual FrontEndContext CreateFrontEndContext(PathTable pathTable, IFileSystem fileSystem)
@@ -738,6 +766,7 @@ namespace Test.BuildXL.FrontEnd.Core
                     CacheSpecs = enableSpecCache ? SpecCachingOption.Enabled : SpecCachingOption.Disabled
                 },
                 DisableDefaultSourceResolver = DisableDefaultSourceResolver,
+                DisableInBoxSdkSourceResolver = DisableInBoxSDKResolver,
             };
 
             if (enableSpecCache)
@@ -754,8 +783,20 @@ namespace Test.BuildXL.FrontEnd.Core
         /// </summary>
         protected virtual bool DisableDefaultSourceResolver => false;
 
+        /// <summary>
+        /// The default is false, but some tests need to disable it
+        /// </summary>
+        protected virtual bool DisableInBoxSDKResolver => false;
+
         private void CloneModuleRegistry(ModuleRegistry sharedModuleRegistry)
         {
+
+            // If any of the file modules is not serializable, don't test the roundtrip
+            if (sharedModuleRegistry.UninstantiatedModules.Values.Where(m => m.FileModuleLiteral != null).Any(fileModule => !fileModule.FileModuleLiteral.IsSerializable))
+            {
+                return;
+            }
+
             using (var memoryStream = new MemoryStream())
             {
                 var serializer = new ModuleRegistrySerializer(sharedModuleRegistry.GlobalLiteral, PathTable);
@@ -833,7 +874,8 @@ namespace Test.BuildXL.FrontEnd.Core
         {
             return FrontEndFactory.CreateInstanceForTesting(
                 () => new ConfigurationProcessor(new FrontEndStatistics(), logger),
-                new DScriptFrontEnd(FrontEndStatistics, logger, decorator));
+                new DScriptFrontEnd(FrontEndStatistics, logger, decorator),
+                new DownloadFrontEnd());
         }
 
         private bool TryFindNamedQualifier(FrontEndHostController frontEndHost, string qualifier, IConfiguration finalConfig, out QualifierId qualifierId)
@@ -1213,7 +1255,7 @@ namespace Test.BuildXL.FrontEnd.Core
             {
                 var sourceResolverSettings = new SourceResolverSettings
                 {
-                    Modules = new List<AbsolutePath>(),
+                    Modules = new List<DiscriminatingUnion<AbsolutePath, IInlineModuleDefinition>>(),
                     Kind = KnownResolverKind.DScriptResolverKind
                 };
                 resolverSettings = sourceResolverSettings;

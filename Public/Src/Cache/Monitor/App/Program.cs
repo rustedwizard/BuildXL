@@ -117,7 +117,7 @@ namespace BuildXL.Cache.Monitor.App
             }
         }
 
-        private static async Task RunMonitorAsync(string? configurationFilePath, string? backupFilePath, string? logFilePath, bool production, CancellationTokenSource? cancellationTokenSource = null, CancellationToken cancellationToken = default)
+        private static Task RunMonitorAsync(string? configurationFilePath, string? backupFilePath, string? logFilePath, bool production, CancellationTokenSource? cancellationTokenSource = null, CancellationToken cancellationToken = default)
         {
             var configuration = LoadConfiguration(production, configurationFilePath);
             if (!string.IsNullOrEmpty(backupFilePath))
@@ -136,7 +136,7 @@ namespace BuildXL.Cache.Monitor.App
                 };
             }
 
-            await WithLoggerAsync(async (logger) =>
+            return WithLoggerAsync(async (logger) =>
                                   {
                                       var context = new Context(logger);
                                       var operationContext = new OperationContext(context, cancellationToken);
@@ -201,12 +201,20 @@ namespace BuildXL.Cache.Monitor.App
             {
                 configuration = new Monitor.Configuration();
 
-                var applicationKey = Environment.GetEnvironmentVariable("CACHE_MONITOR_APPLICATION_KEY");
-                if (string.IsNullOrEmpty(applicationKey))
+                var cloudBuildProdApplicationKey = Environment.GetEnvironmentVariable("CACHE_MONITOR_PROD_APPLICATION_KEY");
+                if (string.IsNullOrEmpty(cloudBuildProdApplicationKey))
                 {
-                    throw new ArgumentException($"Please specify a configuration file or set the `CACHE_MONITOR_APPLICATION_KEY` environment variable to your application key");
+                    throw new ArgumentException($"Please specify a configuration file or set the `CACHE_MONITOR_PROD_APPLICATION_KEY` environment variable to your application key");
                 }
-                configuration.AzureAppKey = applicationKey;
+
+                var cloudBuildTestApplicationKey = Environment.GetEnvironmentVariable("CACHE_MONITOR_TEST_APPLICATION_KEY");
+                if (string.IsNullOrEmpty(cloudBuildTestApplicationKey))
+                {
+                    throw new ArgumentException($"Please specify a configuration file or set the `CACHE_MONITOR_TEST_APPLICATION_KEY` environment variable to your application key");
+                }
+
+                App.Constants.MicrosoftTenantCredentials.AppKey = cloudBuildProdApplicationKey;
+                App.Constants.PMETenantCredentials.AppKey = cloudBuildTestApplicationKey;
 
                 configuration.ReadOnly = !production;
                 return configuration;

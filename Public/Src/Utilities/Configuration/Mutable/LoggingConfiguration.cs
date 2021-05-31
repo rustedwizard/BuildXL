@@ -51,6 +51,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
             MaxNumPipTelemetryBatches = 1;
             CacheMissBatch = true;
             RedirectedLogsDirectory = AbsolutePath.Invalid;
+            DumpFailedPips = true;
+            DumpFailedPipsLogLimit = 50;
+            DumpFailedPipsWithDynamicData = false;
+            LogCachedPipOutputs = false;
         }
 
         /// <nodoc />
@@ -144,6 +148,10 @@ namespace BuildXL.Utilities.Configuration.Mutable
             OptimizeVsoAnnotationsForAzureDevOps = template.OptimizeVsoAnnotationsForAzureDevOps;
             AriaIndividualMessageSizeLimitBytes = template.AriaIndividualMessageSizeLimitBytes;
             MaxNumPipTelemetryBatches = template.MaxNumPipTelemetryBatches;
+            DumpFailedPips = template.DumpFailedPips;
+            DumpFailedPipsLogLimit = template.DumpFailedPipsLogLimit;
+            DumpFailedPipsWithDynamicData = template.DumpFailedPipsWithDynamicData;
+            LogCachedPipOutputs = template.LogCachedPipOutputs;
         }
 
         /// <inheritdoc />
@@ -374,5 +382,17 @@ namespace BuildXL.Utilities.Configuration.Mutable
 
         /// <inheritdoc />
         public int MaxNumPipTelemetryBatches { get; set; }
+
+        /// <inheritdoc/>
+        public bool? DumpFailedPips { get; set; }
+
+        /// <inheritdoc/>
+        public int? DumpFailedPipsLogLimit { get; set; }
+
+        /// <inheritdoc/>
+        public bool? DumpFailedPipsWithDynamicData { get; set; }
+
+        /// <inheritdoc/>
+        public bool LogCachedPipOutputs { get; set; }
     }
 }

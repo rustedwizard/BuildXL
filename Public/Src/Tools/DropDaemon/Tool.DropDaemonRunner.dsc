@@ -134,7 +134,7 @@ export namespace DropDaemonRunner {
         );
         const shutdownCmd = getExecuteArguments(shutdownCmdName, connectArgs);
         const finalizeCmd = finalizationCmdName !== undefined 
-            ? getDropdCommandIpcArguments(connectArgs, finalizationCmdName, connectArgs, overrideMustRunOnMaster)
+            ? getDropdCommandIpcArguments(connectArgs, finalizationCmdName, connectArgs, overrideMustRunOnOrchestrator)
             : undefined;
         
         const result = Transformer.createService(
@@ -145,6 +145,8 @@ export namespace DropDaemonRunner {
                     // only because ArtifactServices may run some external credentials provider
                     hasUntrackedChildProcesses: true,
                 },
+                serviceTrackableTag: dropTag,
+                serviceTrackableTagDisplayName: "DropTrackerOverhangMs"
             })
         );
         
@@ -181,7 +183,7 @@ export namespace DropDaemonRunner {
             dropStartResult,
             "create",
             <UberArguments>args,
-            overrideMustRunOnMaster
+            overrideMustRunOnOrchestrator
         );
         
         // return aggregate info
@@ -292,9 +294,9 @@ export namespace DropDaemonRunner {
     }
 
 
-    function overrideMustRunOnMaster(args: Transformer.IpcSendArguments): Transformer.IpcSendArguments {
+    function overrideMustRunOnOrchestrator(args: Transformer.IpcSendArguments): Transformer.IpcSendArguments {
         return args.override<Transformer.IpcSendArguments>({
-            mustRunOnMaster: true
+            mustRunOnOrchestrator: true
         });
     }
 
@@ -366,6 +368,12 @@ export namespace DropDaemonRunner {
                     Artifact.input(args.dropServiceConfigFile)
                 ),
                 Cmd.option("--domainId ", args.dropDomainId),
+                // --generateSignedManifest Needs to be set after --dropServiceConfigFile to overwrite the bool set by json config
+                // Used to enable ABTesting Build Manifest via BXL ENV var, safe to remove after complete feature rollout
+                ...addIf(
+                    command === "start" && Environment.getFlag("BuildXLEnableBuildManifestGeneration") === true,
+                    Cmd.flag("--generateSignedManifest", true)
+                ),
             ],
             consoleOutput: outDir.combine(`${nametag}-stdout.txt`),
             dependencies: [
@@ -448,6 +456,7 @@ export namespace DropDaemonRunner {
     const cloudBuildVars: string[] = [
         "__CLOUDBUILD_AUTH_HELPER_CONFIG__", 
         "QAUTHMATERIALROOT",                  // Auth material for low-privilege build.
+        "AZURE_ARTIFACTS_CREDENTIALPROVIDERS_PATH", // Cloudbuild auth helper executable path for build cache, symbol, and drop
         ...cloudBuildVarsPointingToDirs];
     /**
      * Sets the values of the 'forwardEnvironmentVars'

@@ -8,17 +8,18 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.FileSystem;
-using BuildXL.Cache.ContentStore.Synchronization;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
 using BuildXL.Cache.ContentStore.InterfacesTest.Results;
+using BuildXL.Cache.ContentStore.Synchronization;
+using BuildXL.Cache.ContentStore.Tracing;
+using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
+using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
+using BuildXL.Utilities.Tasks;
 using ContentStoreTest.Performance;
 using ContentStoreTest.Test;
 using FluentAssertions;
-using BuildXL.Cache.MemoizationStore.Interfaces.Results;
-using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
-using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
 using Xunit;
 using Record = BuildXL.Cache.MemoizationStore.Sessions.Record;
 
@@ -26,6 +27,8 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
 {
     public abstract class MemoizationPerformanceTests : TestBase
     {
+        private static readonly Tracer _tracer = new Tracer(nameof(MemoizationPerformanceTests));
+
         protected const int MaxRowCount = 10_000;
         private const string ItemCountEnvironmentVariableName = "MemoizationPerformanceTestsItemCount";
         private const int ItemCountDefault = 1000;
@@ -59,7 +62,7 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
             _context = new Context(Logger);
             var itemCountEnvironmentVariable = Environment.GetEnvironmentVariable(ItemCountEnvironmentVariableName);
             _itemCount = itemCountEnvironmentVariable == null ? ItemCountDefault : int.Parse(itemCountEnvironmentVariable);
-            _context.Debug($"Using itemCount=[{_itemCount}] (MaxRowCount=[{MaxRowCount}])");
+            _tracer.Debug(_context, $"Using itemCount=[{_itemCount}] (MaxRowCount=[{MaxRowCount}])");
 
             ResultsFixture = resultsFixture;
             _initialDatabaseSize = initialDatabaseSize;
@@ -77,7 +80,7 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
                 return;
             }
 
-            _context.Always($"Creating prepopulated database at path={databaseFilePath}");
+            _tracer.Always(_context, $"Creating prepopulated database at path={databaseFilePath}");
 
             using (var disposableDirectory = new DisposableDirectory(FileSystem))
             {
@@ -171,11 +174,11 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
         }
 
         [Fact]
-        public async Task GetExistingSelectors()
+        public Task GetExistingSelectors()
         {
             IList<Fingerprint> weakFingerprints = null;
 
-            await Run(
+            return Run(
                 nameof(GetExistingSelectors),
                 async (session, store) =>
                 {
@@ -207,11 +210,11 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
         }
 
         [Fact]
-        public async Task GetExistingContentHashList()
+        public Task GetExistingContentHashList()
         {
             IList<StrongFingerprint> strongFingerprints = null;
 
-            await Run(
+            return Run(
                 nameof(GetExistingContentHashList),
                 async (session, store) =>
                 {
@@ -248,11 +251,11 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
         }
 
         [Fact]
-        public async Task AddOrGetContentHashListGets()
+        public Task AddOrGetContentHashListGets()
         {
             List<Record> items = null;
 
-            await Run(
+            return Run(
                 nameof(AddOrGetContentHashListGets),
                 async (session, store) =>
                 {
@@ -301,7 +304,7 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
             }
         }
 
-        private static async Task Get(Context context, IMemoizationSession session, IList<StrongFingerprint> strongFingerprints)
+        private static Task Get(Context context, IMemoizationSession session, IList<StrongFingerprint> strongFingerprints)
         {
             var tasks = Enumerable.Range(0, strongFingerprints.Count).Select(i => Task.Run(async () =>
             {
@@ -309,10 +312,10 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
                 r.Succeeded.Should().BeTrue();
             }));
 
-            await TaskSafetyHelpers.WhenAll(tasks);
+            return TaskUtilities.SafeWhenAll(tasks);
         }
 
-        private static async Task AddOrGet(
+        private static Task AddOrGet(
             Context context, IMemoizationSession session, List<Record> records)
         {
             var tasks = Enumerable.Range(0, records.Count).Select(i => Task.Run(async () =>
@@ -323,7 +326,7 @@ namespace BuildXL.Cache.MemoizationStore.Test.Performance.Sessions
                 r.ContentHashListWithDeterminism.ContentHashList.Should().BeNull();
             }));
 
-            await TaskSafetyHelpers.WhenAll(tasks);
+            return TaskUtilities.SafeWhenAll(tasks);
         }
 
         private async Task<List<StrongFingerprint>> EnumerateStrongFingerprintsAsync(Context context, IMemoizationStore store, int count)

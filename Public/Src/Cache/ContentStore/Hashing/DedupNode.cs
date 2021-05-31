@@ -5,10 +5,14 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.ContractsLight;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Text;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
+
+#pragma warning disable CS3001 // CLS
+#pragma warning disable CS3003
 
 namespace BuildXL.Cache.ContentStore.Hashing
 {
@@ -317,7 +321,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         }
 
         /// <summary>
-        /// Canonically serializes this node to the give writer.
+        /// Canonically serializes this node to the given writer.
         /// </summary>
         private void SerializeNode(BinaryWriter writer)
         {
@@ -391,7 +395,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
             {
                 foreach (DedupNode node in EnumerateInnerNodesDepthFirst())
                 {
-                    foreach (DedupNode chunk in node.ChildNodes.Where(n => n.Type == NodeType.ChunkLeaf))
+                    foreach (DedupNode chunk in node.ChildNodes!.Where(n => n.Type == NodeType.ChunkLeaf))
                     {
                         yield return chunk;
                     }
@@ -423,8 +427,60 @@ namespace BuildXL.Cache.ContentStore.Hashing
             yield return this;
         }
 
+        /// <summary>
+        /// Gets all chunk nodes under the current node in their chunk representation.
+        /// </summary>
+        /// <param name="startOffset">
+        /// The starting offset of chunks under the current node. Defaults to 0.
+        /// </param>
+        /// <returns>
+        /// An enumerable of <see cref="ChunkInfo"/>.
+        /// </returns>
+        /// <remarks>
+        /// In order for the operation to succeed, the node must be completely filled with child node references.
+        /// </remarks>
+        public IEnumerable<ChunkInfo> GetChunks(ulong startOffset = 0)
+        {
+            foreach (DedupNode chunkNode in EnumerateChunkLeafsInOrder())
+            {
+                yield return new ChunkInfo(
+                    startOffset,
+                    (uint)chunkNode.TransitiveContentBytes,
+                    chunkNode.Hash.ToArray());
+
+                startOffset += chunkNode.TransitiveContentBytes;
+            }
+        }
+
+        /// <summary>
+        /// Creates a tree or a single node containing the given chunk(s).
+        /// </summary>
+        /// <returns>
+        /// The root of the tree, or a single chunk node encapsulating the chunk.
+        /// </returns>
+        public static DedupNode Create(IList<ChunkInfo> chunks)
+        {
+            if (chunks.Count == 0)
+            {
+                return new DedupNode(new ChunkInfo(0, 0, DedupSingleChunkHashInfo.Instance.EmptyHash.ToHashByteArray()));
+            }
+            else if (chunks.Count == 1)
+            {
+                // Content is small enough to track as a chunk.
+                var node = new DedupNode(chunks.Single());
+                Contract.Check(node.Type == DedupNode.NodeType.ChunkLeaf)?.Assert(
+                    $"{nameof(Create)}: expected chunk leaf: {DedupNode.NodeType.ChunkLeaf} got {node.Type} instead.");
+
+                return node;
+            }
+            else
+            {
+                return DedupNodeTree.Create(chunks);
+            }
+        }
+
         /// <inheritdoc/>
-        public bool Equals(DedupNode other)
+        public bool Equals([AllowNull]DedupNode other)
         {
             return ByteArrayComparer.ArraysEqual(Hash, other.Hash);
         }

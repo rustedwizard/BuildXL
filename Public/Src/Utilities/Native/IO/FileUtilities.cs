@@ -144,14 +144,15 @@ namespace BuildXL.Native.IO
             return s_fileSystem.TryRemoveDirectory(path, out hr);
         }
 
-        /// <see cref="IFileUtilities.DeleteDirectoryContents(string, bool, Func{string, bool}, ITempCleaner, CancellationToken?)"/>
+        /// <see cref="IFileUtilities.DeleteDirectoryContents(string, bool, Func{string, bool}, ITempCleaner, bool, CancellationToken?)"/>
         public static void DeleteDirectoryContents(
             string path,
             bool deleteRootDirectory = false,
             Func<string, bool> shouldDelete = null,
             ITempCleaner tempDirectoryCleaner = null,
+            bool bestEffort = false,
             CancellationToken? cancellationToken = default) =>
-            s_fileUtilities.DeleteDirectoryContents(path, deleteRootDirectory, shouldDelete, tempDirectoryCleaner, cancellationToken);
+            s_fileUtilities.DeleteDirectoryContents(path, deleteRootDirectory, shouldDelete, tempDirectoryCleaner, bestEffort, cancellationToken);
 
         /// <see cref="IFileSystem.EnumerateDirectoryEntries(string, bool, Action{string, string, FileAttributes}, bool)"/>
         public static EnumerateDirectoryResult EnumerateDirectoryEntries(
@@ -262,6 +263,28 @@ namespace BuildXL.Native.IO
             }
         }
 
+        /// <summary>
+        /// Tries to copy using <see cref="IFileUtilities.InKernelFileCopy(string, string, bool)"/>.
+        /// </summary>
+        public static Possible<Unit> TryInKernelFileCopy(string source, string destination, bool followSymlink)
+        {
+            try
+            {
+                using (Counters?.StartStopwatch(StorageCounters.InKernelFileCopyDuration))
+                {
+                    Counters?.IncrementCounter(StorageCounters.InKernelFileCopyCount);
+                    s_fileUtilities.InKernelFileCopy(source, destination, followSymlink);
+                    Counters?.IncrementCounter(StorageCounters.SuccessfulInKernelFileCopyCount);
+                    return Unit.Void;
+                }
+            }
+            catch (NativeWin32Exception ex)
+            {
+               return NativeFailure.CreateFromException(ex);
+            }
+        }
+
+
         /// <see cref="IFileUtilities.CreateReplacementFile(string, FileShare, bool, bool)"/>
         public static FileStream CreateReplacementFile(
             string path,
@@ -270,8 +293,8 @@ namespace BuildXL.Native.IO
             bool allowExcludeFileShareDelete = false) => s_fileUtilities.CreateReplacementFile(path, fileShare, openAsync, allowExcludeFileShareDelete);
 
         /// <see cref="IFileUtilities.DeleteFile(string, bool, ITempCleaner)"/>
-        public static void DeleteFile(string path, bool waitUntilDeletionFinished = true, ITempCleaner tempDirectoryCleaner = null) =>
-            s_fileUtilities.DeleteFile(path, waitUntilDeletionFinished, tempDirectoryCleaner);
+        public static void DeleteFile(string path, bool retryOnFailure = true, ITempCleaner tempDirectoryCleaner = null) =>
+            s_fileUtilities.DeleteFile(path, retryOnFailure, tempDirectoryCleaner);
 
         /// <see cref="IFileUtilities.PosixDeleteMode"/>
         public static PosixDeleteMode PosixDeleteMode
@@ -305,8 +328,8 @@ namespace BuildXL.Native.IO
         }
 
         /// <see cref="IFileUtilities.TryDeleteFile(string, bool, ITempCleaner)"/>
-        public static Possible<string, DeletionFailure> TryDeleteFile(string path, bool waitUntilDeletionFinished = true, ITempCleaner tempDirectoryCleaner = null) =>
-            s_fileUtilities.TryDeleteFile(path, waitUntilDeletionFinished, tempDirectoryCleaner);
+        public static Possible<string, DeletionFailure> TryDeleteFile(string path, bool retryOnFailure = true, ITempCleaner tempDirectoryCleaner = null) =>
+            s_fileUtilities.TryDeleteFile(path, retryOnFailure, tempDirectoryCleaner);
 
         /// <summary>
         /// Tries to delete file or directory if exists.
@@ -315,11 +338,18 @@ namespace BuildXL.Native.IO
         /// <param name="tempDirectoryCleaner">Temporary directory cleaner.</param>
         public static Possible<string, Failure> TryDeletePathIfExists(string fileOrDirectoryPath, ITempCleaner tempDirectoryCleaner = null)
         {
-            if (FileExistsNoFollow(fileOrDirectoryPath))
+            var maybeExistence = TryProbePathExistence(fileOrDirectoryPath, followSymlink: false);
+            if (!maybeExistence.Succeeded)
+            {
+                return maybeExistence.Failure;
+            }
+
+            var existence = maybeExistence.Result;
+            if (existence == PathExistence.ExistsAsFile)
             {
                 var possibleDeletion = TryDeleteFile(
                     fileOrDirectoryPath,
-                    waitUntilDeletionFinished: true,
+                    retryOnFailure: true,
                     tempDirectoryCleaner: tempDirectoryCleaner);
 
                 if (!possibleDeletion.Succeeded)
@@ -327,7 +357,7 @@ namespace BuildXL.Native.IO
                     return possibleDeletion.WithGenericFailure();
                 }
             }
-            else if (DirectoryExistsNoFollow(fileOrDirectoryPath))
+            else if (existence == PathExistence.ExistsAsDirectory)
             {
                 DeleteDirectoryContents(fileOrDirectoryPath, deleteRootDirectory: true, tempDirectoryCleaner: tempDirectoryCleaner);
             }
@@ -638,14 +668,17 @@ namespace BuildXL.Native.IO
             return s_fileSystem.TryCreateSymbolicLink(symLinkFileName, targetFileName, isTargetFile);
         }
 
-        /// <summary>
-        /// Tries to create a reparse point if it does not exist or targets do not match.
-        /// </summary>
-        public static Possible<Unit> TryCreateReparsePointIfNotExistsOrTargetsDoNotMatch(string reparsePoint, string reparsePointTarget, ReparsePointType type, out bool created)
-        {
-            created = false;
-            bool shouldCreate = true;
 
+
+        /// <summary>
+        /// Tries to create a reparse point if targets do not match.
+        /// </summary>
+        /// <remarks>
+        /// The first parameter should be a path to an existing reparse point 
+        /// </remarks>
+        public static Possible<Unit> TryCreateReparsePointIfTargetsDoNotMatch(string reparsePoint, string reparsePointTarget, ReparsePointType type)
+        {
+            bool shouldCreate = true;
             if (IsReparsePointActionable(type))
             {
                 var openResult = TryCreateOrOpenFile(
@@ -674,31 +707,41 @@ namespace BuildXL.Native.IO
 
             if (shouldCreate)
             {
-                s_fileUtilities.DeleteFile(reparsePoint, waitUntilDeletionFinished: true);
+                s_fileUtilities.DeleteFile(reparsePoint, retryOnFailure: true);
+                return TryCreateReparsePoint(reparsePoint, reparsePointTarget, type);
+            }
 
-                if (type == ReparsePointType.Junction)
-                {
-                    try
-                    {
-                        s_fileSystem.CreateJunction(reparsePoint, reparsePointTarget, allowNonExistentTarget: true);
-                    }
-                    catch (Exception e)
-                    {
-                        return new Failure<Exception>(e);
-                    }
-                }
-                else
-                {
-                    CreateDirectory(Path.GetDirectoryName(reparsePoint));
-                    
-                    var maybeSymbolicLink = s_fileSystem.TryCreateSymbolicLink(reparsePoint, reparsePointTarget, isTargetFile: type != ReparsePointType.DirectorySymlink);
-                    if (!maybeSymbolicLink.Succeeded)
-                    {
-                        return maybeSymbolicLink.Failure;
-                    }
-                }
+            return Unit.Void;
+        }
 
-                created = true;
+        /// <summary>
+        /// Tries to create a reparse point in the indicated path
+        /// </summary>
+        /// <remarks>
+        /// The path should be absent before calling this method
+        /// </remarks>
+        public static Possible<Unit> TryCreateReparsePoint(string path, string reparsePointTarget, ReparsePointType type)
+        {
+            if (type == ReparsePointType.Junction)
+            {
+                try
+                {
+                    s_fileSystem.CreateJunction(path, reparsePointTarget, allowNonExistentTarget: true);
+                }
+                catch (Exception e)
+                {
+                    return new Failure<Exception>(e);
+                }
+            }
+            else
+            {
+                CreateDirectory(Path.GetDirectoryName(path));
+
+                var maybeSymbolicLink = s_fileSystem.TryCreateSymbolicLink(path, reparsePointTarget, isTargetFile: type != ReparsePointType.DirectorySymlink);
+                if (!maybeSymbolicLink.Succeeded)
+                {
+                    return maybeSymbolicLink.Failure;
+                }
             }
 
             return Unit.Void;
@@ -944,10 +987,16 @@ namespace BuildXL.Native.IO
             return s_fileSystem.MaxDirectoryPathLength();
         }
 
-        /// <see cref="IFileSystem.TryProbePathExistence(string, bool)"/>
+        /// <see cref="IFileSystem.TryProbePathExistence(string, bool, out bool)"/>
         public static Possible<PathExistence, NativeFailure> TryProbePathExistence(string path, bool followSymlink)
         {
-            return s_fileSystem.TryProbePathExistence(path, followSymlink);
+            return s_fileSystem.TryProbePathExistence(path, followSymlink, out _);
+        }
+
+        /// <see cref="IFileSystem.TryProbePathExistence(string, bool, out bool)"/>
+        public static Possible<PathExistence, NativeFailure> TryProbePathExistence(string path, bool followSymlink, out bool isReparsePoint)
+        {
+            return s_fileSystem.TryProbePathExistence(path, followSymlink, out isReparsePoint);
         }
 
         /// <see cref="IFileSystem.PathMatchPattern"/>
@@ -994,6 +1043,12 @@ namespace BuildXL.Native.IO
             }
         }
 
+        /// <see cref="IFileSystem.IsCopyOnWriteSupportedByEnlistmentVolume"/>
+        public static bool IsInKernelCopyingSupportedByHostSystem
+        {
+            get => s_fileSystem.IsInKernelCopyingSupportedByHostSystem;
+        }
+
         /// <summary>
         /// Determines whether the file system is case sensitive.
         /// </summary>
@@ -1008,7 +1063,7 @@ namespace BuildXL.Native.IO
         {
             try
             {
-                string pathWithUpperCase = Path.Combine(Path.GetTempPath(), "CASESENSITIVETEST" + Guid.NewGuid().ToString("N"));
+                string pathWithUpperCase = Path.Combine(Path.GetTempPath(), "BUILDXL_CASESENSITIVE_TEST" + Guid.NewGuid().ToString("N"));
                 using (new FileStream(pathWithUpperCase, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 0x1000, FileOptions.DeleteOnClose))
                 {
                     string lowerCased = pathWithUpperCase.ToLowerInvariant();

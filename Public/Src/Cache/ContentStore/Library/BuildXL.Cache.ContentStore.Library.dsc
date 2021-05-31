@@ -3,7 +3,7 @@
 
 namespace Library {
 
-    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNetStandard20;
+    export declare const qualifier : BuildXLSdk.AllSupportedQualifiers;
 
     @@public
     export const systemMemoryPackage = 
@@ -17,7 +17,12 @@ namespace Library {
             ...addIf(BuildXLSdk.isFullFramework,
                 NetFx.System.Data.dll,
                 NetFx.System.Runtime.Serialization.dll,
-                NetFx.Netstandard.dll
+                NetFx.Netstandard.dll,
+                NetFx.System.Security.dll
+            ),
+
+            ...addIf(BuildXLSdk.isDotNetCoreBuild,
+                importFrom("System.Security.Cryptography.ProtectedData").pkg
             ),
 
             ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,
@@ -37,14 +42,19 @@ namespace Library {
             ...getGrpcPackages(true),
             ...BuildXLSdk.bclAsyncPackages,
 
-            BuildXLSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
+            importFrom("Polly").pkg,
+            importFrom("Polly.Contrib.WaitAndRetry").pkg,
+
             ...importFrom("BuildXL.Utilities").Native.securityDlls,
+
+            ...getSystemTextJson(/*includeNetStandard*/true),
+            ...BuildXLSdk.systemMemoryDeployment,
         ],
         runtimeContent: [
             importFrom("Sdk.Protocols.Grpc").runtimeContent,
         ],
         allowUnsafeBlocks: true,
-        
+        skipDocumentationGeneration: true,
         nullable: true,
         // Should explicitly avoiding adding a file with non-nullable attributes,
         // because this project has internals visibility into Interfaces.dll that already contains

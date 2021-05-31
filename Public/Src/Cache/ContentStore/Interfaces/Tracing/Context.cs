@@ -3,8 +3,11 @@
 
 using System;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
+
+#nullable enable
 
 namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
 {
@@ -14,9 +17,14 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
     public class Context
     {
         /// <summary>
-        ///     Cached string representation of <see cref="Id"/> property for performance reasons
+        /// If true, then the nested contexts will use tree-like hierarchical ids, like parent_Id.1 parent_id.2 etc.
         /// </summary>
+        public static bool UseHierarchicalIds = false;
+
+        private int _currentChildId;
+        
         private readonly string _idAsString;
+        private const int MaxIdLength = 100;
 
         /// <summary>
         ///     Initializes a new instance of the <see cref="Context"/> class.
@@ -25,7 +33,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         ///     Caller's logger to be invoked as processing occurs.
         /// </param>
         public Context(ILogger logger)
-            : this(Guid.NewGuid(), logger)
+            : this(Guid.NewGuid().ToString(), logger)
         {
         }
 
@@ -34,7 +42,6 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// </summary>
         public Context(Guid id, ILogger logger)
         {
-            Id = id;
             Logger = logger;
             _idAsString = id.ToString();
         }
@@ -42,24 +49,24 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// <summary>
         ///     Initializes a new instance of the <see cref="Context"/> class.
         /// </summary>
+        public Context(string id, ILogger logger)
+        {
+            Logger = logger;
+            _idAsString = id;
+        }
+
+        /// <summary>
+        ///     Initializes a new instance of the <see cref="Context"/> class.
+        /// </summary>
         public Context(Context other, string? componentName = null, [CallerMemberName]string? caller = null)
-            : this(other, Guid.NewGuid(), componentName, caller)
+            : this(other, CreateNestedId(other), componentName, caller)
         {
         }
-
+        
         /// <summary>
         ///     Initializes a new instance of the <see cref="Context"/> class.
         /// </summary>
-        public Context(Context other, Guid id, [CallerMemberName]string? caller = null)
-            : this(id, other.Logger)
-        {
-            Debug($"{caller}: {other._idAsString} parent to {_idAsString}", operation: caller);
-        }
-
-        /// <summary>
-        ///     Initializes a new instance of the <see cref="Context"/> class.
-        /// </summary>
-        public Context(Context other, Guid id, string? componentName, [CallerMemberName]string? caller = null)
+        public Context(Context other, string id, string? componentName, [CallerMemberName]string? caller = null)
             : this(id, other.Logger)
         {
             string prefix = caller!;
@@ -68,25 +75,38 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
                 prefix = string.Concat(componentName, ".", prefix);
             }
 
-            Debug($"{prefix}: {other._idAsString} parent to {_idAsString}", component: componentName, operation: caller);
+            Debug($"{prefix}: {other._idAsString} parent to {_idAsString}", component: componentName ?? string.Empty, operation: caller);
         }
 
         /// <nodoc />
-        public Context CreateNested(string? componentName = null, [CallerMemberName]string? caller = null)
+        public Context CreateNested(string componentName, [CallerMemberName]string? caller = null)
         {
             return new Context(this, componentName, caller);
         }
 
         /// <nodoc />
-        public Context CreateNested(Guid id, string? componentName = null, [CallerMemberName]string? caller = null)
+        public Context CreateNested(string id, string componentName, [CallerMemberName]string? caller = null)
         {
             return new Context(this, id, componentName, caller);
+        }
+
+        private static string CreateNestedId(Context other)
+        {
+            var traceId = other.TraceId;
+            if (traceId.Length >= MaxIdLength || !UseHierarchicalIds)
+            {
+                // A safeguard to avoid indefinite growth of the id.
+                // Or hierarchical ids are disabled.
+                return Guid.NewGuid().ToString();
+            }
+            
+            return string.Concat(traceId, ".", Interlocked.Increment(ref other._currentChildId).ToString());
         }
 
         /// <summary>
         ///     Gets the unique Id.
         /// </summary>
-        public Guid Id { get; }
+        public string TraceId => _idAsString;
 
         /// <summary>
         ///     Gets the associated tracing logger.
@@ -109,7 +129,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// <summary>
         ///     Log a message if current severity is set to at least Always.
         /// </summary>
-        public void Always(string message, string? component = null, [CallerMemberName] string? operation = null)
+        public void Always(string message, string component, [CallerMemberName] string? operation = null)
         {
             TraceMessage(Severity.Always, message, component, operation);
         }
@@ -117,23 +137,39 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// <summary>
         ///     Log a message if current severity is set to at least Error.
         /// </summary>
-        public void Error(string message, string? component = null, [CallerMemberName] string? operation = null)
+        public void Error(string message, string component, [CallerMemberName] string? operation = null)
         {
             TraceMessage(Severity.Error, message, component, operation);
         }
 
         /// <summary>
+        ///     Log a message if current severity is set to at least Error.
+        /// </summary>
+        public void Error(Exception exception, string message, string component, [CallerMemberName] string? operation = null)
+        {
+            TraceMessage(Severity.Error, message, exception, component, operation);
+        }
+
+        /// <summary>
         ///     Log a message if current severity is set to at least Warning.
         /// </summary>
-        public void Warning(string message, string? component = null, [CallerMemberName] string? operation = null)
+        public void Warning(string message, string component, [CallerMemberName] string? operation = null)
         {
             TraceMessage(Severity.Warning, message, component, operation);
         }
 
         /// <summary>
+        ///     Log a message if current severity is set to at least Warning.
+        /// </summary>
+        public void Warning(Exception exception, string message, string component, [CallerMemberName] string? operation = null)
+        {
+            TraceMessage(Severity.Warning, message, exception, component, operation);
+        }
+
+        /// <summary>
         ///     Log a message if current severity is set to at least Info.
         /// </summary>
-        public void Info(string message, string? component = null, [CallerMemberName] string? operation = null)
+        public void Info(string message, string component, [CallerMemberName] string? operation = null)
         {
             TraceMessage(Severity.Info, message, component, operation);
         }
@@ -141,7 +177,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// <summary>
         ///     Log a message if current severity is set to at least Debug.
         /// </summary>
-        public void Debug(string message, string? component = null, [CallerMemberName] string? operation = null)
+        public void Debug(string message, string component, [CallerMemberName] string? operation = null)
         {
             TraceMessage(Severity.Debug, message, component, operation);
         }
@@ -149,19 +185,31 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
         /// <summary>
         ///     Trace a message if current severity is set to at least the given severity.
         /// </summary>
-        public void TraceMessage(Severity severity, string message, string? component = null, [CallerMemberName] string? operation = null)
+        public void TraceMessage(Severity severity, string message, string component, [CallerMemberName] string? operation = null)
+        {
+            TraceMessage(severity, message, exception: null, component: component, operation: operation);
+        }
+
+        /// <summary>
+        ///     Trace a message if current severity is set to at least the given severity.
+        /// </summary>
+        public void TraceMessage(Severity severity, string message, Exception? exception, string component, [CallerMemberName] string? operation = null)
         {
             if (Logger == null)
             {
                 return;
             }
 
-            component ??= string.Empty;
+            if (!IsSeverityEnabled(severity))
+            {
+                return;
+            }
+
             operation ??= string.Empty;
 
             if (Logger is IStructuredLogger structuredLogger)
             {
-                structuredLogger.Log(new LogMessage(message, operation, component, OperationKind.None, _idAsString, severity));
+                structuredLogger.Log(new LogMessage(message, operation, component, OperationKind.None, _idAsString, severity, exception));
             }
             else
             {
@@ -180,7 +228,21 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
                     provenance = $"{component}.{operation}: ";
                 }
 
-                Logger.Log(severity, $"{_idAsString} {provenance}{message}");
+                if (exception == null)
+                {
+                    Logger.Log(severity, $"{_idAsString} {provenance}{message}");
+                }
+                else
+                {
+                    if (severity == Severity.Error)
+                    {
+                        Logger.Error(exception, $"{_idAsString} {provenance}{message}");
+                    }
+                    else
+                    {
+                        Logger.Log(severity, $"{_idAsString} {provenance}{message} {exception}");
+                    }
+                }
             }
         }
 
@@ -203,7 +265,7 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
             }
             else
             {
-                TraceMessage(severity, message);
+                TraceMessage(severity, message, componentName, operationName);
             }
         }
 
@@ -236,39 +298,19 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
             {
                 // Note, that 'message' here is a plain message from the client
                 // without correlation id.
-                var operationResult = new OperationResult(message, operationName, componentName, statusFromResult(result), duration, kind, result.Exception, _idAsString, severity);
+                var operationResult = new OperationResult(message, operationName, componentName, result.GetStatus(), duration, kind, result.Exception, _idAsString, severity);
                 structuredLogger.LogOperationFinished(operationResult);
                 messageWasTraced = true;
             }
             else if (Logger is IOperationLogger operationLogger)
             {
-                var operationResult = new OperationResult(message, operationName, componentName, statusFromResult(result), duration, kind, result.Exception, _idAsString, severity);
+                var operationResult = new OperationResult(message, operationName, componentName, result.GetStatus(), duration, kind, result.Exception, _idAsString, severity);
                 operationLogger.OperationFinished(operationResult);
             }
 
             if (!messageWasTraced)
             {
-                TraceMessage(severity, message);
-            }
-
-            static OperationStatus statusFromResult(ResultBase resultBase)
-            {
-                if (resultBase.IsCriticalFailure)
-                {
-                    return OperationStatus.CriticalFailure;
-                }
-                else if (resultBase.IsCancelled)
-                {
-                    return OperationStatus.Cancelled;
-                }
-                else if (!resultBase.Succeeded)
-                {
-                    return OperationStatus.Failure;
-                }
-                else
-                {
-                    return OperationStatus.Success;
-                }
+                TraceMessage(severity, message, componentName, operationName);
             }
         }
 
@@ -290,24 +332,6 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
                 var stat = new Statistic(name, value);
                 operationLogger.TrackTopLevelStatistic(stat);
             }
-        }
-
-        /// <nodoc />
-        public void ChangeRole(string role)
-        {
-            GlobalInfoStorage.SetGlobalInfo(GlobalInfoKey.LocalLocationStoreRole, role);
-        }
-
-        /// <nodoc />
-        public void RegisterBuildId(string buildId)
-        {
-            Logger.RegisterBuildId(buildId);
-        }
-
-        /// <nodoc />
-        public void UnregisterBuildId()
-        {
-            Logger.UnregisterBuildId();
         }
     }
 
@@ -338,6 +362,12 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Tracing
             {
                 operationLogger.UnregisterBuildId();
             }
+        }
+
+        /// <nodoc />
+        public static void ChangeRole(string role)
+        {
+            GlobalInfoStorage.SetGlobalInfo(GlobalInfoKey.LocalLocationStoreRole, role);
         }
     }
 }

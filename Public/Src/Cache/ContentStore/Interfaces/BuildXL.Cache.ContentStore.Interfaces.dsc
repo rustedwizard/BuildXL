@@ -4,10 +4,9 @@
 import * as Deployment from "Sdk.Deployment";
 import * as ILRepack from "Sdk.Managed.Tools.ILRepack";
 import * as Shared from "Sdk.Managed.Shared";
-import * as NetCoreApp from "Sdk.Managed.Frameworks.NetCoreApp3.1";
 
 namespace Interfaces {
-    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNetStandard20;
+    export declare const qualifier : BuildXLSdk.AllSupportedQualifiers;
 
     @@public
     export const dll = BuildXLSdk.library({
@@ -26,6 +25,8 @@ namespace Interfaces {
             ),
             ...BuildXLSdk.bclAsyncPackages,
             importFrom("WindowsAzure.Storage").pkg,
+
+            ...BuildXLSdk.systemMemoryDeployment,
         ],
         nullable: true,
         allowUnsafeBlocks: true,

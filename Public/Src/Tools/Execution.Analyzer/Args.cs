@@ -238,8 +238,14 @@ namespace BuildXL.Execution.Analyzer
                 case AnalysisMode.DumpPip:
                     m_analyzer = InitializeDumpPipAnalyzer();
                     break;
+                case AnalysisMode.DumpPipLite:
+                    m_analyzer = InitializeDumpPipLiteAnalyzer(m_analysisInput);
+                    break;
                 case AnalysisMode.DumpProcess:
                     m_analyzer = InitializeDumpProcessAnalyzer();
+                    break;
+                case AnalysisMode.DumpStringTable:
+                    m_analyzer = InitializeDumpStringTableAnalyzer();
                     break;
                 case AnalysisMode.EventStats:
                     m_analyzer = InitializeEventStatsAnalyzer();
@@ -249,6 +255,9 @@ namespace BuildXL.Execution.Analyzer
                     break;
                 case AnalysisMode.ExportGraph:
                     m_analyzer = InitializePipGraphExporter();
+                    break;
+                case AnalysisMode.ExtraDependencies:
+                    m_analyzer = InitializeExtraDependenciesAnalyzer();
                     break;
                 case AnalysisMode.FailedPipsDump:
                     m_analyzer = InitializeFailedPipsDumpAnalyzer();
@@ -555,6 +564,9 @@ namespace BuildXL.Execution.Analyzer
             WriteExportDgmlAnalyzerHelp(writer);
 
             writer.WriteLine("");
+            WriteExtraDependenciesAnalyzerHelp(writer);
+
+            writer.WriteLine("");
             WriteObservedInputHelp(writer);
 
             writer.WriteLine("");
@@ -577,6 +589,12 @@ namespace BuildXL.Execution.Analyzer
 
             writer.WriteLine("");
             WriteDumpPipAnalyzerHelp(writer);
+
+            writer.WriteLine("");
+            WriteDumpPipLiteAnalyzerHelp(writer);
+
+            writer.WriteLine("");
+            WriteDumpStringTableAnalyzerHelp(writer);
 
             writer.WriteLine("");
             WriteProcessRunScriptAnalyzerHelp(writer);

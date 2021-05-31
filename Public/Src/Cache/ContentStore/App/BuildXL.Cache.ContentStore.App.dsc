@@ -4,6 +4,8 @@ import * as ManagedSdk from "Sdk.Managed";
 import { NetFx } from "Sdk.BuildXL";
 
 namespace App {
+    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNet472;
+
     @@public
     export const AppRuleset = f`ContentStoreApp.ruleset`;
 
@@ -34,13 +36,12 @@ namespace App {
             importFrom("BuildXL.Cache.DistributedCache.Host").Service.dll,
             importFrom("BuildXL.Cache.DistributedCache.Host").Configuration.dll,
             importFrom("BuildXL.Utilities").dll,
+            importFrom("BuildXL.Utilities").Collections.dll,
 
             importFrom("Microsoft.IdentityModel.Clients.ActiveDirectory").pkg,
             importFrom("Newtonsoft.Json").pkg,
 
             importFrom("BuildXL.Utilities").dll,
-
-            ManagedSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
 
             importFrom("WindowsAzure.Storage").pkg,
             ...BuildXLSdk.systemThreadingTasksDataflowPackageReference,

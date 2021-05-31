@@ -41,7 +41,7 @@ namespace BuildXL.Scheduler.Cache
         /// <summary>
         /// The version for format of <see cref="HistoricMetadataCache"/>
         /// </summary>
-        public const int FormatVersion = 22;
+        public const int FormatVersion = 23;
 
         /// <summary>
         /// Indicates if entries should be purged as soon as there TTL reaches zero versus reaching a limit in percentage expired.
@@ -75,7 +75,7 @@ namespace BuildXL.Scheduler.Cache
         /// PathSet or Metadata content hashes that are newly added in the current session.
         /// </summary>
         /// <remarks>
-        /// BuildXL only sends the new hashes to master from worker
+        /// BuildXL only sends the new hashes to orchestrator from worker
         /// </remarks>
         private readonly ConcurrentBigMap<ContentHash, bool> m_newContentEntries;
 
@@ -102,6 +102,18 @@ namespace BuildXL.Scheduler.Cache
         /// Full Fingerprint (WeakFingerprint ^ StrongFingerprint) -> MetadataHash
         /// </summary>
         private readonly ConcurrentBigMap<ContentFingerprint, ContentHash> m_fullFingerprintEntries;
+
+        /// <summary>
+        /// Tracking mapping from weak fingerpint to semistable hash. Serialization is based on weak fingerprints. So in order to serialize
+        /// <see cref="m_pipSemistableHashToWeakFingerprintMap"/> we need to lookup the corresponding semistable hash for a given weak
+        /// fingerprint.
+        /// </summary>
+        private readonly ConcurrentBigMap<WeakContentFingerprint, long> m_weakFingerprintsToPipSemistableHashMap = new ConcurrentBigMap<WeakContentFingerprint, long>();
+
+        /// <summary>
+        /// Mapping from pip semistable hash to weak fingerprint for the purpose of looking up accessed paths for a pip (based on associated path sets).
+        /// </summary>
+        private readonly ConcurrentBigMap<long, WeakContentFingerprint> m_pipSemistableHashToWeakFingerprintMap = new ConcurrentBigMap<long, WeakContentFingerprint>();
 
         /// <summary>
         /// Newly added full fingerprints (WeakFingerprint ^ StrongFingerprint) 
@@ -165,7 +177,7 @@ namespace BuildXL.Scheduler.Cache
         /// <nodoc/>
         public HistoricMetadataCache(
             LoggingContext loggingContext,
-            EngineCache cache, 
+            EngineCache cache,
             PipExecutionContext context,
             PathExpander pathExpander,
             AbsolutePath storeLocation,
@@ -179,7 +191,7 @@ namespace BuildXL.Scheduler.Cache
             Contract.Requires(storeLocation.IsValid);
 
             StoreLocation = storeLocation.ToString(context.PathTable);
-            LogDirectoryLocation = logDirectoryLocation.HasValue ? logDirectoryLocation.Value.ToString(context.PathTable) : null;
+            LogDirectoryLocation = logDirectoryLocation.HasValue && logDirectoryLocation.Value.IsValid ? logDirectoryLocation.Value.ToString(context.PathTable) : null;
             m_storeAccessor = new Lazy<KeyValueStoreAccessor>(OpenStore);
             Valid = false;
 
@@ -322,7 +334,7 @@ namespace BuildXL.Scheduler.Cache
             if (result.Succeeded && result.Result.HasValue)
             {
                 Counters.IncrementCounter(PipCachingCounter.HistoricCacheEntryMisses);
-                SetMetadataEntry(weakFingerprint, strongFingerprint, pathSetHash, result.Result.Value.MetadataHash);
+                SetMetadataEntry(weakFingerprint, strongFingerprint, pathSetHash, result.Result.Value.MetadataHash, semistableHash: pip.SemiStableHash);
             }
 
             return result;
@@ -345,7 +357,8 @@ namespace BuildXL.Scheduler.Cache
                     weakFingerprint,
                     strongFingerprint,
                     pathSetHash,
-                    result.Result.Status == CacheEntryPublishStatus.Published ? entry.MetadataHash : result.Result.ConflictingEntry.MetadataHash);
+                    result.Result.Status == CacheEntryPublishStatus.Published ? entry.MetadataHash : result.Result.ConflictingEntry.MetadataHash,
+                    pip.SemiStableHash);
             }
 
             return result;
@@ -403,7 +416,7 @@ namespace BuildXL.Scheduler.Cache
             if (TryGetContent(pathSetHash, out var content))
             {
                 Counters.IncrementCounter(PipCachingCounter.HistoricPathSetHits);
-                return (new MemoryStream(content.Array, content.Offset, content.Count, writable: false)).HasLength();
+                return (new MemoryStream(content.Array, content.Offset, content.Count, writable: false)).WithLength();
             }
 
             var possiblyOpened = await base.TryLoadAndOpenPathSetStreamAsync(pathSetHash);
@@ -416,11 +429,24 @@ namespace BuildXL.Scheduler.Cache
                     var readCount = await stream.ReadAsync(content.Array, 0, content.Count);
                     Contract.Assert(readCount == content.Count);
                     TryAddContent(pathSetHash, content);
-                    return (new MemoryStream(content.Array, writable: false)).HasLength();
+                    return (new MemoryStream(content.Array, writable: false)).WithLength();
                 }
             }
 
             return possiblyOpened;
+        }
+
+        /// <inheritdoc/>
+        public override IEnumerable<Task<Possible<ObservedPathSet>>> TryGetAssociatedPathSetsAsync(OperationContext context, Pip pip)
+        {
+            if (m_pipSemistableHashToWeakFingerprintMap.TryGetValue(pip.SemiStableHash, out var weakFingerprint)
+                && m_weakFingerprintEntries.TryGetValue(weakFingerprint, out var entries))
+            {
+                foreach (var entry in entries)
+                {
+                    yield return TryRetrievePathSetAsync(context, weakFingerprint, entry.Value.PathSetHash);
+                }
+            }
         }
 
         /// <inheritdoc/>
@@ -445,10 +471,17 @@ namespace BuildXL.Scheduler.Cache
             StrongContentFingerprint strongFingerprint,
             ContentHash pathSetHash,
             ContentHash metadataHash,
+            long semistableHash,
             byte? ttl = null)
         {
             m_retainedContentHashCodes.Add(pathSetHash.GetHashCode());
             m_retainedContentHashCodes.Add(metadataHash.GetHashCode());
+
+            if (semistableHash != 0)
+            {
+                m_pipSemistableHashToWeakFingerprintMap[semistableHash] = weakFingerprint;
+                m_weakFingerprintsToPipSemistableHashMap[weakFingerprint] = semistableHash;
+            }
 
             var fullFingerprint = GetFullFingerprint(weakFingerprint, strongFingerprint);
             var addOrUpdateResult = m_fullFingerprintEntries.AddOrUpdate(
@@ -478,13 +511,13 @@ namespace BuildXL.Scheduler.Cache
 
         private static ContentFingerprint GetFullFingerprint(WeakContentFingerprint weakFingerprint, StrongContentFingerprint strongFingerprint)
         {
-            var fullFingerprintBytes = new FixedBytes();
+            Span<byte> fullFingerprintBytes = stackalloc byte[FingerprintUtilities.FingerprintLength];
             for (int i = 0; i < FingerprintUtilities.FingerprintLength; i++)
             {
                 fullFingerprintBytes[i] = (byte)(weakFingerprint.Hash[i] ^ strongFingerprint.Hash[i]);
             }
 
-            return new ContentFingerprint(new Fingerprint(fullFingerprintBytes, FingerprintUtilities.FingerprintLength));
+            return new ContentFingerprint(new Fingerprint(new ReadOnlyFixedBytes(fullFingerprintBytes), FingerprintUtilities.FingerprintLength));
         }
 
         /// <inheritdoc />
@@ -569,14 +602,14 @@ namespace BuildXL.Scheduler.Cache
                                             m_existingContentEntries.Add(hashCode);
                                             return false;
                                         }
-                                        
+
                                         return true;
                                     }
 
                                     // Unexpected key in the content segment of the store. Just remove it.
                                     return true;
                                 },
-                                primaryColumnFamilyName: StoreColumnNames.Content,
+                                columnFamilyName: StoreColumnNames.Content,
                                 cancellationToken: m_garbageCollectCancellation.Token,
                                 startValue: startKey);
 
@@ -661,7 +694,7 @@ namespace BuildXL.Scheduler.Cache
 
             if (weakFingerprint.HasValue && strongFingerprint.HasValue && pathSetHash.HasValue && metadataHash.HasValue)
             {
-                if (SetMetadataEntry(weakFingerprint.Value, strongFingerprint.Value, pathSetHash.Value, metadataHash.Value))
+                if (SetMetadataEntry(weakFingerprint.Value, strongFingerprint.Value, pathSetHash.Value, metadataHash.Value, metadata?.SemiStableHash ?? 0))
                 {
                     Counters.IncrementCounter(
                         isExecution
@@ -688,7 +721,7 @@ namespace BuildXL.Scheduler.Cache
                 bool added = false;
                 Analysis.IgnoreResult(
                     TrySerializedAndStorePathSetAsync(
-                        pathSet, 
+                        pathSet,
                         (pathSetHash, pathSetBuffer) =>
                             {
                                 added = TryAddContent(pathSetHash, ToStorableContent(pathSetBuffer));
@@ -796,7 +829,7 @@ namespace BuildXL.Scheduler.Cache
         /// <summary>
         /// Loads the cache entries from the database
         /// </summary>
-        private void LoadCacheEntries(IBuildXLKeyValueStore store)
+        private void LoadCacheEntries(RocksDbStore store)
         {
             if (store.TryGetValue(StoreKeyNames.HistoricMetadataCacheEntriesKey, out var serializedCacheEntries))
             {
@@ -813,7 +846,7 @@ namespace BuildXL.Scheduler.Cache
             Counters.AddToCounter(PipCachingCounter.HistoricMetadataLoadedAge, Age);
         }
 
-        private int GetAge(IBuildXLKeyValueStore store)
+        private int GetAge(RocksDbStore store)
         {
             bool ageFound = store.TryGetValue(nameof(StoreKeyNames.Age), out var ageString);
             if (!ageFound || !int.TryParse(ageString, out var age))
@@ -825,7 +858,7 @@ namespace BuildXL.Scheduler.Cache
             return age;
         }
 
-        private void SetAge(IBuildXLKeyValueStore store, int age)
+        private void SetAge(RocksDbStore store, int age)
         {
             store.Put(nameof(StoreKeyNames.Age), age.ToString());
         }
@@ -959,7 +992,10 @@ namespace BuildXL.Scheduler.Cache
 
                     // For some weakfingerprints, there might be no usable strongfingerprints; so the length might equal to zero. We do still serialize
                     // those weakfingerprints; but during deserialization, none record will be created for those. 
+                    m_weakFingerprintsToPipSemistableHashMap.TryGetValue(weakFingerprint, out var semistableHash);
+
                     writer.Write(weakFingerprint);
+                    writer.Write(semistableHash);
                     writer.Write(length);
                     totalStrongEntriesWritten += length;
 
@@ -996,6 +1032,8 @@ namespace BuildXL.Scheduler.Cache
                 for (int i = 0; i < weakFingerprintCount; ++i)
                 {
                     var weakFingerprint = reader.ReadWeakFingerprint();
+                    var semistableHash = reader.ReadInt64();
+
                     var strongFingerprintCount = reader.ReadInt32();
                     for (int j = 0; j < strongFingerprintCount; ++j)
                     {
@@ -1003,7 +1041,7 @@ namespace BuildXL.Scheduler.Cache
                         var pathSetHash = reader.ReadContentHash();
                         var metadataHash = reader.ReadContentHash();
                         var ttl = ReadByteAsTimeToLive(reader);
-                        SetMetadataEntry(weakFingerprint, strongFingerprint, pathSetHash, metadataHash, (byte)ttl);
+                        SetMetadataEntry(weakFingerprint, strongFingerprint, pathSetHash, metadataHash, semistableHash, (byte)ttl);
                     }
                 }
 

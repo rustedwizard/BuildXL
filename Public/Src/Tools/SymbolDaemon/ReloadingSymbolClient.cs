@@ -6,10 +6,12 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Ipc.Interfaces;
+using BuildXL.Cache.ContentStore.Hashing;
 using Microsoft.VisualStudio.Services.BlobStore.Common;
 using Microsoft.VisualStudio.Services.Content.Common;
 using Microsoft.VisualStudio.Services.Symbol.App.Core;
 using Microsoft.VisualStudio.Services.Symbol.WebApi;
+using BlobIdentifierWithBlocks = Microsoft.VisualStudio.Services.BlobStore.Common.BlobIdentifierWithBlocks;
 
 namespace Tool.ServicePipDaemon
 {
@@ -20,18 +22,18 @@ namespace Tool.ServicePipDaemon
     {
         /// <nodoc/>
         public ReloadingSymbolClient(IIpcLogger logger, Func<ISymbolServiceClient> clientConstructor, IEnumerable<TimeSpan> retryIntervals = null)
-            : base(logger, clientConstructor, retryIntervals, new [] { typeof(DebugEntryExistsException) })
+            : base(logger, clientConstructor, retryIntervals, new[] { typeof(DebugEntryExistsException) })
         {
         }
 
         #region ISymbolServiceClient Interface Methods
 
         /// <inheritdoc />
-        public Task<Request> CreateRequestAsync(string requestName, CancellationToken cancellationToken)
+        public Task<Request> CreateRequestAsync(IDomainId domainId, string requestName, bool isChunked, CancellationToken cancellationToken)
         {
             return RetryAsync(
                 nameof(ISymbolServiceClient.CreateRequestAsync),
-                (client, ct) => client.CreateRequestAsync(requestName, ct),
+                (client, ct) => client.CreateRequestAsync(domainId, requestName, isChunked, ct),
                 cancellationToken);
         }
 
@@ -85,21 +87,26 @@ namespace Tool.ServicePipDaemon
         }
 
         /// <inheritdoc />
-        public Task<IEnumerable<Request>> GetAllRequestsAsync(CancellationToken cancellationToken, SizeOptions sizeOptions, ExpirationDateOptions expirationDateOptions)
+        public Task<IEnumerable<Request>> GetAllRequestsAsync(CancellationToken cancellationToken,
+            SizeOptions sizeOptions = null,
+            ExpirationDateOptions expirationDateOptions = null,
+            IDomainId domainIdOption = null,
+            RetrievalOptions retrievalOptions = RetrievalOptions.ExcludeSoftDeleted,
+            RequestStatus? requestStatus = null)
         {
             return RetryAsync(
                 nameof(ISymbolServiceClient.GetAllRequestsAsync),
-                (client, ct) => client.GetAllRequestsAsync(ct, sizeOptions, expirationDateOptions),
+                (client, ct) => client.GetAllRequestsAsync(ct, sizeOptions, expirationDateOptions, domainIdOption, retrievalOptions, requestStatus),
                 cancellationToken);
         }
 
         /// <inheritdoc />
-        public BlobIdentifier GetBlobIdentifier(string filename)
+        public BlobIdentifier GetBlobIdentifier(string filename, bool useChunkDedup)
         {
             var instance = GetCurrentVersionedValue();
 
             // not retrying this since it does not perform any calls over the network 
-            return instance.Value.GetBlobIdentifier(filename);
+            return instance.Value.GetBlobIdentifier(filename, useChunkDedup);
         }
 
         /// <inheritdoc />
@@ -113,6 +120,15 @@ namespace Tool.ServicePipDaemon
             return RetryAsync(
                nameof(ISymbolServiceClient.GetDebugEntriesAsync),
                (client, ct) => client.GetDebugEntriesAsync(debugEntryClientKey, startEntry, maxEntries, sortOrder, ct),
+               cancellationToken);
+        }
+
+        /// <inheritdoc />
+        public Task<IEnumerable<MultiDomainInfo>> GetDomainsAsync(CancellationToken cancellationToken)
+        {
+            return RetryAsync(
+               nameof(ISymbolServiceClient.GetDomainsAsync),
+               (client, ct) => client.GetDomainsAsync(ct),
                cancellationToken);
         }
 
@@ -144,11 +160,19 @@ namespace Tool.ServicePipDaemon
         }
 
         /// <inheritdoc />
-        public Task<IEnumerable<Request>> GetRequestPaginatedAsync(string continueFromRequestId, int pageSize, CancellationToken cancellationToken, SizeOptions sizeOptions, ExpirationDateOptions expirationDateOptions)
+        public Task<IEnumerable<Request>> GetRequestPaginatedAsync(
+            String continueFromRequestId,
+            int pageSize,
+            CancellationToken cancellationToken,
+            SizeOptions sizeOptions = null,
+            ExpirationDateOptions expirationDateOptions = null,
+            IDomainId domainIdOption = null,
+            RetrievalOptions retrievalOptions = RetrievalOptions.ExcludeSoftDeleted,
+            RequestStatus? requestStatus = null)
         {
             return RetryAsync(
                  nameof(ISymbolServiceClient.GetRequestPaginatedAsync),
-                 (client, ct) => client.GetRequestPaginatedAsync(continueFromRequestId, pageSize, ct, sizeOptions, expirationDateOptions),
+                 (client, ct) => client.GetRequestPaginatedAsync(continueFromRequestId, pageSize, ct, sizeOptions, expirationDateOptions, domainIdOption, retrievalOptions, requestStatus),
                  cancellationToken);
         }
 
@@ -171,11 +195,11 @@ namespace Tool.ServicePipDaemon
         }
 
         /// <inheritdoc />
-        public Task<BlobIdentifierWithBlocks> UploadFileAsync(Uri blobStoreUri, string requestId, string filename, BlobIdentifier blobIdentifier, CancellationToken cancellationToken)
+        public Task<SymbolBlobIdentifier> UploadFileAsync(IDomainId domainId, Uri blobStoreUri, string requestId, string filename, BlobIdentifier blobIdentifier, CancellationToken cancellationToken)
         {
             return RetryAsync(
                nameof(ISymbolServiceClient.UploadFileAsync),
-               (client, ct) => client.UploadFileAsync(blobStoreUri, requestId, filename, blobIdentifier, ct),
+               (client, ct) => client.UploadFileAsync(domainId, blobStoreUri, requestId, filename, blobIdentifier, ct),
                cancellationToken);
         }
 

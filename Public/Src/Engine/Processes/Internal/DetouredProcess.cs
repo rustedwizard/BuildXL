@@ -21,6 +21,7 @@ using BuildXL.Utilities;
 using BuildXL.Utilities.Diagnostics;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Tasks;
+using BuildXL.Utilities.Threading;
 using Microsoft.Win32.SafeHandles;
 #if FEATURE_SAFE_PROCESS_HANDLE
 using SafeProcessHandle = Microsoft.Win32.SafeHandles.SafeProcessHandle;
@@ -39,6 +40,7 @@ namespace BuildXL.Processes.Internal
     internal sealed class DetouredProcess : IDisposable
     {
         private readonly SemaphoreSlim m_syncSemaphore = TaskUtilities.CreateMutex();
+        private readonly ReadWriteLock m_queryJobDataLock = ReadWriteLock.Create();
         private readonly int m_bufferSize;
         private readonly string m_commandLine;
         private readonly StreamDataReceived m_errorDataReceived;
@@ -76,8 +78,18 @@ namespace BuildXL.Processes.Internal
         private readonly ContainerConfiguration m_containerConfiguration;
         private readonly bool m_setJobBreakawayOk;
         private readonly bool m_createJobObjectForCurrentProcess;
+
         private readonly LoggingContext m_loggingContext;
 
+        /// <summary>
+        /// Extended timeout time.
+        /// </summary>
+        /// <remarks>
+        /// Timeout time can be extended when the process gets suspended.
+        /// </remarks>
+        private long m_extendedTimeoutMs;
+        private readonly System.Diagnostics.Stopwatch m_suspendStopwatch = new System.Diagnostics.Stopwatch();
+       
 #region public getters
 
         /// <summary>
@@ -89,6 +101,11 @@ namespace BuildXL.Processes.Internal
         /// Whether this process has exited. Once true, it will never become false. Implies <code>HasStarted</code>.
         /// </summary>
         public bool HasExited => Volatile.Read(ref m_exited);
+
+        /// <summary>
+        /// True if this process has started but hasn't exited yet
+        /// </summary>
+        public bool IsRunning => HasStarted && !HasExited;
 
         /// <summary>
         /// Retrieves the process id associated with this process.
@@ -196,13 +213,16 @@ namespace BuildXL.Processes.Internal
                 Analysis.IgnoreResult(Native.Processes.ProcessUtilities.TerminateProcess(processHandle, exitCode));
             }
 
-            JobObject jobObject = m_job;
-            if (jobObject != null)
+            using (m_queryJobDataLock.AcquireWriteLock())
             {
-                // Ignore result, as there is a race with regular shutdown.
-                m_killed = true;
+                JobObject jobObject = m_job;
+                if (jobObject != null)
+                {
+                    // Ignore result, as there is a race with regular shutdown.
+                    m_killed = true;
 
-                Analysis.IgnoreResult(jobObject.Terminate(exitCode));
+                    Analysis.IgnoreResult(jobObject.Terminate(exitCode));
+                }
             }
         }
 
@@ -585,7 +605,7 @@ namespace BuildXL.Processes.Internal
                     TimeSpan timeout = m_timeout ?? Timeout.InfiniteTimeSpan;
                     m_registeredWaitHandle = ThreadPool.RegisterWaitForSingleObject(
                         m_processWaitHandle,
-                        CompletionCallback,
+                        CompletionCallbackAsync,
                         null,
                         timeout,
                         true);
@@ -617,6 +637,98 @@ namespace BuildXL.Processes.Internal
 
                     throw;
                 }
+            }
+        }
+
+        /// <nodoc />
+        internal void StartMeasuringSuspensionTime()
+        {
+            // Start counting suspended time
+            m_suspendStopwatch.Start();
+        }
+
+        /// <nodoc />
+        internal void StopMeasuringSuspensionTime()
+        {
+            Contract.Requires(m_suspendStopwatch.IsRunning);
+            lock (m_suspendStopwatch)
+            {
+                m_extendedTimeoutMs += m_suspendStopwatch.ElapsedMilliseconds;
+                m_suspendStopwatch.Reset();
+            }
+        }
+
+        private long GetExtendedTimeoutOnCompletion()
+        {
+            long extensionMs = 0;
+            lock (m_suspendStopwatch)
+            {
+                extensionMs = m_extendedTimeoutMs;
+                if (m_suspendStopwatch.IsRunning)   // We're suspended right now
+                {
+                    extensionMs += m_suspendStopwatch.ElapsedMilliseconds;
+                    m_suspendStopwatch.Restart();
+                }
+
+                m_extendedTimeoutMs = 0;
+            }
+
+            return extensionMs;
+        }
+
+        /// <summary>
+        /// Iterates through the job object processes executing an action for each one.
+        /// </summary>
+        public VisitJobObjectResult TryVisitJobObjectProcesses(Action<SafeProcessHandle, uint> actionForProcess)
+        {
+            Contract.Requires(HasStarted);
+            
+            // Accessing jobObject needs to be protected by m_queryJobDataLock.
+            // After we collected the child process ids, we might dispose the job object and the child process might be invalid.
+            // Acquiring the reader lock will prevent the job object from disposing. 
+            using (m_queryJobDataLock.AcquireReadLock())
+            {
+                var jobObject = GetJobObject();
+                if (m_killed)
+                {
+                    // Terminated before starting the operation
+                    return VisitJobObjectResult.TerminatedBeforeVisitation;
+                }
+
+                if (!jobObject.TryGetProcessIds(m_loggingContext, out uint[] childProcessIds))
+                {
+                    return VisitJobObjectResult.Failed;
+                }
+
+                foreach (uint processId in childProcessIds)
+                {
+                    using (SafeProcessHandle processHandle = ProcessUtilities.OpenProcess(
+                        ProcessSecurityAndAccessRights.PROCESS_QUERY_INFORMATION | ProcessSecurityAndAccessRights.PROCESS_SET_QUOTA,
+                        false,
+                        processId))
+                    {
+                        if (processHandle.IsInvalid)
+                        {
+                            // we are too late: could not open process
+                            continue;
+                        }
+
+                        if (!jobObject.ContainsProcess(processHandle))
+                        {
+                            // we are too late: process id got reused by another process
+                            continue;
+                        }
+
+                        if (!ProcessUtilities.GetExitCodeProcess(processHandle, out int exitCode))
+                        {
+                            // we are too late: process id got reused by another process
+                            continue;
+                        }
+
+                        actionForProcess(processHandle, processId);
+                    }
+                }
+                return VisitJobObjectResult.Success;
             }
         }
 
@@ -679,10 +791,24 @@ namespace BuildXL.Processes.Internal
         [SuppressMessage("Microsoft.Naming", "CA2204:Literals should be spelled correctly", MessageId = "DetouredProcess")]
         [SuppressMessage("AsyncUsage", "AsyncFixer03:FireForgetAsyncVoid")]
         [SuppressMessage("Microsoft.Performance", "CA1801")]
-        private async void CompletionCallback(object context, bool timedOut)
+        private async void CompletionCallbackAsync(object context, bool timedOut)
         {
             if (timedOut)
             {
+                var extendedTimeoutMs = GetExtendedTimeoutOnCompletion();
+                if (extendedTimeoutMs > 0)
+                {
+                    // We consumed part of the timeout while suspended, so we give it another chance
+                    m_waiting = true;
+                    m_registeredWaitHandle = ThreadPool.RegisterWaitForSingleObject(
+                        m_processWaitHandle,
+                        CompletionCallbackAsync,
+                        null,
+                        Convert.ToUInt32(extendedTimeoutMs),
+                        true);
+                    return;
+                }
+
                 Volatile.Write(ref m_timedout, true);
 
                 // Attempt to dump the timed out process before killing it

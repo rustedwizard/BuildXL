@@ -7,9 +7,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Tracing;
+using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Cache.ContentStore.Vsts;
 using BuildXL.Cache.MemoizationStore.VstsInterfaces;
-using Microsoft.Practices.TransientFaultHandling;
 using Microsoft.VisualStudio.Services.Content.Common;
 
 namespace BuildXL.Cache.MemoizationStore.Vsts.Http
@@ -19,6 +20,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts.Http
     /// </summary>
     public class BuildCacheHttpClientFactory : IBuildCacheHttpClientFactory
     {
+        private static readonly Tracer _tracer = new Tracer(nameof(BuildCacheHttpClientFactory));
         private readonly Uri _buildCacheBaseUri;
         private readonly VssCredentialsFactory _vssCredentialsFactory;
         private readonly TimeSpan _httpSendTimeout;
@@ -40,8 +42,10 @@ namespace BuildXL.Cache.MemoizationStore.Vsts.Http
         /// </summary>
         public async Task<IBuildCacheHttpClient> CreateBuildCacheHttpClientAsync(Context context)
         {
-            RetryPolicy retryPolicy = new RetryPolicy<AuthorizationErrorDetectionStrategy>(RetryStrategy.DefaultExponential);
-            var creds = await retryPolicy.ExecuteAsync(() => _vssCredentialsFactory.CreateVssCredentialsAsync(_buildCacheBaseUri, _useAad)).ConfigureAwait(false);
+            IRetryPolicy retryPolicy = RetryPolicyFactory.GetExponentialPolicy(AuthorizationErrorDetectionStrategy.IsTransient);
+            var creds = await retryPolicy.ExecuteAsync(
+                () => _vssCredentialsFactory.CreateVssCredentialsAsync(_buildCacheBaseUri, _useAad),
+                CancellationToken.None).ConfigureAwait(false);
 
             var httpClientFactory = new ArtifactHttpClientFactory(
                 creds,
@@ -55,8 +59,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts.Http
                 "VerifyBuildCacheHttpClientConnection",
                 () => httpClientFactory.VerifyConnectionAsync(client as IArtifactHttpClient),
                 CancellationToken.None).ConfigureAwait(false);
-            context.TraceMessage(
-                Severity.Debug, $"Verified connection to {_buildCacheBaseUri} with SessionId=[{httpClientFactory.ClientSettings.SessionId}]");
+            _tracer.Debug(context, $"Verified connection to {_buildCacheBaseUri} with SessionId=[{httpClientFactory.ClientSettings.SessionId}]");
             return client;
         }
 
@@ -65,8 +68,10 @@ namespace BuildXL.Cache.MemoizationStore.Vsts.Http
         /// </summary>
         public async Task<IBlobBuildCacheHttpClient> CreateBlobBuildCacheHttpClientAsync(Context context)
         {
-            RetryPolicy authRetryPolicy = new RetryPolicy<AuthorizationErrorDetectionStrategy>(RetryStrategy.DefaultExponential);
-            var creds = await authRetryPolicy.ExecuteAsync(() => _vssCredentialsFactory.CreateVssCredentialsAsync(_buildCacheBaseUri, _useAad)).ConfigureAwait(false);
+            IRetryPolicy authRetryPolicy = RetryPolicyFactory.GetExponentialPolicy(AuthorizationErrorDetectionStrategy.IsTransient);
+            var creds = await authRetryPolicy.ExecuteAsync(
+                () => _vssCredentialsFactory.CreateVssCredentialsAsync(_buildCacheBaseUri, _useAad),
+                CancellationToken.None).ConfigureAwait(false);
 
             var httpClientFactory = new ArtifactHttpClientFactory(
                 creds,
@@ -80,8 +85,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts.Http
                 "VerifyBlobBuildCacheHttpClientConnection",
                 () => httpClientFactory.VerifyConnectionAsync(client as IArtifactHttpClient),
                 CancellationToken.None).ConfigureAwait(false);
-            context.TraceMessage(
-                Severity.Debug, $"Verified connection to {_buildCacheBaseUri} with SessionId=[{httpClientFactory.ClientSettings.SessionId}]");
+            _tracer.Debug(context, $"Verified connection to {_buildCacheBaseUri} with SessionId=[{httpClientFactory.ClientSettings.SessionId}]");
             return client;
         }
     }

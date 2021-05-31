@@ -5,10 +5,7 @@ using System.Diagnostics.ContractsLight;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.Monitor.Library.Client;
-using BuildXL.Cache.Monitor.Library.Rules;
-using BuildXL.Cache.Monitor.Library.Rules.Kusto;
 using Kusto.Data;
-using Kusto.Data.Common;
 using Kusto.Data.Net.Client;
 using Kusto.Ingest;
 using Microsoft.Azure.Management.Fluent;
@@ -21,6 +18,11 @@ namespace BuildXL.Cache.Monitor.App
 {
     internal static class ExternalDependenciesFactory
     {
+        public static Result<IKustoClient> CreateKustoQueryClient(KustoCredentials credentials)
+        {
+            return CreateKustoQueryClient(credentials.ClusterUrl, credentials.Credentials.TenantId, credentials.Credentials.AppId, credentials.Credentials.AppKey);
+        }
+
         public static Result<IKustoClient> CreateKustoQueryClient(string kustoClusterUrl, string azureTenantId, string azureAppId, string azureAppKey)
         {
             Contract.RequiresNotNullOrEmpty(kustoClusterUrl);
@@ -31,6 +33,11 @@ namespace BuildXL.Cache.Monitor.App
             var kustoConnectionString = new KustoConnectionStringBuilder(kustoClusterUrl)
                 .WithAadApplicationKeyAuthentication(azureAppId, azureAppKey, azureTenantId);
             return new Result<IKustoClient>(new KustoClient(KustoClientFactory.CreateCslQueryProvider(kustoConnectionString)));
+        }
+
+        public static Result<IKustoIngestClient> CreateKustoIngestClient(KustoCredentials credentials)
+        {
+            return CreateKustoIngestClient(credentials.ClusterUrl, credentials.Credentials.TenantId, credentials.Credentials.AppId, credentials.Credentials.AppKey);
         }
 
         public static Result<IKustoIngestClient> CreateKustoIngestClient(string kustoIngestionClusterUrl, string azureTenantId, string azureAppId, string azureAppKey)
@@ -45,6 +52,11 @@ namespace BuildXL.Cache.Monitor.App
             return new Result<IKustoIngestClient>(KustoIngestFactory.CreateDirectIngestClient(kustoIngestConnectionString));
         }
 
+        public static Task<Result<IMonitorManagementClient>> CreateAzureMetricsClientAsync(AzureCredentials credentials)
+        {
+            return CreateAzureMetricsClientAsync(credentials.Credentials.TenantId, credentials.SubscriptionId, credentials.Credentials.AppId, credentials.Credentials.AppKey);
+        }
+
         public static async Task<Result<IMonitorManagementClient>> CreateAzureMetricsClientAsync(string azureTenantId, string azureSubscriptionId, string azureAppId, string azureAppKey)
         {
             var credentials = await ApplicationTokenProvider.LoginSilentAsync(azureTenantId, azureAppId, azureAppKey);
@@ -55,11 +67,16 @@ namespace BuildXL.Cache.Monitor.App
             };
         }
 
+        public static Result<IAzure> CreateAzureClient(AzureCredentials credentials)
+        {
+            return CreateAzureClient(credentials.Credentials.TenantId, credentials.SubscriptionId, credentials.Credentials.AppId, credentials.Credentials.AppKey);
+        }
+
         public static Result<IAzure> CreateAzureClient(string azureTenantId, string azureSubscriptionId, string azureAppId, string azureAppKey)
         {
             var tokenCredentials = SdkContext.AzureCredentialsFactory.FromServicePrincipal(azureAppId, azureAppKey, azureTenantId, AzureEnvironment.AzureGlobalCloud);
 
-            return new Result<IAzure>(Azure
+            return new Result<IAzure>(Microsoft.Azure.Management.Fluent.Azure
                 .Configure()
                 .WithLogLevel(HttpLoggingDelegatingHandler.Level.BodyAndHeaders)
                 .Authenticate(tokenCredentials).WithSubscription(azureSubscriptionId));

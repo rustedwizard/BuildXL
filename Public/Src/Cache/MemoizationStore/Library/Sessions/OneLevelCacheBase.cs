@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.ContractsLight;
 using System.Text;
 using System.Threading;
@@ -286,7 +287,7 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         }
 
         /// <inheritdoc />
-        public System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
+        public IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context)
         {
             Contract.Assert(MemoizationStore != null, "Memoization store must be initialized");
             return MemoizationStore.EnumerateStrongFingerprints(context);
@@ -304,25 +305,14 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         }
 
         /// <inheritdoc />
-        public async Task<FileExistenceResult> CheckFileExistsAsync(Context context, ContentHash contentHash)
-        {
-            if (ContentStore is IStreamStore innerStreamStore)
-            {
-                return await innerStreamStore.CheckFileExistsAsync(context, contentHash);
-            }
-
-            return new FileExistenceResult(FileExistenceResult.ResultCode.Error, $"{ContentStore} does not implement {nameof(IStreamStore)} in {nameof(OneLevelCache)}.");
-        }
-
-        /// <inheritdoc />
-        public async Task<StructResult<long>> RemoveFromTrackerAsync(Context context)
+        public async Task<Result<long>> RemoveFromTrackerAsync(Context context)
         {
             if (ContentStore is IRepairStore innerRepairStore)
             {
                 return await innerRepairStore.RemoveFromTrackerAsync(context);
             }
 
-            return new StructResult<long>($"{ContentStore} does not implement {nameof(IRepairStore)} in {nameof(OneLevelCache)}.");
+            return new Result<long>($"{ContentStore} does not implement {nameof(IRepairStore)} in {nameof(OneLevelCache)}.");
         }
 
         /// <inheritdoc />
@@ -360,11 +350,11 @@ namespace BuildXL.Cache.MemoizationStore.Sessions
         }
 
         /// <inheritdoc />
-        public Task<PutResult> HandlePushFileAsync(Context context, ContentHash hash, AbsolutePath sourcePath, CancellationToken token)
+        public Task<PutResult> HandlePushFileAsync(Context context, ContentHash hash, FileSource source, CancellationToken token)
         {
             if (ContentStore is IPushFileHandler handler)
             {
-                return handler.HandlePushFileAsync(context, hash, sourcePath, token);
+                return handler.HandlePushFileAsync(context, hash, source, token);
             }
 
             return Task.FromResult(new PutResult(new InvalidOperationException($"{nameof(ContentStore)} does not implement {nameof(IPushFileHandler)}"), hash));

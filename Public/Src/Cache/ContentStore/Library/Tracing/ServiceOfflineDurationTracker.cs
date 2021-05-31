@@ -26,13 +26,8 @@ namespace BuildXL.Cache.ContentStore.Tracing
     {
         private const string ErrorPrefix = "Could not determine shutdown time";
 
-        /// <nodoc />
-        public const string PreviousFileName = "CaSaaSPrevious.txt";
-
-        /// <nodoc />
-        public const string CurrentFileName = "CaSaaSRunning.txt";
-
-        private static Tracer Tracer { get; } = new Tracer(nameof(ServiceOfflineDurationTracker));
+        // Intentionally using the component name from LifetimeTracer to simplify diagnostics analysis.
+        private static Tracer Tracer { get; } = new Tracer(LifetimeTracker.ComponentName);
 
         private readonly IClock _clock;
         private readonly IAbsFileSystem _fileSystem;
@@ -54,15 +49,19 @@ namespace BuildXL.Cache.ContentStore.Tracing
             IClock clock,
             IAbsFileSystem fileSystem,
             TimeSpan logInterval,
-            AbsolutePath logFolder)
+            AbsolutePath logFolder,
+            string? serviceName)
         {
             _clock = clock;
             _fileSystem = fileSystem;
             _logInterval = logInterval;
-            _currentLogFilePath = logFolder / CurrentFileName;
-            _previousLogFilePath = logFolder / PreviousFileName;
-            _originalTracingContext = context;
 
+            serviceName ??= "CaSaaS";
+            
+            _currentLogFilePath = logFolder / $"{serviceName}Running.txt";
+            _previousLogFilePath = logFolder / $"{serviceName}Previous.txt";
+            _originalTracingContext = context;
+            
             _timer = new Timer(
                 callback: _ => { LogCurrentTimeStampToFile(context); },
                 state: null,
@@ -76,7 +75,8 @@ namespace BuildXL.Cache.ContentStore.Tracing
             IClock clock,
             IAbsFileSystem fileSystem,
             TimeSpan? logInterval,
-            AbsolutePath logFilePath)
+            AbsolutePath logFilePath,
+            string? serviceName)
         {
             return context.PerformOperation(Tracer,
                 () =>
@@ -86,7 +86,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
                         return new Result<ServiceOfflineDurationTracker>($"{nameof(ServiceOfflineDurationTracker)} is disabled");
                     }
 
-                    var serviceTracker = new ServiceOfflineDurationTracker(context, clock, fileSystem, logInterval.Value, logFilePath);
+                    var serviceTracker = new ServiceOfflineDurationTracker(context, clock, fileSystem, logInterval.Value, logFilePath, serviceName);
 
                     // We can't log current timestamp here, because it will mess up with the following GetOfflineDuration call.
                     // Instead, the caller of GetOfflineDuration may specify whether to update the file or not.
@@ -158,6 +158,12 @@ namespace BuildXL.Cache.ContentStore.Tracing
                 result = parseDateTime(lastTime);
                 return true;
             }
+            catch (DirectoryNotFoundException)
+            {
+                // DirectoryNotFoundException is thrown if the part of the path is not available.
+                // This is possible when 'd:\dbs\Cache\ContentAddressableStore folder is not yet created.
+                return false;
+            }
             catch (FileNotFoundException)
             {
                 return false;
@@ -194,12 +200,13 @@ namespace BuildXL.Cache.ContentStore.Tracing
                         () =>
                         {
                             _fileSystem.WriteAllText(_currentLogFilePath, timeStampUtc);
-
-                            ChangeTimer();
                             return BoolResult.Success;
                         },
                         funcIsRunningResultProvider: () => BoolResult.Success);
                 }).IgnoreFailure();
+
+            // Changing the timer regardless if write to the file succeed or failed.    
+            ChangeTimer();
         }
 
         private void ChangeTimer()
@@ -224,9 +231,7 @@ namespace BuildXL.Cache.ContentStore.Tracing
 
             _disposed = true;
 
-#pragma warning disable AsyncFixer02
             _timer.Dispose();
-#pragma warning restore AsyncFixer02
 
             // If the timer's callback is still running, this operation will be skipped due to re-entrancy check inside of it.
             LogCurrentTimeStampToFile(new OperationContext(_originalTracingContext));

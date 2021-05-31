@@ -7,11 +7,17 @@ using System.Diagnostics.ContractsLight;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Ipc.Common;
 using BuildXL.Ipc.ExternalApi;
 using BuildXL.Ipc.Interfaces;
 using BuildXL.Utilities;
+using BuildXL.Utilities.Collections;
+using BuildXL.Utilities.ParallelAlgorithms;
+using BuildXL.Utilities.Tasks;
+using BuildXL.Utilities.Tracing;
 using Microsoft.IdentityModel.Clients.ActiveDirectory;
+using Microsoft.VisualStudio.Services.BlobStore.Common;
 using Microsoft.VisualStudio.Services.Common;
 using Microsoft.VisualStudio.Services.Content.Common;
 using Microsoft.VisualStudio.Services.Content.Common.Authentication;
@@ -44,10 +50,11 @@ namespace Tool.SymbolDaemon
 
         private CancellationToken CancellationToken => m_cancellationSource.Token;
         private string m_requestId;
-
-        private VssCredentials GetCredentials() =>
-            new VsoCredentialHelper(m => m_logger.Verbose(m))
-                .GetCredentials(m_config.Service, true, null, null, PromptBehavior.Never);
+        private IDomainId m_domainId;
+        private readonly SemaphoreSlim m_requestIdAcquisitionMutex = TaskUtilities.CreateMutex();
+        private readonly NagleQueue<BatchedSymbolFile> m_nagleQueue;
+        private readonly ActionQueue m_fileUploadQueue;
+        private int m_batchCount;
 
         private ArtifactHttpClientFactory GetFactory() =>
             new ArtifactHttpClientFactory(
@@ -69,6 +76,17 @@ namespace Tool.SymbolDaemon
             }
         }
 
+        private IDomainId DomainId
+        {
+            get
+            {
+                Contract.Requires(m_domainId != null);
+                return m_domainId;
+            }
+        }
+
+        private readonly CounterCollection<SymbolClientCounter> m_counters;
+
         /// <nodoc />
         public VsoSymbolClient(IIpcLogger logger, SymbolConfig config, Client apiClient)
         {
@@ -78,22 +96,35 @@ namespace Tool.SymbolDaemon
             m_debugEntryCreateBehavior = config.DebugEntryCreateBehavior;
             m_cancellationSource = new CancellationTokenSource();
 
+            m_counters = new CounterCollection<SymbolClientCounter>();
+
             m_logger.Info(I($"[{nameof(VsoSymbolClient)}] Using symbol config: {JsonConvert.SerializeObject(m_config)}"));
 
             m_symbolClient = new ReloadingSymbolClient(
                 logger: logger,
                 clientConstructor: CreateSymbolServiceClient);
+
+            m_nagleQueue = NagleQueue<BatchedSymbolFile>.Create(
+                maxDegreeOfParallelism: m_config.MaxParallelUploads,
+                batchSize: m_config.BatchSize,
+                interval: m_config.NagleTime,
+                processBatch: ProcessBatchedFilesAsync);
+
+            m_fileUploadQueue = new ActionQueue(m_config.MaxParallelUploads);
         }
 
         private ISymbolServiceClient CreateSymbolServiceClient()
         {
-            var client = new SymbolServiceClient(
-                ServiceEndpoint,
-                GetFactory(),
-                Tracer,
-                new SymbolServiceClientTelemetry(Tracer, ServiceEndpoint, enable: m_config.EnableTelemetry));
+            using (m_counters.StartStopwatch(SymbolClientCounter.AuthDuration))
+            {
+                var client = new SymbolServiceClient(
+                    ServiceEndpoint,
+                    GetFactory(),
+                    Tracer,
+                    new SymbolServiceClientTelemetry(Tracer, ServiceEndpoint, enable: m_config.EnableTelemetry));
 
-            return client;
+                return client;
+            }
         }
 
         /// <summary>
@@ -101,14 +132,26 @@ namespace Tool.SymbolDaemon
         /// This method should be called only after the request has been created, otherwise, it will throw an exception.
         /// </summary>
         /// <remarks>
-        /// On workers, m_requestId won't be initialized, so we need to query the server for the right value.
+        /// On workers, m_requestId / m_domainId won't be initialized, so we need to query the server for the right values.
         /// </remarks>
-        private async Task EnsureRequestIdInitalizedAsync()
+        private async Task EnsureRequestIdAndDomainIdAreInitalizedAsync()
         {
+            // Check whether the field is initialized, so we are not wastefully acquire the semaphore.
             if (string.IsNullOrEmpty(m_requestId))
             {
-                var result = await m_symbolClient.GetRequestByNameAsync(RequestName, CancellationToken);
-                m_requestId = result.Id;
+                using (await m_requestIdAcquisitionMutex.AcquireAsync())
+                {
+                    // check whether we still need to query the server
+                    if (string.IsNullOrEmpty(m_requestId) || m_domainId == null)
+                    {
+                        using (m_counters.StartStopwatch(SymbolClientCounter.GetRequestIdDuration))
+                        {
+                            var result = await m_symbolClient.GetRequestByNameAsync(RequestName, CancellationToken);
+                            m_requestId = result.Id;
+                            m_domainId = result.DomainId;
+                        }
+                    }
+                }
             }
         }
 
@@ -117,9 +160,23 @@ namespace Tool.SymbolDaemon
         /// </summary>
         public async Task<Request> CreateAsync(CancellationToken token)
         {
-            var result = await m_symbolClient.CreateRequestAsync(RequestName, token);
+            if (!m_config.DomainId.HasValue)
+            {
+                m_logger.Verbose("DomainId is not specified. Creating symbol publishing request using DefaultDomainId.");
+            }
+
+            IDomainId domainId = m_config.DomainId.HasValue
+                ? new ByteDomainId(m_config.DomainId.Value)
+                : WellKnownDomainIds.DefaultDomainId;
+
+            Request result;
+            using (m_counters.StartStopwatch(SymbolClientCounter.CreateDuration))
+            {
+                result = await m_symbolClient.CreateRequestAsync(domainId, RequestName, m_config.EnableChunkDedup, token);
+            }
 
             m_requestId = result.Id;
+            m_domainId = result.DomainId;
 
             // info about a request in a human-readable form
             var requestDetails = $"Symbol request has been created:{Environment.NewLine}"
@@ -143,83 +200,186 @@ namespace Tool.SymbolDaemon
         {
             Contract.Requires(symbolFile.IsIndexed, "File has not been indexed.");
 
+            m_counters.IncrementCounter(SymbolClientCounter.NumAddFileRequests);
             if (symbolFile.DebugEntries.Count == 0)
             {
                 // If there are no debug entries, ask bxl to log a message and return early.
                 Analysis.IgnoreResult(await m_apiClient.LogMessage(I($"File '{symbolFile.FullFilePath}' does not contain symbols and will not be added to '{RequestName}'."), isWarning: false));
+                m_counters.IncrementCounter(SymbolClientCounter.NumFilesWithoutDebugEntries);
+
                 return AddDebugEntryResult.NoSymbolData;
             }
 
-            await EnsureRequestIdInitalizedAsync();
+            m_logger.Verbose($"Queued file '{symbolFile}'");
+            var batchedFile = new BatchedSymbolFile(symbolFile);
+            m_nagleQueue.Enqueue(batchedFile);
+            return await batchedFile.ResultTaskSource.Task;
+        }
 
-            List<DebugEntry> result;
+        private async Task ProcessBatchedFilesAsync(BatchedSymbolFile[] batch)
+        {
+            var batchNumber = Interlocked.Increment(ref m_batchCount);
 
             try
             {
-                result = await m_symbolClient.CreateRequestDebugEntriesAsync(
-                    RequestId,
-                    symbolFile.DebugEntries.Select(e => CreateDebugEntry(e)),
-                    // First, we create debug entries with ThrowIfExists behavior not to silence the collision errors.
-                    DebugEntryCreateBehavior.ThrowIfExists,
-                    CancellationToken);
-            }
-            catch (DebugEntryExistsException)
-            {
-                string message = $"[SymbolDaemon] File: '{symbolFile.FullFilePath}' caused collision. " +
-                    (m_debugEntryCreateBehavior == DebugEntryCreateBehavior.ThrowIfExists
-                        ? string.Empty
-                        : $"SymbolDaemon will retry creating debug entry with {m_debugEntryCreateBehavior} behavior");
+                m_logger.Info($"Started processing batch #{batchNumber} ({batch.Length} files).");
 
-                if (m_debugEntryCreateBehavior == DebugEntryCreateBehavior.ThrowIfExists)
+                await EnsureRequestIdAndDomainIdAreInitalizedAsync();
+
+                var debugEntriesToAssociate = batch.SelectMany(
+                    file => file.File.DebugEntries.Select(entry => CreateDebugEntry(entry, DomainId)))
+                    .ToList();
+
+
+                var resultOfAssociateCall = await AssociateAsync(debugEntriesToAssociate);
+                var entriesWithMissingBlobs = resultOfAssociateCall.Where(e => e.Status == DebugEntryStatus.BlobMissing).ToList();
+                var missingBlobsToFilesMap = SetResultForAssociatedFiles(batch, entriesWithMissingBlobs);
+
+                // materialize all files that we need to upload
+                var materializedFiles = await TaskUtilities.SafeWhenAll(missingBlobsToFilesMap.Values.Select(static file => file.File.EnsureMaterializedAsync()));
+
+                await UploadAndAssociateAsync(entriesWithMissingBlobs, missingBlobsToFilesMap);
+
+                m_counters.AddToCounter(SymbolClientCounter.NumFilesUploaded, missingBlobsToFilesMap.Count);
+                m_counters.AddToCounter(SymbolClientCounter.TotalUploadSize, materializedFiles.Sum(f => f.Length));
+
+                missingBlobsToFilesMap.Values.ForEach(static file => file.ResultTaskSource.TrySetResult(AddDebugEntryResult.UploadedAndAssociated));
+
+                // double-check that all files were processed
+                Contract.Assert(batch.All(f => f.ResultTaskSource.Task.IsCompleted));
+
+                m_logger.Info($"Finished processing batch #{batchNumber}.");
+            }
+            catch (Exception e)
+            {
+                m_logger.Verbose($"Failed ProcessBatchedFilesAsync (batch #{batchNumber}, size:{batch.Length}){Environment.NewLine}"
+                   + string.Join(
+                       Environment.NewLine,
+                       batch.Select(item => $"'{item.File.FullFilePath}', Hash:'{item.File.Hash}', DebugEntries.Count: {item.File.DebugEntries.Count}, Task.IsCompleted:{item.ResultTaskSource.Task.IsCompleted}")));
+
+                batch.ForEach(f => f.ResultTaskSource.TrySetException(e));
+            }
+        }
+
+        private async Task<List<DebugEntry>> AssociateAsync(List<DebugEntry> debugEntriesToAssociate)
+        {
+            List<DebugEntry> result;
+            using (m_counters.StartStopwatch(SymbolClientCounter.TotalAssociateTime))
+            {
+                try
                 {
-                    // Log an error message in SymbolDaemon log file
-                    m_logger.Error(message);
-                    throw new DebugEntryExistsException(message);
+                    result = await m_symbolClient.CreateRequestDebugEntriesAsync(
+                        RequestId,
+                        debugEntriesToAssociate,
+                        // First, we create debug entries with ThrowIfExists behavior not to silence the collision errors.
+                        DebugEntryCreateBehavior.ThrowIfExists,
+                        CancellationToken);
                 }
+                catch (DebugEntryExistsException e)
+                {
+                    if (m_debugEntryCreateBehavior == DebugEntryCreateBehavior.ThrowIfExists)
+                    {
+                        // The daemon is configured to throw on a collision.
+                        throw;
+                    }
 
-                // Log a message in SymbolDaemon log file
-                m_logger.Verbose(message);
+                    string message = "A collision has occurred while processing a batch. "
+                        + $"SymbolDaemon will retry creating debug entries with {m_debugEntryCreateBehavior} behavior. "
+                        + $"{Environment.NewLine}{e.Message}";
 
-                result = await m_symbolClient.CreateRequestDebugEntriesAsync(
-                    RequestId,
-                    symbolFile.DebugEntries.Select(e => CreateDebugEntry(e)),
-                    m_debugEntryCreateBehavior,
-                    CancellationToken);
+                    // Log a message in SymbolDaemon log file
+                    m_logger.Verbose(message);
+
+                    result = await m_symbolClient.CreateRequestDebugEntriesAsync(
+                        RequestId,
+                        debugEntriesToAssociate,
+                        m_debugEntryCreateBehavior,
+                        CancellationToken);
+                }
             }
 
-            var entriesWithMissingBlobs = result.Where(e => e.Status == DebugEntryStatus.BlobMissing).ToList();
+            return result;
+        }
 
-            if (entriesWithMissingBlobs.Count > 0)
+        private Dictionary<BlobIdentifier, BatchedSymbolFile> SetResultForAssociatedFiles(BatchedSymbolFile[] batch, List<DebugEntry> entriesWithMissingBlobs)
+        {
+            // A single file might contain multiple DebugEntries, however, all them will share the same BlobIdentifier.
+            // Because of that, we only need to check the BlobIdentifier of the first entry for each file.
+            // This method is also constructing blobId -> file map, that is later used when uploading files.
+
+            var missingBlobIds = new HashSet<BlobIdentifier>(entriesWithMissingBlobs.Select(e => e.BlobIdentifier));
+            var blobIdToFileMap = new Dictionary<BlobIdentifier, BatchedSymbolFile>();
+            foreach (var file in batch)
             {
-                // All the entries are based on the same file, so we need to call upload only once.
+                // DebugEntries list is always non-empty at this point
+                if (missingBlobIds.Contains(file.File.DebugEntries[0].BlobIdentifier))
+                {
+                    // It is possible that a batch contains multiple files with the same content (same blobId). In such a case, 
+                    // DebugEntries might or might not be the same. Since Upload call is isolated from the Associate call,
+                    // and the only thing needed for upload is content's location, add the first file to the map and mark
+                    // other files as Associated (the entries from those files will still be a part of the second Associate call). 
+                    if (!blobIdToFileMap.ContainsKey(file.File.DebugEntries[0].BlobIdentifier))
+                    {
+                        blobIdToFileMap.Add(file.File.DebugEntries[0].BlobIdentifier, file);
+                    }
+                    else
+                    {
+                        file.ResultTaskSource.TrySetResult(AddDebugEntryResult.Associated);
+                        m_counters.IncrementCounter(SymbolClientCounter.NumFilesAssociated);
+                    }
+                }
+                else
+                {
+                    file.ResultTaskSource.TrySetResult(AddDebugEntryResult.Associated);
+                    m_counters.IncrementCounter(SymbolClientCounter.NumFilesAssociated);
+                }
+            }
 
-                // make sure that the file is on disk (it might not be on disk if we got DebugEntries from cache/metadata file)
-                var file = await symbolFile.EnsureMaterializedAsync();
+            return blobIdToFileMap;
+        }
 
-                var uploadResult = await m_symbolClient.UploadFileAsync(
-                    // uploading to the location set by the symbol service
-                    entriesWithMissingBlobs[0].BlobUri,
-                    RequestId,
-                    symbolFile.FullFilePath,
-                    entriesWithMissingBlobs[0].BlobIdentifier,
-                    CancellationToken);
+        private async Task UploadAndAssociateAsync(List<DebugEntry> entriesWithMissingBlobs, Dictionary<BlobIdentifier, BatchedSymbolFile> missingBlobsToFilesMap)
+        {
+            if (entriesWithMissingBlobs.Count == 0)
+            {
+                return;
+            }
 
-                m_logger.Info($"File: '{symbolFile.FullFilePath}' -- upload result: {uploadResult.ToString()}");
+            // We need to upload each missing file only once, however, to upload a file, we need data from DebugEntry returned
+            // by the service endpoint during the associate call. EntriesWithMissingBlobs might contain entries that are linked
+            // to the same file, so we need dedup that list first.
+            await m_fileUploadQueue.ForEachAsync(
+                entriesWithMissingBlobs.Distinct(DebugEntryBlobIdComparer.Instance),
+                async (entry, index) =>
+                {
+                    using (m_counters.StartStopwatch(SymbolClientCounter.TotalUploadTime))
+                    {
+                        var batchedFile = missingBlobsToFilesMap[entry.BlobIdentifier];
+                        var uploadResult = await m_symbolClient.UploadFileAsync(
+                            entry.DomainId,
+                            // uploading to the location set by the symbol service
+                            entry.BlobUri,
+                            RequestId,
+                            batchedFile.File.FullFilePath,
+                            entry.BlobIdentifier,
+                            CancellationToken);
+                        batchedFile.SetBlobIdentifier(uploadResult);
+                    }
+                });
 
-                entriesWithMissingBlobs.ForEach(entry => entry.BlobDetails = uploadResult);
+            // need to update entries before calling associate the second time
+            entriesWithMissingBlobs.ForEach(entry => missingBlobsToFilesMap[entry.BlobIdentifier].BlobIdentifier.UpdateDebugEntryBlobReference(entry));
 
+            using (m_counters.StartStopwatch(SymbolClientCounter.TotalAssociateAfterUploadTime))
+            {
                 entriesWithMissingBlobs = await m_symbolClient.CreateRequestDebugEntriesAsync(
                     RequestId,
                     entriesWithMissingBlobs,
                     m_debugEntryCreateBehavior,
                     CancellationToken);
-
-                Contract.Assert(entriesWithMissingBlobs.All(e => e.Status != DebugEntryStatus.BlobMissing), "Entries with non-success code are present.");
-
-                return AddDebugEntryResult.UploadedAndAssociated;
             }
 
-            return AddDebugEntryResult.Associated;
+            Contract.Assert(entriesWithMissingBlobs.All(e => e.Status != DebugEntryStatus.BlobMissing), "Entries with non-success code are present.");
         }
 
         /// <summary>
@@ -227,15 +387,20 @@ namespace Tool.SymbolDaemon
         /// </summary>        
         public async Task<Request> FinalizeAsync(CancellationToken token)
         {
-            var result = await m_symbolClient.FinalizeRequestAsync(
-                RequestId,
-                ComputeExpirationDate(m_config.Retention),
-                // isUpdateOperation == true => request will be marked as 'Sealed', 
-                // i.e., no more DebugEntries could be added to it 
-                isUpdateOperation: false,
-                token);
+            await m_nagleQueue.DisposeAsync();
 
-            return result;
+            using (m_counters.StartStopwatch(SymbolClientCounter.FinalizeDuration))
+            {
+                var result = await m_symbolClient.FinalizeRequestAsync(
+                    RequestId,
+                    ComputeExpirationDate(m_config.Retention),
+                    // isUpdateOperation == true => request will be marked as 'Sealed', 
+                    // i.e., no more DebugEntries could be added to it 
+                    isUpdateOperation: false,
+                    token);
+
+                return result;
+            }
         }
 
         /// <inheritdoc />
@@ -249,17 +414,135 @@ namespace Tool.SymbolDaemon
         /// <nodoc />
         public void Dispose()
         {
+            m_nagleQueue.Dispose();
             m_symbolClient.Dispose();
         }
 
-        private static DebugEntry CreateDebugEntry(IDebugEntryData data)
+        private static DebugEntry CreateDebugEntry(IDebugEntryData data, IDomainId domainId)
         {
             return new DebugEntry()
             {
                 BlobIdentifier = data.BlobIdentifier,
                 ClientKey = data.ClientKey,
-                InformationLevel = data.InformationLevel
+                InformationLevel = data.InformationLevel,
+                DomainId = domainId,
             };
+        }
+
+        /// <inheritdoc />
+        public IDictionary<string, long> GetStats()
+        {
+            return m_counters.AsStatistics("SymbolDaemon");
+        }
+
+        private enum SymbolClientCounter
+        {
+            [CounterType(CounterType.Stopwatch)]
+            AuthDuration,
+
+            [CounterType(CounterType.Stopwatch)]
+            GetRequestIdDuration,
+
+            [CounterType(CounterType.Stopwatch)]
+            CreateDuration,
+
+            [CounterType(CounterType.Stopwatch)]
+            FinalizeDuration,
+
+            [CounterType(CounterType.Stopwatch)]
+            TotalAssociateTime,
+
+            [CounterType(CounterType.Stopwatch)]
+            TotalAssociateAfterUploadTime,
+
+            [CounterType(CounterType.Stopwatch)]
+            TotalUploadTime,
+
+            NumAddFileRequests,
+
+            NumFilesWithoutDebugEntries,
+
+            NumFilesAssociated,
+
+            NumFilesUploaded,
+
+            TotalUploadSize,
+        }
+
+        /// <summary>
+        /// Try to acquire credentials using the Azure Artifacts Helper first, if that fails then fallback to VsoCredentialHelper
+        /// </summary>
+        /// <returns>Credentials for PAT that was acquired.</returns>
+        private VssCredentials GetCredentials()
+        {
+            Action<string> loggerAction = m => m_logger.Verbose(m);
+            var adoCredentialHelper = new AzureArtifactsCredentialHelper(loggerAction);
+            var credentialHelperResult = adoCredentialHelper.AcquirePat(m_config.Service, PatType.SymbolsReadWrite).Result;
+
+            if (credentialHelperResult.Result == AzureArtifactsCredentialHelperResultType.Success)
+            {
+                return new VsoCredentialHelper(loggerAction).GetPATCredentials(credentialHelperResult.Pat);
+            }
+
+            return new VsoCredentialHelper(loggerAction).GetCredentials(serviceUri: m_config.Service, useAad: true, existingAadTokenCacheBytes: null, pat: null, promptBehavior: PromptBehavior.Never);
+        }
+
+        /// <summary>
+        /// A wrapper of <see cref="SymbolFile"/> for batched processing.
+        /// </summary>
+        private sealed class BatchedSymbolFile
+        {
+            private readonly object m_lock = new object();
+
+            public SymbolFile File { get; }
+            public TaskSourceSlim<AddDebugEntryResult> ResultTaskSource { get; }
+            public SymbolBlobIdentifier BlobIdentifier { get; private set; }
+
+            public BatchedSymbolFile(SymbolFile file)
+            {
+                File = file;
+                ResultTaskSource = TaskSourceSlim.Create<AddDebugEntryResult>();
+            }
+
+            public void SetBlobIdentifier(SymbolBlobIdentifier blobIdentifier)
+            {
+                lock (m_lock)
+                {
+                    BlobIdentifier = blobIdentifier;
+                }
+            }
+        }
+
+        private sealed class DebugEntryBlobIdComparer : IEqualityComparer<DebugEntry>
+        {
+            public static DebugEntryBlobIdComparer Instance = new DebugEntryBlobIdComparer();
+
+            private DebugEntryBlobIdComparer()
+            {
+            }
+
+            public bool Equals(DebugEntry x, DebugEntry y)
+            {
+                if (ReferenceEquals(x, y))
+                {
+                    return true;
+                }
+                if (ReferenceEquals(x, null))
+                {
+                    return false;
+                }
+                if (ReferenceEquals(y, null))
+                {
+                    return false;
+                }
+
+                return Equals(x.BlobIdentifier, y.BlobIdentifier);
+            }
+
+            public int GetHashCode(DebugEntry obj)
+            {
+                return obj.BlobIdentifier?.GetHashCode() ?? 0;
+            }
         }
     }
 }

@@ -1114,10 +1114,11 @@ bool EnumerateDirectory(
 
     while (!directoriesToEnumerate.empty()) {
         std::wstring directoryToEnumerate = directoriesToEnumerate.top();
-        std::wstring spec = directoryToEnumerate + L"\\" + filter;
+        std::wstring spec = PathCombine(directoryToEnumerate, filter.c_str());
+
         directoriesToEnumerate.pop();
 
-        hFind = FindFirstFileW(spec.c_str(), &ffd);
+        hFind = FindFirstFileW(NormalizePath(spec).c_str(), &ffd);
         if (hFind == INVALID_HANDLE_VALUE) {
             return false;
         }
@@ -1126,7 +1127,8 @@ bool EnumerateDirectory(
             if (wcscmp(ffd.cFileName, L".") != 0 &&
                 wcscmp(ffd.cFileName, L"..") != 0) {
 
-                std::wstring path = directoryToEnumerate + L"\\" + ffd.cFileName;
+                std::wstring path = PathCombine(directoryToEnumerate, ffd.cFileName);
+
                 filesAndDirectories.push_back(std::make_pair(path, ffd.dwFileAttributes));
 
                 if (recursive) {

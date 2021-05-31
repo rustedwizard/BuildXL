@@ -1077,9 +1077,40 @@ int CallCreateSelfForWrite()
     return (int)GetLastError();
 }
 
-int CallDetoursResolvedPathCacheTests()
+int CallMoveFileExWWithTrailingBackSlash(wstring& fullPath)
 {
-    return ValidateResolvedPathCache();
+    fullPath.append(L"\\");
+
+    bool result = MoveFileExW(fullPath.c_str(), L"moveFileWithTrailingSlashCopied", MOVEFILE_REPLACE_EXISTING);
+
+    if (!result)
+    {
+        return (int)GetLastError();
+    }
+
+    return 0;
+}
+
+int CallMoveFileExWWithTrailingBackSlashNtObject()
+{
+    std::wstring fullPath;
+    if (!TryGetNtFullPath(L"moveFileWithTrailingSlash", fullPath))
+    {
+        return (int)GetLastError();
+    }
+
+    return CallMoveFileExWWithTrailingBackSlash(fullPath);
+}
+
+int CallMoveFileExWWithTrailingBackSlashNtEscape()
+{
+    std::wstring fullPath;
+    if (!TryGetNtEscapedFullPath(L"moveFileWithTrailingSlash", fullPath))
+    {
+        return (int)GetLastError();
+    }
+
+    return CallMoveFileExWWithTrailingBackSlash(fullPath);
 }
 
 // ----------------------------------------------------------------------------
@@ -1123,7 +1154,8 @@ static void GenericTests(const string& verb)
     IF_COMMAND(CallDeleteWithoutSharing);
     IF_COMMAND(CallDeleteOnOpenedHardlink);
     IF_COMMAND(CallCreateSelfForWrite);
-    IF_COMMAND(CallDetoursResolvedPathCacheTests);
+    IF_COMMAND(CallMoveFileExWWithTrailingBackSlashNtObject);
+    IF_COMMAND(CallMoveFileExWWithTrailingBackSlashNtEscape);
 
 #undef IF_COMMAND1
 #undef IF_COMMAND2
@@ -1146,9 +1178,11 @@ static void SymlinkTests(const string& verb)
     IF_COMMAND(CallMoveSymLinkOnFilesNotEnforceChainSymLinkAccesses);
     IF_COMMAND(CallAccessSymLinkOnDirectories);
     IF_COMMAND(CallDetouredFileCreateThatAccessesChainOfSymlinks);
+    IF_COMMAND(CallDetouredFileCreateThatDoesNotAccessChainOfSymlinks);
     IF_COMMAND(CallDetouredCopyFileFollowingChainOfSymlinks);
     IF_COMMAND(CallDetouredCopyFileNotFollowingChainOfSymlinks);
     IF_COMMAND(CallDetouredNtCreateFileThatAccessesChainOfSymlinks);
+    IF_COMMAND(CallDetouredNtCreateFileThatDoesNotAccessChainOfSymlinks);
     IF_COMMAND(CallAccessNestedSiblingSymLinkOnFiles);
     IF_COMMAND(CallAccessJunctionSymlink_Real);
     IF_COMMAND(CallAccessJunctionSymlink_Junction);
@@ -1162,7 +1196,26 @@ static void SymlinkTests(const string& verb)
     IF_COMMAND(CallProbeDirectorySymlinkTargetWithReparsePointFlag);
     IF_COMMAND(CallProbeDirectorySymlinkTargetWithoutReparsePointFlag);
     IF_COMMAND(CallValidateFileSymlinkAccesses);
+    IF_COMMAND(CallOpenFileThroughMultipleDirectorySymlinks);
+    IF_COMMAND(CallModifyDirectorySymlinkThroughDifferentPathIgnoreFullyResolve);
     
+#undef IF_COMMAND1
+#undef IF_COMMAND2
+#undef IF_COMMAND
+}
+
+static void ResolvedPathCacheTests(const string& verb)
+{
+#define IF_COMMAND1(NAME)   { if (verb == #NAME) { exit(NAME()); } }
+#define IF_COMMAND2(NAME)   { if (verb == ("2" ## #NAME)) { NAME(); NAME(); exit(ERROR_SUCCESS); } }
+
+#define IF_COMMAND(NAME)    { IF_COMMAND1(NAME); IF_COMMAND2(NAME); }
+
+    IF_COMMAND(CallDetoursResolvedPathCacheTests);
+    IF_COMMAND(CallDetoursResolvedPathCacheDealsWithUnicode);
+    IF_COMMAND(CallDetoursResolvedPathPreservingLastSegmentCacheTests);
+    IF_COMMAND(CallDeleteDirectorySymlinkThroughDifferentPath);
+
 #undef IF_COMMAND1
 #undef IF_COMMAND2
 #undef IF_COMMAND
@@ -1275,6 +1328,7 @@ int main(int argc, char **argv)
 
     LoggingTests(verb);
     SymlinkTests(verb);
+    ResolvedPathCacheTests(verb);
     CorrelationCallTests(verb);
     GenericTests(verb);
 

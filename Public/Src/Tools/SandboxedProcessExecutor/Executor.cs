@@ -2,10 +2,12 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.ContractsLight;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Native.IO;
 using BuildXL.Processes;
@@ -28,6 +30,7 @@ namespace BuildXL.SandboxedProcessExecutor
         private readonly ConsoleLogger m_logger = new ConsoleLogger();
         private ISandboxConnection m_sandboxConnection = null;
         private const int ReportQueueSizeForKextMB = 1024;
+        private readonly bool m_isRunningInCloudBuildVm = false;
 
         /// <summary>
         /// Creates an instance of <see cref="Executor"/>.
@@ -37,6 +40,11 @@ namespace BuildXL.SandboxedProcessExecutor
             Contract.Requires(configuration != null);
 
             m_configuration = configuration;
+
+            if (Environment.GetEnvironmentVariable("CLOUDBUILD_VM") == "1")
+            {
+                m_isRunningInCloudBuildVm = true;
+            }
         }
 
         public int Run()
@@ -75,7 +83,7 @@ namespace BuildXL.SandboxedProcessExecutor
         {
             if (!Debugger.IsAttached && m_configuration.EnableTelemetry)
             {
-                AriaV2StaticState.Enable(global::BuildXL.Tracing.AriaTenantToken.Key);
+                AriaV2StaticState.Enable(BuildXL.Tracing.AriaTenantToken.Key);
                 TrackingEventListener.RegisterEventSource(ETWLogger.Log);
                 m_telemetryStopwatch.Start();
             }
@@ -87,7 +95,34 @@ namespace BuildXL.SandboxedProcessExecutor
             {
                 m_telemetryStopwatch.Stop();
                 Logger.Log.SandboxedProcessExecutorInvoked(m_loggingContext, m_telemetryStopwatch.ElapsedMilliseconds, Environment.CommandLine);
-                AriaV2StaticState.TryShutDown(TimeSpan.FromSeconds(10), out var telemetryShutdownException);
+                AriaV2StaticState.TryShutDown(TimeSpan.FromSeconds(10), out _);
+            }
+        }
+
+        /// <summary>
+        /// Pings <see cref="Configuration.SandboxedProcessInfoInputFile"/> file periodically to identify connectivity issues between Host and VM.
+        /// </summary>
+        /// <returns>True when a connection issue is detected.</returns>
+        internal void DetectConnectionIssuesBetweenHostAndVm()
+        {
+            while (true)
+            {
+                try
+                {
+                    if (File.Exists(Path.GetFullPath(m_configuration.SandboxedProcessInfoInputFile)))
+                    {
+                        Thread.Sleep(TimeSpan.FromMilliseconds(200));
+                        continue;
+                    }
+                    break;
+                }
+                catch (Exception e) // All exceptions indicate the same result (connectivity issue detected)
+                {
+#pragma warning disable ERP022 // Unobserved exception in generic exception handler
+                    Console.Error.WriteLine("Execution error during DetectInfrastructureIssuesBetweenHostAndVm: " + e);
+                    break;
+#pragma warning restore ERP022 // Unobserved exception in generic exception handler
+                }
             }
         }
 
@@ -96,6 +131,26 @@ namespace BuildXL.SandboxedProcessExecutor
             if (!TryReadSandboxedProcessInfo(out SandboxedProcessInfo sandboxedProcessInfo))
             {
                 return ExitCode.FailedReadInput;
+            }
+
+            if (!TryReadSandboxedProcessExecutorTestHook(out SandboxedProcessExecutorTestHook sandboxedProcessExecutorTestHook))
+            {
+                return ExitCode.FailedReadInput;
+            }
+
+            if (sandboxedProcessExecutorTestHook?.FailVmConnection == true)
+            {
+                return ExitCode.VmConnectionError;
+            }
+
+            Thread pingHost = null;
+            if (m_isRunningInCloudBuildVm)
+            {
+                pingHost = new Thread(DetectConnectionIssuesBetweenHostAndVm)
+                {
+                    IsBackground = true   // To avoid blocking after current thread completes
+                };
+                pingHost.Start();
             }
 
             if (!TryPrepareSandboxedProcess(sandboxedProcessInfo))
@@ -110,8 +165,27 @@ namespace BuildXL.SandboxedProcessExecutor
                 sandboxedProcessInfo.SidebandWriter?.EnsureHeaderWritten();
             }
 
+            if (pingHost != null && !pingHost.IsAlive)
+            {
+                return ExitCode.VmConnectionError;
+            }
+
+            if (pingHost != null && pingHost.IsAlive)
+            {
+#pragma warning disable ERP022 // Unobserved exception in generic exception handler
+                try { pingHost.Abort(); }
+                catch (Exception) { }       // Ignoring Exceptions since Thread abort is not supported in .net
+#pragma warning restore ERP022 // Unobserved exception in generic exception handler
+
+            }
+
             if (executeResult.result != null)
             {
+                if (m_configuration.PrintObservedAccesses)
+                {
+                    PrintObservedAccesses(sandboxedProcessInfo.PathTable, executeResult.result);
+                }
+
                 if (!TryWriteSandboxedProcessResult(sandboxedProcessInfo.PathTable, executeResult.result))
                 {
                     return ExitCode.FailedWriteOutput;
@@ -121,28 +195,96 @@ namespace BuildXL.SandboxedProcessExecutor
             return executeResult.exitCode;
         }
 
+        private void PrintObservedAccesses(PathTable pathTable, SandboxedProcessResult result)
+        {
+            var accesses = new List<ReportedFileAccess>();
+
+            if (result.FileAccesses != null)
+            {
+                accesses.AddRange(result.FileAccesses);
+            }
+
+            if (result.AllUnexpectedFileAccesses != null)
+            {
+                accesses.AddRange(result.AllUnexpectedFileAccesses);
+            }
+
+            m_logger.LogInfo($"{accesses.Count} observed access(es):");
+
+            foreach (var access in accesses)
+            {
+                m_logger.LogInfo($"{access.GetPath(pathTable)}: {access.Describe()}");
+            }
+        }
+
         private bool TryReadSandboxedProcessInfo(out SandboxedProcessInfo sandboxedProcessInfo)
         {
             SandboxedProcessInfo localSandboxedProcessInfo = null;
 
+            string sandboxedProcessInfoPath = Path.GetFullPath(m_configuration.SandboxedProcessInfoInputFile);
+            m_logger.LogInfo($"Reading sandboxed process info from '{sandboxedProcessInfoPath}'");
+
             bool success = Helpers.RetryOnFailure(
-                attempt => {
-                    using (FileStream stream = File.OpenRead(Path.GetFullPath(m_configuration.SandboxedProcessInfoInputFile)))
-                    {
-                        // TODO: Custom DetoursEventListener?
-                        localSandboxedProcessInfo = SandboxedProcessInfo.Deserialize(stream, m_loggingContext, detoursEventListener: null);
-                        return true;
-                    }
-                });
+                attempt => 
+                {
+                    using FileStream stream = File.OpenRead(sandboxedProcessInfoPath);
+                    // TODO: Custom DetoursEventListener?
+                    localSandboxedProcessInfo = SandboxedProcessInfo.Deserialize(stream, m_loggingContext, detoursEventListener: null);
+                    return true;
+                },
+                onException: e => m_logger.LogError(e.ToStringDemystified()));
 
             sandboxedProcessInfo = localSandboxedProcessInfo;
 
             return success;
         }
 
+        private bool TryReadSandboxedProcessExecutorTestHook(out SandboxedProcessExecutorTestHook sandboxedProcessExecutorTestHook)
+        {
+            if (string.IsNullOrEmpty(m_configuration.SandboxedProcessExecutorTestHookFile))
+            {
+                sandboxedProcessExecutorTestHook = null;
+                return true;
+            }
+
+            SandboxedProcessExecutorTestHook localSandboxedProcessExecutorTestHook = null;
+
+            string sandboxedProcessTestHook = Path.GetFullPath(m_configuration.SandboxedProcessExecutorTestHookFile);
+            m_logger.LogInfo($"Reading sandboxed process test hook from '{sandboxedProcessTestHook}'");
+
+            bool success = Helpers.RetryOnFailure(
+                attempt => 
+                {
+                    using FileStream stream = File.OpenRead(sandboxedProcessTestHook);
+                    // TODO: Custom DetoursEventListener?
+                    localSandboxedProcessExecutorTestHook = SandboxedProcessExecutorTestHook.Deserialize(stream);
+                    return true;
+                },
+                onException: e => m_logger.LogError(e.ToStringDemystified()));
+
+            sandboxedProcessExecutorTestHook = localSandboxedProcessExecutorTestHook;
+            return true;
+        }
+
         private bool TryWriteSandboxedProcessResult(PathTable pathTable, SandboxedProcessResult result)
         {
             Contract.Requires(result != null);
+
+            bool isWindows = !OperatingSystemHelper.IsUnixOS;
+
+            string sandboxedProcessResultOutputPath = Path.GetFullPath(m_configuration.SandboxedProcessResultOutputFile);
+            m_logger.LogInfo($"Writing sandboxed process result to '{sandboxedProcessResultOutputPath}'");
+
+            bool success = Helpers.RetryOnFailure(
+               attempt =>
+               {
+                   using FileStream stream = File.OpenWrite(sandboxedProcessResultOutputPath);
+                   result.Serialize(stream, writePath);
+                   return true;
+               },
+               onException: e => m_logger.LogError(e.ToStringDemystified()));
+
+            return success;
 
             // When BuildXL serializes SandboxedProcessInfo, it does not serialize the path table used by SandboxedProcessInfo.
             // On deserializing that info, a new path table is created; see the Deserialize method of SandboxedProcessInfo.
@@ -156,9 +298,7 @@ namespace BuildXL.SandboxedProcessExecutor
             // path table used by BuildXL, and thus BuildXL will understand the ManifestPath serialized by this tool.
             //
             // For Unix, we need to give a special care of path serialization.
-            bool isWindows = !OperatingSystemHelper.IsUnixOS;
-
-            Action<BuildXLWriter, AbsolutePath> writePath = (writer, path) =>
+            void writePath(BuildXLWriter writer, AbsolutePath path)
             {
                 if (isWindows)
                 {
@@ -170,27 +310,7 @@ namespace BuildXL.SandboxedProcessExecutor
                     writer.Write(false);
                     writer.Write(path.ToString(pathTable));
                 }
-            };
-
-            bool success = false;
-
-            ExceptionUtilities.HandleRecoverableIOException(
-                () =>
-                {
-                    using (FileStream stream = File.OpenWrite(Path.GetFullPath(m_configuration.SandboxedProcessResultOutputFile)))
-                    {
-                        result.Serialize(stream, writePath);
-                    }
-
-                    success = true;
-                },
-                ex =>
-                {
-                    m_logger.LogError(ex.ToString());
-                    success = false;
-                });
-
-            return success;
+            }
         }
 
         private bool TryPrepareSandboxedProcess(SandboxedProcessInfo info)
@@ -210,7 +330,7 @@ namespace BuildXL.SandboxedProcessExecutor
 
             if (info.GetCommandLine().Length > SandboxedProcessInfo.MaxCommandLineLength)
             {
-                m_logger.LogError($"Process command line is longer than {SandboxedProcessInfo.MaxCommandLineLength} characters: {info.GetCommandLine().Length}");
+                m_logger.LogError($"Process command line is longer than {SandboxedProcessInfo.MaxCommandLineLength} characters: {info.GetCommandLine()}");
                 return false;
             }
 
@@ -218,7 +338,7 @@ namespace BuildXL.SandboxedProcessExecutor
             info.StandardOutputObserver = m_outputErrorObserver.ObserveStandardOutputForWarning;
             info.StandardErrorObserver = m_outputErrorObserver.ObserveStandardErrorForWarning;
 
-            if (!TryPrepareWorkingDirectory(info) || !TryPrepareTemporaryFolders(info))
+            if (!TryPrepareWorkingDirectory(info) || !TryPrepareTemporaryDirectories(info) || !TryPreparePreCreatedDirectories(info))
             {
                 return false;
             }
@@ -226,6 +346,56 @@ namespace BuildXL.SandboxedProcessExecutor
             SetSandboxConnectionIfNeeded(info);
 
             return true;
+        }
+
+        private bool TryPreparePreCreatedDirectories(SandboxedProcessInfo info)
+        {
+            if (info.RemoteSandboxedProcessData == null)
+            {
+                return true;
+            }
+
+            foreach (var dir in info.RemoteSandboxedProcessData.TempDirectories)
+            {
+                var result = EnsureDirectoryExists(dir);
+                if (!result.Succeeded)
+                {
+                    m_logger.LogError($"Failed to prepare pre-created directory '{dir}': {result.Failure.DescribeIncludingInnerFailures()}");
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private Possible<UnitValue> EnsureDirectoryExists(string directory)
+        {
+            try
+            {
+                bool exists = false;
+
+                if (FileUtilities.DirectoryExistsNoFollow(directory))
+                {
+                    FileUtilities.DeleteDirectoryContents(directory, deleteRootDirectory: false);
+                    exists = true;
+                }
+                else if (FileUtilities.FileExistsNoFollow(directory))
+                {
+                    // We expect to produce a directory, but a file with the same name exists on disk.
+                    FileUtilities.DeleteFile(directory);
+                }
+
+                if (!exists)
+                {
+                    FileUtilities.CreateDirectory(directory);
+                }
+
+                return UnitValue.Unit;
+            }
+            catch (BuildXLException e)
+            {
+                return new Failure<string>(e.ToStringDemystified());
+            }
         }
 
         private void SetSandboxConnectionIfNeeded(SandboxedProcessInfo info)
@@ -277,7 +447,7 @@ namespace BuildXL.SandboxedProcessExecutor
             return true;
         }
 
-        private bool TryPrepareTemporaryFolders(SandboxedProcessInfo info)
+        private bool TryPrepareTemporaryDirectories(SandboxedProcessInfo info)
         {
             Contract.Requires(info != null);
 
@@ -285,14 +455,10 @@ namespace BuildXL.SandboxedProcessExecutor
             {
                 foreach (var redirection in info.RedirectedTempFolders)
                 {
-                    try
+                    var result = EnsureDirectoryExists(redirection.target);
+                    if (!result.Succeeded)
                     {
-                        FileUtilities.DeleteDirectoryContents(redirection.target, deleteRootDirectory: false);
-                        FileUtilities.CreateDirectory(redirection.target);
-                    }
-                    catch (BuildXLException e)
-                    {
-                        m_logger.LogError($"Failed to prepare temporary folder '{redirection.target}': {e.ToStringDemystified()}");
+                        m_logger.LogError($"Failed to prepare temporary directory '{redirection.target}': {result.Failure.DescribeIncludingInnerFailures()}");
                         return false;
                     }
                 }
@@ -303,16 +469,27 @@ namespace BuildXL.SandboxedProcessExecutor
                 if (info.EnvironmentVariables.ContainsKey(tmpEnvVar))
                 {
                     string tempPath = info.EnvironmentVariables[tmpEnvVar];
-
-                    try
+                    var result = EnsureDirectoryExists(tempPath);
+                    if (!result.Succeeded)
                     {
-                        FileUtilities.CreateDirectory(tempPath);
-                    }
-                    catch (BuildXLException e)
-                    {
-                        m_logger.LogError($"Failed to prepare temporary folder '{tempPath}': {e.ToStringDemystified()}");
+                        m_logger.LogError($"Failed to prepare temporary directory '{tempPath}': {result.Failure.DescribeIncludingInnerFailures()}");
                         return false;
-                    }
+                    }   
+                }
+            }
+
+            if (info.RemoteSandboxedProcessData == null)
+            {
+                return true;
+            }
+
+            foreach (var dir in info.RemoteSandboxedProcessData.TempDirectories)
+            {
+                var result = EnsureDirectoryExists(dir);
+                if (!result.Succeeded)
+                {
+                    m_logger.LogError($"Failed to prepare temporary directory '{dir}': {result.Failure.DescribeIncludingInnerFailures()}");
+                    return false;
                 }
             }
 
@@ -321,6 +498,8 @@ namespace BuildXL.SandboxedProcessExecutor
 
         private async Task<(ExitCode, SandboxedProcessResult)> ExecuteAsync(SandboxedProcessInfo info)
         {
+            m_logger.LogInfo($"Start execution: {info.GetCommandLine()}");
+
             FileAccessManifest fam = info.FileAccessManifest;
 
             try

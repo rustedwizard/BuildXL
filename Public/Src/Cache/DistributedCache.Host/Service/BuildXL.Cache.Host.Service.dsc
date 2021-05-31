@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 namespace Service {
+    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNet472AndNetStandard20;
 
     @@public
     export const dll = BuildXLSdk.library({
@@ -18,12 +19,11 @@ namespace Service {
             importFrom("BuildXL.Cache.ContentStore").Interfaces.dll,
             importFrom("BuildXL.Cache.ContentStore").Hashing.dll,
             importFrom("BuildXL.Cache.ContentStore").UtilitiesCore.dll,
-
+            
             importFrom("BuildXL.Cache.MemoizationStore").Library.dll,
+            ...addIfLazy(BuildXLSdk.Flags.isVstsArtifactsEnabled, () => [ importFrom("BuildXL.Cache.MemoizationStore").Vsts.dll ]),
             importFrom("BuildXL.Cache.MemoizationStore").Distributed.dll,
             importFrom("BuildXL.Cache.MemoizationStore").Interfaces.dll,
-
-            BuildXLSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").Contents.all, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
 
             importFrom("BuildXL.Utilities").dll,
             importFrom("BuildXL.Utilities").Branding.dll,

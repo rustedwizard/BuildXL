@@ -16,6 +16,21 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
     /// </summary>
     public static class TaskExtensions
     {
+        private const string Component = nameof(TaskExtensions);
+
+        /// <summary>
+        /// Conditionally inlines a function call
+        /// </summary>
+        public static Task<T> Run<T>(Func<T> action, bool inline)
+        {
+            if (!inline)
+            {
+                return Task.Run(action);
+            }
+
+            return Task.FromResult(action());
+        }
+
         /// <summary>
         /// When you want to call an <c>async</c> method but don't want to <c>await</c> it.
         /// </summary>
@@ -36,7 +51,9 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
                         string extraMessageText = string.IsNullOrEmpty(extraMessage) ? string.Empty : " " + extraMessage;
                         context.TraceMessage(
                             failureSeverity,
-                            $"Unhandled exception in fire and forget task for operation '{operation}'{extraMessageText}: {t.Exception?.Message}. FullException={t.Exception?.ToString()}");
+                            $"Unhandled exception in fire and forget task for operation '{operation}'{extraMessageText}: {t.Exception?.Message}. FullException={t.Exception?.ToString()}",
+                            Component,
+                            operation: operation);
                     }
 
                     if (failFast)
@@ -92,17 +109,19 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
                     {
                         context.Info(
                             $"Fire and forget task is canceled for operation '{operation}'. FullException={t.Exception?.ToString()}",
+                            Component,
                             operation: operation);
                     }
                     else if (t.Exception != null)
                     {
                         context.TraceMessage(severityOnException,
                             $"Unhandled exception in fire and forget task for operation '{operation}': {t.Exception?.Message}. FullException={t.Exception?.ToString()}",
+                            Component,
                             operation: operation);
                     }
                     else if (!t.Result.Succeeded)
                     {
-                        context.Warning($"Unhandled error in fire and forget task for operation '{operation}': {t.Result.ToString()}", operation: operation);
+                        context.Warning($"Unhandled error in fire and forget task for operation '{operation}': {t.Result}", Component, operation: operation);
                     }
                 });
         }
@@ -124,13 +143,17 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
                     {
                         context.TraceMessage(
                             failureSeverity,
-                            $"'{operation}' has failed: {t.Exception?.Message}. FullException={t.Exception?.ToString()}");
+                            $"'{operation}' has failed: {t.Exception?.Message}. FullException={t.Exception?.ToString()}",
+                            Component,
+                            operation: operation);
                     }
                     else if (!t.Result.Succeeded && !traceTaskExceptionsOnly)
                     {
                         context.TraceMessage(
                             failureSeverity,
-                            $"'{operation}' has failed: {t.Result.ToString()}");
+                            $"'{operation}' has failed: {t.Result}",
+                            Component,
+                            operation: operation);
                     }
                 });
         }
@@ -154,16 +177,16 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
                     if (t.IsCanceled)
                     {
                         context.Info(
-                            $"Operation '{operation}' is canceled.{message}", operation: operation);
+                            $"Operation '{operation}' is canceled.{message}", Component, operation: operation);
                     }
                     else if (t.Exception != null)
                     {
                         context.Warning(
-                            $"Unhandled exception in fire and forget task for operation '{operation}': {t.Exception?.Message}. FullException={t.Exception?.ToString()}", operation: operation);
+                            $"Unhandled exception in fire and forget task for operation '{operation}': {t.Exception?.Message}. FullException={t.Exception}", Component, operation: operation);
                     }
                     else if (!t.Result.Succeeded)
                     {
-                        context.Warning($"Unhandled error in fire and forget task for operation '{operation}': {t.Result.ToString()}", operation: operation);
+                        context.Warning($"Unhandled error in fire and forget task for operation '{operation}': {t.Result}", Component, operation: operation);
                     }
                 });
 
@@ -186,8 +209,9 @@ namespace BuildXL.Cache.ContentStore.Interfaces.Extensions
                 t =>
                 {
                     context.Warning(
-                        $"Unhandled exception in fire and forget task for operation '{operation}': {t.Exception?.Message}. FullException={t.Exception?.ToString()}"
-                        , operation: operation);
+                        $"Unhandled exception in fire and forget task for operation '{operation}': {t.Exception?.Message}. FullException={t.Exception?.ToString()}",
+                        Component,
+                        operation: operation);
                 },
                 TaskContinuationOptions.OnlyOnFaulted);
 

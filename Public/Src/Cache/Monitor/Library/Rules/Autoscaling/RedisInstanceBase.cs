@@ -7,6 +7,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
+using BuildXL.Cache.ContentStore.Tracing;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.Monitor.Library.Rules.Autoscaling;
 using Microsoft.Azure.Management.Fluent;
 using Microsoft.Azure.Management.Redis.Fluent;
@@ -19,9 +21,15 @@ namespace BuildXL.Cache.Monitor.App.Rules.Autoscaling
         protected readonly string ResourceId;
         protected IRedisCache RedisCache;
 
+        protected Tracer Tracer { get; } = new Tracer(nameof(RedisInstance));
+
         public string Id => RedisCache.Id;
 
         public string Name => RedisCache.Name;
+
+        public string State => RedisCache.ProvisioningState;
+
+        public bool IsFailed => RedisCache.ProvisioningState == "Failed";
 
         public bool IsReadyToScale => RedisCache.ProvisioningState == "Succeeded";
 
@@ -58,6 +66,6 @@ namespace BuildXL.Cache.Monitor.App.Rules.Autoscaling
             return new Result<(IRedisCache Cache, RedisClusterSize Size)>((redisCache, clusterSize));
         }
 
-        public abstract Task<BoolResult> ScaleAsync(IReadOnlyList<RedisClusterSize> scalePath, CancellationToken cancellationToken = default);
+        public abstract Task<BoolResult> ScaleAsync(OperationContext context, IReadOnlyList<RedisClusterSize> scalePath);
     }
 }

@@ -763,6 +763,19 @@ namespace Test.BuildXL.Scheduler
                 patterns: ReadOnlyArray<StringId>.Empty);
         }
 
+        protected SealDirectory CreateSealDirectory(AbsolutePath root, SealDirectoryKind sealDirectoryKind, bool scrub, params FileArtifact[] files)
+        {
+            return new SealDirectory(
+                directoryRoot: root,
+                contents: SortedReadOnlyArray<FileArtifact, OrdinalFileArtifactComparer>.CloneAndSort(files, OrdinalFileArtifactComparer.Instance),
+                outputDirectoryContents: CollectionUtilities.EmptySortedReadOnlyArray<DirectoryArtifact, OrdinalDirectoryArtifactComparer>(OrdinalDirectoryArtifactComparer.Instance),
+                kind: sealDirectoryKind,
+                provenance: CreateProvenance(),
+                tags: ReadOnlyArray<StringId>.Empty,
+                patterns: ReadOnlyArray<StringId>.Empty,
+                scrub: scrub);
+        }
+
         protected SealDirectory CreateAndScheduleSealDirectory(AbsolutePath root, SealDirectoryKind sealDirectoryKind, params FileArtifact[] files)
         {
             var seal = CreateSealDirectory(root, sealDirectoryKind, files);
@@ -1128,6 +1141,7 @@ namespace Test.BuildXL.Scheduler
                         switch (op.OpType)
                         {
                             case Operation.Type.WriteFile:
+                            case Operation.Type.WriteEnvVariableToFile:
                             case Operation.Type.WriteFileWithRetries:
                                 dao.Outputs.Add(op.Path.FileArtifact);
                                 break;

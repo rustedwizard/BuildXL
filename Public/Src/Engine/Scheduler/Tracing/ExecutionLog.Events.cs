@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics.ContractsLight;
 using System.Linq;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Pips;
@@ -109,7 +110,7 @@ namespace BuildXL.Scheduler.Tracing
         void BxlInvocation(BxlInvocationEventData data);
 
         /// <summary>
-        /// Creates a worker target that logs back to master for distributed builds
+        /// Creates a worker target that logs back to orchestrator for distributed builds
         /// </summary>
         /// <param name="workerId"></param>
         IExecutionLogTarget CreateWorkerTarget(uint workerId);
@@ -780,32 +781,15 @@ namespace BuildXL.Scheduler.Tracing
     public struct RecordFileForBuildManifestEventData : IExecutionLogEventData<RecordFileForBuildManifestEventData>
     {
         /// <summary>
-        /// DropName to identify the drop.
+        /// List of build manifest related XLG records.
         /// </summary>
-        public string DropName;
-
-        /// <summary>
-        /// Relative File Path of given file inside the drop.
-        /// </summary>
-        public string RelativePath;
-
-        /// <summary>
-        /// Azure Artifact (VSO) Content Hash of the file.
-        /// </summary>
-        public ContentHash AzureArtifactsHash;
-
-        /// <summary>
-        /// SHA-256 Content Hash of the file.
-        /// </summary>
-        public ContentHash BuildManifestHash;
+        public List<BuildManifestEntry> Records;
 
         /// <nodoc/>
-        public RecordFileForBuildManifestEventData(string dropName, string relativePath, ContentHash azureArtifactsHash, ContentHash buildManifestHash)
+        public RecordFileForBuildManifestEventData(List<BuildManifestEntry> records)
         {
-            DropName = dropName;
-            RelativePath = relativePath;
-            AzureArtifactsHash = azureArtifactsHash;
-            BuildManifestHash = buildManifestHash;
+            Contract.Requires(records != null);
+            Records = records;
         }
 
         /// <inheritdoc />
@@ -814,19 +798,31 @@ namespace BuildXL.Scheduler.Tracing
         /// <inheritdoc />
         public void Serialize(BinaryLogger.EventWriter writer)
         {
-            writer.Write(DropName);
-            writer.Write(RelativePath);
-            AzureArtifactsHash.Serialize(writer);
-            BuildManifestHash.Serialize(writer);
+            writer.Write(Records.Count);
+            foreach (var record in Records)
+            {
+                writer.Write(record.DropName);
+                writer.Write(record.RelativePath);
+                record.AzureArtifactsHash.Serialize(writer);
+                record.BuildManifestHash.Serialize(writer);
+            }
         }
 
         /// <inheritdoc />
         public void DeserializeAndUpdate(BinaryLogReader.EventReader reader)
         {
-            DropName = reader.ReadString();
-            RelativePath = reader.ReadString();
-            AzureArtifactsHash = new ContentHash(reader);
-            BuildManifestHash = new ContentHash(reader);
+            int count = reader.ReadInt32();
+            Records = new List<BuildManifestEntry>(count);
+
+            for (int i = 0; i < count; i++) 
+            {
+                string dropName = reader.ReadString();
+                string relativePath = reader.ReadString();
+                ContentHash azureArtifactsHash = new ContentHash(reader);
+                ContentHash buildManifestHash = new ContentHash(reader);
+
+                Records.Add(new BuildManifestEntry(dropName, relativePath, azureArtifactsHash, buildManifestHash));
+            };
         }
     }
 

@@ -2,17 +2,10 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Collections.Generic;
-using System.Diagnostics.ContractsLight;
 using System.IO;
-using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
-using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
-using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
-using BuildXL.Cache.ContentStore.Interfaces.Utils;
 using BuildXL.Cache.ContentStore.Stores;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.Utils;
@@ -39,16 +32,6 @@ namespace BuildXL.Cache.ContentStore.Distributed.Utilities
             }
 
             return new MachineLocation(cacheRoot.Path.ToUpperInvariant());
-        }
-
-        /// <inheritdoc />
-        public virtual Task<FileExistenceResult> CheckFileExistsAsync(OperationContext context, ContentLocation sourceLocation)
-        {
-            var path = new AbsolutePath(sourceLocation.Machine.Path) / FileSystemContentStoreInternal.GetPrimaryRelativePath(sourceLocation.Hash, includeSharedFolder: false);
-
-            var resultCode = FileUtilities.Exists(path.Path) ? FileExistenceResult.ResultCode.FileExists : FileExistenceResult.ResultCode.FileNotFound;
-
-            return Task.FromResult(new FileExistenceResult(resultCode));
         }
 
         /// <inheritdoc />

@@ -18,6 +18,9 @@ using BuildXL.Cache.Host.Configuration;
 using BuildXL.Cache.MemoizationStore.Distributed.Stores;
 using BuildXL.Cache.MemoizationStore.Interfaces.Caches;
 using BuildXL.Cache.MemoizationStore.Interfaces.Stores;
+#if MICROSOFT_INTERNAL
+using BuildXL.Cache.MemoizationStore.Vsts;
+#endif
 using BuildXL.Cache.MemoizationStore.Service;
 using BuildXL.Cache.MemoizationStore.Sessions;
 using BuildXL.Cache.MemoizationStore.Stores;
@@ -123,15 +126,30 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             if (distributedSettings?.EnableMetadataStore == true)
             {
+                _logger.Always("Creating local server with content and metadata store");
+
                 var factory = CreateDistributedContentStoreFactory();
 
                 Func<AbsolutePath, ICache> cacheFactory = path =>
                 {
-                    return new OneLevelCache(
+                    var distributedCache = new OneLevelCache(
                         contentStoreFunc: () => contentStoreFactory(path),
                         memoizationStoreFunc: () => CreateServerSideLocalMemoizationStore(path, factory),
                         Guid.NewGuid(),
                         passContentToMemoization: true);
+
+                    ICache cacheToReturn = distributedCache;
+#if MICROSOFT_INTERNAL
+                    if (distributedSettings.EnablePublishingCache)
+                    {
+                        cacheToReturn = new PublishingCache<OneLevelCache>(
+                            local: distributedCache,
+                            remote: new BuildCachePublishingStore(contentSource: distributedCache, _fileSystem, distributedSettings.PublishingConcurrencyLimit),
+                            Guid.NewGuid());
+                    }
+#endif
+
+                    return cacheToReturn;
                 };
 
                 return new LocalCacheServer(
@@ -139,10 +157,13 @@ namespace BuildXL.Cache.Host.Service.Internal
                     _logger,
                     _arguments.Configuration.LocalCasSettings.ServiceSettings.ScenarioName,
                     cacheFactory,
-                    localServerConfiguration);
+                    localServerConfiguration,
+                    capabilities: distributedSettings.EnablePublishingCache ? Capabilities.All : Capabilities.AllNonPublishing);
             }
             else
             {
+                _logger.Always("Creating local server with content store only");
+
                 return new LocalContentServer(
                     _fileSystem,
                     _logger,
@@ -174,14 +195,29 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             if (distributedSettings.EnableMetadataStore || distributedSettings.EnableDistributedCache)
             {
+                _logger.Always("Creating distributed server with content and metadata store");
+
                 Func<AbsolutePath, ICache> cacheFactory = path =>
                 {
                     if (distributedSettings.EnableDistributedCache)
                     {
-                        return new DistributedOneLevelCache(topLevelAndPrimaryStore.topLevelStore,
+                        var distributedCache = new DistributedOneLevelCache(topLevelAndPrimaryStore.topLevelStore,
                             topLevelAndPrimaryStore.primaryDistributedStore,
                             Guid.NewGuid(),
                             passContentToMemoization: true);
+
+                        ICache cacheToReturn = distributedCache;
+#if MICROSOFT_INTERNAL
+                        if (distributedSettings.EnablePublishingCache)
+                        {
+                            cacheToReturn = new PublishingCache<DistributedOneLevelCache>(
+                                local: distributedCache,
+                                remote: new BuildCachePublishingStore(contentSource: distributedCache, _fileSystem, distributedSettings.PublishingConcurrencyLimit),
+                                Guid.NewGuid());
+                        }
+#endif
+
+                        return cacheToReturn;
                     }
                     else
                     {
@@ -202,16 +238,21 @@ namespace BuildXL.Cache.Host.Service.Internal
                     _logger,
                     _arguments.Configuration.LocalCasSettings.ServiceSettings.ScenarioName,
                     cacheFactory,
-                    localServerConfiguration);
+                    localServerConfiguration,
+                    capabilities: distributedSettings.EnablePublishingCache ? Capabilities.All : Capabilities.AllNonPublishing,
+                    factory.GetAdditionalEndpoints());
             }
             else
             {
+                _logger.Always("Creating distributed server with content store only");
+
                 return new LocalContentServer(
                     _fileSystem,
                     _logger,
                     cacheConfig.LocalCasSettings.ServiceSettings.ScenarioName,
                     path => topLevelAndPrimaryStore.topLevelStore,
-                    localServerConfiguration);
+                    localServerConfiguration,
+                    factory.GetAdditionalEndpoints());
             }
         }
 
@@ -235,15 +276,16 @@ namespace BuildXL.Cache.Host.Service.Internal
             {
                 var config = new RocksDbMemoizationStoreConfiguration()
                 {
-                    Database = new RocksDbContentLocationDatabaseConfiguration(path / "RocksDbMemoizationStore")
-                    {
-                        CleanOnInitialize = false,
-                        OnFailureDeleteExistingStoreAndRetry = true,
-                        LogsKeepLongTerm = true,
-                        MetadataGarbageCollectionEnabled = true,
-                        MetadataGarbageCollectionMaximumNumberOfEntriesToKeep = distributedSettings.MaximumNumberOfMetadataEntriesToStore,
-                    },
+                    Database = RocksDbContentLocationDatabaseConfiguration.FromDistributedContentSettings(
+                        distributedSettings,
+                        databasePath: path / "RocksDbMemoizationStore",
+                        logsBackupPath: null,
+                        logsKeepLongTerm: true),
                 };
+
+                config.Database.CleanOnInitialize = false;
+                config.Database.OnFailureDeleteExistingStoreAndRetry = true;
+                config.Database.MetadataGarbageCollectionEnabled = true;
 
                 return new RocksDbMemoizationStore(_logger, SystemClock.Instance, config);
             }
@@ -256,24 +298,20 @@ namespace BuildXL.Cache.Host.Service.Internal
         {
             serviceConfiguration.GrpcPort = localCasServiceSettings.GrpcPort;
             serviceConfiguration.BufferSizeForGrpcCopies = localCasServiceSettings.BufferSizeForGrpcCopies;
-            serviceConfiguration.GzipBarrierSizeForGrpcCopies = localCasServiceSettings.GzipBarrierSizeForGrpcCopies;
             serviceConfiguration.ProactivePushCountLimit = localCasServiceSettings.MaxProactivePushRequestHandlers;
+            serviceConfiguration.CopyRequestHandlingCountLimit = localCasServiceSettings.MaxCopyFromHandlers;
 
             var localContentServerConfiguration = new LocalServerConfiguration(serviceConfiguration);
-
+            
             ApplyIfNotNull(localCasServiceSettings.UnusedSessionTimeoutMinutes, value => localContentServerConfiguration.UnusedSessionTimeout = TimeSpan.FromMinutes(value));
             ApplyIfNotNull(localCasServiceSettings.UnusedSessionHeartbeatTimeoutMinutes, value => localContentServerConfiguration.UnusedSessionHeartbeatTimeout = TimeSpan.FromMinutes(value));
             ApplyIfNotNull(localCasServiceSettings.GrpcCoreServerOptions, value => localContentServerConfiguration.GrpcCoreServerOptions = value);
             ApplyIfNotNull(localCasServiceSettings.GrpcEnvironmentOptions, value => localContentServerConfiguration.GrpcEnvironmentOptions = value);
+            ApplyIfNotNull(localCasServiceSettings.DoNotShutdownSessionsInUse, value => localContentServerConfiguration.DoNotShutdownSessionsInUse = value);
 
             ApplyIfNotNull(distributedSettings?.UseUnsafeByteStringConstruction, value =>
             {
                 GrpcExtensions.UnsafeByteStringOptimizations = value;
-            });
-
-            ApplyIfNotNull(distributedSettings?.Unsafe_DisableDeprecatedConcurrentAccessLock, value =>
-            {
-                PassThroughFileSystem.ConcurrentAccess = new System.Threading.SemaphoreSlim(int.MaxValue);
             });
 
             ApplyIfNotNull(distributedSettings?.ShutdownEvictionBeforeHibernation, value => localContentServerConfiguration.ShutdownEvictionBeforeHibernation = value);
@@ -322,11 +360,11 @@ namespace BuildXL.Cache.Host.Service.Internal
                 (int)localCasSettings.ServiceSettings.GrpcPort,
                 grpcPortFileName: localCasSettings.ServiceSettings.GrpcPortFileName,
                 bufferSizeForGrpcCopies: localCasSettings.ServiceSettings.BufferSizeForGrpcCopies,
-                gzipBarrierSizeForGrpcCopies: localCasSettings.ServiceSettings.GzipBarrierSizeForGrpcCopies,
                 proactivePushCountLimit: localCasSettings.ServiceSettings.MaxProactivePushRequestHandlers,
                 logIncrementalStatsInterval: distributedSettings?.LogIncrementalStatsInterval,
                 logMachineStatsInterval: distributedSettings?.LogMachineStatsInterval,
-                logIncrementalStatsCounterNames: distributedSettings?.IncrementalStatisticsCounterNames);
+                logIncrementalStatsCounterNames: distributedSettings?.IncrementalStatisticsCounterNames,
+                asyncSessionShutdownTimeout: distributedSettings?.AsyncSessionShutdownTimeout);
 
             ApplyIfNotNull(distributedSettings?.TraceServiceGrpcOperations, v => result.TraceGrpcOperation = v);
             return result;
@@ -339,7 +377,7 @@ namespace BuildXL.Cache.Host.Service.Internal
             var maxSizeQuota = new MaxSizeQuota(cacheSizeQuotaString);
             var casConfig = new ContentStoreConfiguration(maxSizeQuota);
 
-            casConfig.Write(fileSystem, rootPath).GetAwaiter().GetResult();
+            casConfig.Write(fileSystem, rootPath);
         }
     }
 }

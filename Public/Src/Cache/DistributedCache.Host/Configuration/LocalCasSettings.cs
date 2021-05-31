@@ -9,6 +9,8 @@ using System.Runtime.Serialization;
 using BuildXL.Cache.ContentStore.Interfaces.FileSystem;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
 
+#nullable disable
+
 namespace BuildXL.Cache.Host.Configuration
 {
     [DataContract]
@@ -38,8 +40,7 @@ namespace BuildXL.Cache.Host.Configuration
             uint grpcPort = 0,
             string grpcPortFileName = null,
             bool supportsProactiveReplication = true,
-            int? bufferSizeForGrpcCopies = null,
-            int? gzipBarrierSizeForGrpcCopies = null)
+            int? bufferSizeForGrpcCopies = null)
         {
             CasClientSettings = new LocalCasClientSettings(useCasService, cacheName, connectionsPerSession, retryIntervalSecondsOnFailServiceCalls, retryCountOnFailServiceCalls);
 
@@ -50,8 +51,7 @@ namespace BuildXL.Cache.Host.Configuration
                 scenarioName: scenarioName,
                 grpcPort: grpcPort,
                 grpcPortFileName: grpcPortFileName,
-                bufferSizeForGrpcCopies: bufferSizeForGrpcCopies,
-                gzipBarrierSizeForGrpcCopies: gzipBarrierSizeForGrpcCopies);
+                bufferSizeForGrpcCopies: bufferSizeForGrpcCopies);
 
             AddNamedCache(cacheName, new NamedCacheSettings(
                 cacheRootPath, cacheSizeQuotaString, supportsSensitiveSessions, supportsProactiveReplication, requiredCapabilites: null));
@@ -198,6 +198,14 @@ namespace BuildXL.Cache.Host.Configuration
             }
 
             return settings;
+        }
+
+        public void AddNamedCache(string cacheName, string cacheRoot)
+        {
+            AddNamedCache(cacheName, new NamedCacheSettings()
+            {
+                CacheRootPath = cacheRoot
+            });
         }
 
         private void AddNamedCache(string cacheName, NamedCacheSettings settings)

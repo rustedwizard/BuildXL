@@ -3,8 +3,12 @@
 
 using System;
 using System.Diagnostics.ContractsLight;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
+
+#pragma warning disable CS3001 // CLS
+#pragma warning disable CS3003
 
 namespace BuildXL.Cache.ContentStore.Hashing
 {
@@ -78,7 +82,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
 
                 var blocks = (uint*)(data + numBlocks * 4);
 
-                for(int i = -numBlocks; i > 0; i++)
+                for(int i = -numBlocks; i < 0; i++)
                 {
                     uint k1 = blocks[i];
 
@@ -165,7 +169,7 @@ namespace BuildXL.Cache.ContentStore.Hashing
         }
 
         /// <inheritdoc />
-        public bool Equals(MurmurHash3_32 other)
+        public bool Equals([AllowNull]MurmurHash3_32 other)
         {
             return other.Hash == Hash;
         }

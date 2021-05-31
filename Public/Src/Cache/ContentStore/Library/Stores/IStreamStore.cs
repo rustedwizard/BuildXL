@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Hashing;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
+using BuildXL.Cache.ContentStore.Tracing.Internal;
 
 namespace BuildXL.Cache.ContentStore.Stores
 {
@@ -15,10 +16,14 @@ namespace BuildXL.Cache.ContentStore.Stores
         /// Writes content for a given hash to a stream.
         /// </summary>
         Task<OpenStreamResult> StreamContentAsync(Context context, ContentHash contentHash);
+    }
 
+    /// <nodoc/>
+    public interface IDistributedStreamStore
+    {
         /// <summary>
-        /// Checks if content exists in the cache.
+        /// Gets the content for the given hash. Optionally copying from a peer if available.
         /// </summary>
-        Task<FileExistenceResult> CheckFileExistsAsync(Context context, ContentHash contentHash);
+        Task<OpenStreamResult> OpenStreamAsync(OperationContext context, ContentHash contentHash);
     }
 }

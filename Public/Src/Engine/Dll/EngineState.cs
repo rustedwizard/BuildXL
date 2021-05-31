@@ -9,7 +9,7 @@ using BuildXL.Engine.Tracing;
 using BuildXL.Pips;
 using BuildXL.Pips.Graph;
 using BuildXL.Scheduler;
-using BuildXL.Scheduler.Graph;
+using BuildXL.Storage;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Instrumentation.Common;
 using BuildXL.Utilities.Qualifier;
@@ -148,7 +148,21 @@ namespace BuildXL.Engine
             }
         }
 
-        private SchedulerState m_schedulerState;
+        private readonly SchedulerState m_schedulerState;
+
+        /// <summary>
+        /// File content table
+        /// </summary>
+        public FileContentTable FileContentTable
+        {
+            get
+            {
+                Contract.Requires(!IsDisposed);
+                return m_fileContentTable;
+            }
+        }
+
+        private readonly FileContentTable m_fileContentTable;
 
         /// <summary>
         /// Whether this instance got disposed.
@@ -166,13 +180,14 @@ namespace BuildXL.Engine
             PipGraph pipGraph,
             MountPathExpander mountPathExpander,
             SchedulerState schedulerState,
-            HistoricTableSizes historicTableSizes)
+            HistoricTableSizes historicTableSizes,
+            FileContentTable fileContentTable)
         {
             Contract.Requires(graphId != default(Guid), "GraphId is not unique enough to be represented in EngineState");
-            Contract.Requires(stringTable != null, "StringTable cannot be null");
-            Contract.Requires(pathTable != null, "PathTable cannot be null");
-            Contract.Requires(symbolTable != null, "SymbolTable cannot be null");
-            Contract.Requires(qualifierTable != null, "QualifierTable cannot be null");
+            Contract.Requires(stringTable != null);
+            Contract.Requires(pathTable != null);
+            Contract.Requires(symbolTable != null);
+            Contract.Requires(qualifierTable != null);
             Contract.Requires(stringTable == pathTable.StringTable);
             Contract.Requires(pathTable.StringTable == symbolTable.StringTable);
             Contract.Requires(pathTable.StringTable == qualifierTable.StringTable);
@@ -182,6 +197,7 @@ namespace BuildXL.Engine
             Contract.Requires(mountPathExpander != null);
             Contract.Requires(schedulerState != null);
             Contract.Requires(historicTableSizes != null);
+            Contract.Requires(fileContentTable != null);
 
             m_stringTable = stringTable;
             m_pathTable = pathTable;
@@ -193,6 +209,7 @@ namespace BuildXL.Engine
             m_schedulerState = schedulerState;
             m_graphId = graphId;
             m_historicTableSizes = historicTableSizes;
+            m_fileContentTable = fileContentTable;
         }
 
         private EngineState(bool disposed)
@@ -220,7 +237,8 @@ namespace BuildXL.Engine
                 engineSchedule.Scheduler.PipGraph,
                 engineSchedule.MountPathExpander,
                 schedulerState,
-                engineSchedule.Context.HistoricTableSizes);
+                engineSchedule.Context.HistoricTableSizes,
+                engineSchedule.FileContentTable);
         }
 
         /// <summary>
@@ -232,12 +250,75 @@ namespace BuildXL.Engine
         }
 
         /// <summary>
-        /// Updates the SchedulerState with new RootFilter and FilterPassingNodes
+        /// Returns a new EngineState updating the SchedulerState with new RootFilter and FilterPassingNodes
+        /// The current instance becomes unusable after this call.
         /// </summary>
-        public void UpdateSchedulerState(Scheduler.Scheduler scheduler)
+        /// <returns>The updated engine state </returns>
+        public EngineState WithUpdatedSchedulerState(Scheduler.Scheduler scheduler)
         {
+            Contract.Requires(!IsDisposed);
             m_schedulerState?.Dispose();
-            m_schedulerState = new SchedulerState(scheduler);
+
+            IsDisposed = true;
+            return new EngineState(
+                m_graphId,
+                m_stringTable,
+                m_pathTable,
+                m_symbolTable,
+                m_qualifierTable,
+                m_pipTable,
+                m_pipGraph,
+                m_mountPathExpander,
+                new SchedulerState(scheduler),
+                m_historicTableSizes,
+                m_fileContentTable);
+        }
+
+        /// <summary>
+        /// Returns a new EngineState updating the FileContentTable
+        /// The current instance becomes unusable after this call.
+        /// </summary>
+        /// <returns>The updated engine state </returns>
+        public EngineState WithUpdatedFileContentTable(FileContentTable fileContentTable)
+        {
+            Contract.Requires(!IsDisposed);
+
+            IsDisposed = true;
+            return new EngineState(
+                m_graphId,
+                m_stringTable,
+                m_pathTable,
+                m_symbolTable,
+                m_qualifierTable,
+                m_pipTable,
+                m_pipGraph,
+                m_mountPathExpander,
+                m_schedulerState,
+                m_historicTableSizes,
+                fileContentTable);
+        }
+
+        /// <summary>
+        /// Returns a new EngineState preserving the state except for the replaced FileContentTable.
+        /// The current EngineState becomes unusable after this call.
+        /// </summary>
+        public EngineState WithFileContentTable(FileContentTable fileContentTable)
+        {
+            Contract.Requires(!IsDisposed);
+            
+            IsDisposed = true;
+            return new EngineState(
+                m_graphId,
+                m_stringTable,
+                m_pathTable,
+                m_symbolTable,
+                m_qualifierTable,
+                m_pipTable,
+                m_pipGraph,
+                m_mountPathExpander,
+                m_schedulerState,
+                m_historicTableSizes,
+                fileContentTable);
         }
 
         /// <summary>

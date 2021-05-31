@@ -90,7 +90,9 @@ namespace Test.BuildXL.FrontEnd.Rush
             string rushExports = null,
             string moduleName = "Test",
             bool addDScriptResolver = false,
-            string commonTempFolder = null)
+            string commonTempFolder = null,
+            string schedulingCallback = null,
+            string customScripts = null)
         {
             environment ??= new Dictionary<string, string> { 
                 ["PATH"] = PathToNodeFolder,
@@ -105,7 +107,9 @@ namespace Test.BuildXL.FrontEnd.Rush
                 rushExports,
                 moduleName,
                 addDScriptResolver,
-                commonTempFolder);
+                commonTempFolder,
+                schedulingCallback,
+                customScripts);
         }
 
         /// <inheritdoc/>
@@ -117,7 +121,9 @@ namespace Test.BuildXL.FrontEnd.Rush
             string rushExports = null,
             string moduleName = "Test",
             bool addDScriptResolver = false,
-            string commonTempFolder = null)
+            string commonTempFolder = null,
+            string schedulingCallback = null,
+            string customScripts = null)
         {
             environment ??= new Dictionary<string, DiscriminatingUnion<string, UnitValue>> { 
                 ["PATH"] = new DiscriminatingUnion<string, UnitValue>(PathToNodeFolder),
@@ -143,7 +149,9 @@ namespace Test.BuildXL.FrontEnd.Rush
                     addDScriptResolver: addDScriptResolver,
                     // Let's assume for simplicity that if a custom common temp folder is passed, that means
                     // we want to use the shrinkwrap-deps file to track dependencies
-                    trackDependenciesWithShrinkwrapDepsFile: commonTempFolder != null));
+                    trackDependenciesWithShrinkwrapDepsFile: commonTempFolder != null,
+                    schedulingCallback: schedulingCallback,
+                    customScripts: customScripts));
         }
 
         protected BuildXLEngineResult RunRushProjects(
@@ -231,7 +239,9 @@ namespace Test.BuildXL.FrontEnd.Rush
             string rushExports,
             string moduleName,
             bool addDScriptResolver,
-            bool trackDependenciesWithShrinkwrapDepsFile) => $@"
+            bool trackDependenciesWithShrinkwrapDepsFile,
+            string schedulingCallback,
+            string customScripts) => $@"
 config({{
     resolvers: [
         {{
@@ -245,8 +255,10 @@ config({{
             {(rushBaseLibLocation != null ? $"rushLibBaseLocation: d`{rushBaseLibLocation}`," : string.Empty)}
             {(rushExports != null ? $"exports: {rushExports}," : string.Empty)}
             {(trackDependenciesWithShrinkwrapDepsFile ? $"trackDependenciesWithShrinkwrapDepsFile: true," : string.Empty)}
+            {(schedulingCallback != null? $"customScheduling: {schedulingCallback}," : string.Empty)}
+            {(customScripts != null ? $"customScripts: {customScripts}," : string.Empty)}
         }},
-        {(addDScriptResolver?  "{kind: 'DScript', modules: [f`module.config.dsc`]}" : string.Empty)}
+        {(addDScriptResolver? "{kind: 'DScript', modules: [f`module.config.dsc`, f`${Context.getBuildEngineDirectory()}/Sdk/Sdk.Transformers/package.config.dsc`]}" : string.Empty)}
     ],
 }});";
 
@@ -267,9 +279,14 @@ config({{
                 string rushJson = File.ReadAllText(pathToRushJson);
 
                 // Update the initial template created by 'rush init' to accept a higher version of node
-                var updatedRushJson = rushJson.Replace(
+                // Also update the pnpm version to make it work correctly with node
+                var updatedRushJson = rushJson
+                    .Replace(
                     "\"nodeSupportedVersionRange\": \">=10.13.0 <11.0.0\"",
-                    "\"nodeSupportedVersionRange\": \">=10.13.0 <13.3.1\"");
+                    "\"nodeSupportedVersionRange\": \">=10.13.0 <15.2.2\"")
+                    .Replace(
+                    "\"pnpmVersion\": \"2.15.1\"",
+                    "\"pnpmVersion\": \"5.0.2\"");
 
                 File.WriteAllText(pathToRushJson, updatedRushJson);
             }

@@ -28,7 +28,6 @@ using BuildXL.Interop.Unix;
 using BuildXL.Native.IO;
 using BuildXL.Processes;
 using BuildXL.Processes.Containers;
-using BuildXL.Storage;
 using BuildXL.Utilities;
 using BuildXL.Utilities.Collections;
 using BuildXL.Utilities.Configuration;
@@ -138,7 +137,8 @@ namespace BuildXL.FrontEnd.Nuget
                     pathToModuleConfig,
                     new[] { pathToSpec },
                     allowedModuleDependencies: null,
-                    cyclicalFriendModules: null); // A NuGet package does not have any module dependency restrictions nor allowlists cycles
+                    cyclicalFriendModules: null, // A NuGet package does not have any module dependency restrictions nor allowlists cycles
+                    mounts: null);
             });
         }
 
@@ -675,7 +675,8 @@ namespace BuildXL.FrontEnd.Nuget
         {
             // We point the embedded resolver to all the downloaded packages that contain a DScript package config file
             var embeddedSpecs = values.Where(nugetPackage => nugetPackage.PackageOnDisk.ModuleConfigFile.IsValid)
-                .Select(nugetPackage => nugetPackage.PackageOnDisk.ModuleConfigFile).ToArray();
+                .Select(nugetPackage => new DiscriminatingUnion<AbsolutePath, IInlineModuleDefinition>(
+                    nugetPackage.PackageOnDisk.ModuleConfigFile)).ToArray();
 
             var settings = new SourceResolverSettings { Modules = embeddedSpecs };
 
@@ -1408,7 +1409,10 @@ namespace BuildXL.FrontEnd.Nuget
                         "CLOUDBUILD_BUILDXL_SELFHOST_FEED_PAT",
 
                         // Auth material needed for low-privilege build.
-                        "QAUTHMATERIALROOT"
+                        "QAUTHMATERIALROOT",
+
+                        // Used by the artifacts credential provider. See here for more information on how this variable is configured - https://github.com/microsoft/artifacts-credprovider#azure-devops-server
+                        "VSS_NUGET_EXTERNAL_FEED_ENDPOINTS"
                     })
                 .Override(
                     new Dictionary<string, string>()

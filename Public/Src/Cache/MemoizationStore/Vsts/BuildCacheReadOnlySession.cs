@@ -26,7 +26,6 @@ using BuildXL.Cache.ContentStore.Synchronization;
 using BuildXL.Cache.ContentStore.Tracing;
 using BuildXL.Cache.ContentStore.Tracing.Internal;
 using BuildXL.Cache.ContentStore.UtilitiesCore.Internal;
-using BuildXL.Cache.ContentStore.Utils;
 using BuildXL.Cache.ContentStore.Vsts;
 using BuildXL.Cache.MemoizationStore.Interfaces.Results;
 using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
@@ -126,10 +125,13 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         private readonly bool _overrideUnixFileAccessMode;
 
         private Context _eagerFingerprintIncorporationTracingContext; // must be set at StartupAsync
-        private readonly NagleQueue<StrongFingerprint> _eagerFingerprintIncorporationNagleQueue;
+        private readonly BuildXL.Utilities.Collections.NagleQueue<StrongFingerprint> _eagerFingerprintIncorporationNagleQueue;
 
         /// <nodoc />
         protected readonly bool ManuallyExtendContentLifetime;
+
+        /// <nodoc />
+        protected readonly bool ForceUpdateOnAddContentHashList;
 
         /// <summary>
         ///     Initializes a new instance of the <see cref="BuildCacheReadOnlySession"/> class.
@@ -152,10 +154,11 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         /// <param name="overrideUnixFileAccessMode">If true, overrides default Unix file access modes when placing files.</param>
         /// <param name="tracer">A tracer for logging and perf counters.</param>
         /// <param name="enableEagerFingerprintIncorporation"><see cref="BuildCacheServiceConfiguration.EnableEagerFingerprintIncorporation"/></param>
-        /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiry"/></param>
-        /// <param name="eagerFingerprintIncorporationInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleInterval"/></param>
+        /// <param name="inlineFingerprintIncorporationExpiry"><see cref="BuildCacheServiceConfiguration.InlineFingerprintIncorporationExpiryHours"/></param>
+        /// <param name="eagerFingerprintIncorporationInterval"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleIntervalMinutes"/></param>
         /// <param name="eagerFingerprintIncorporationBatchSize"><see cref="BuildCacheServiceConfiguration.EagerFingerprintIncorporationNagleBatchSize"/></param>
         /// <param name="manuallyExtendContentLifetime">Whether to manually extend content lifetime when doing incorporate calls</param>
+        /// <param name="forceUpdateOnAddContentHashList">Whether to force an update and ignore existing CHLs when adding.</param>
         public BuildCacheReadOnlySession(
             IAbsFileSystem fileSystem,
             string name,
@@ -178,7 +181,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
             TimeSpan inlineFingerprintIncorporationExpiry,
             TimeSpan eagerFingerprintIncorporationInterval,
             int eagerFingerprintIncorporationBatchSize,
-            bool manuallyExtendContentLifetime)
+            bool manuallyExtendContentLifetime,
+            bool forceUpdateOnAddContentHashList)
         {
             Contract.Requires(name != null);
             Contract.Requires(contentHashListAdapter != null);
@@ -211,9 +215,11 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
 
             FingerprintTracker = new FingerprintTracker(DateTime.UtcNow + minimumTimeToKeepContentHashLists, rangeOfTimeToKeepContentHashLists);
 
+            ForceUpdateOnAddContentHashList = forceUpdateOnAddContentHashList;
+
             if (enableEagerFingerprintIncorporation)
             {
-                _eagerFingerprintIncorporationNagleQueue = NagleQueue<StrongFingerprint>.Create(IncorporateBatchAsync, maxDegreeOfParallelismForIncorporateRequests, eagerFingerprintIncorporationInterval, eagerFingerprintIncorporationBatchSize);
+                _eagerFingerprintIncorporationNagleQueue = BuildXL.Utilities.Collections.NagleQueue<StrongFingerprint>.Create(IncorporateBatchAsync, maxDegreeOfParallelismForIncorporateRequests, eagerFingerprintIncorporationInterval, eagerFingerprintIncorporationBatchSize);
             }
         }
 
@@ -261,7 +267,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 var backingContentSessionResult = await backingContentSessionTask.ConfigureAwait(false);
                 if (backingContentSessionResult.Succeeded && writeThroughContentSessionResult.Succeeded)
                 {
-                    _taskTracker = new BackgroundTaskTracker(Component, context.CreateNested());
+                    _taskTracker = new BackgroundTaskTracker(Component, context.CreateNested(Component));
                     result = BoolResult.Success;
                 }
                 else
@@ -508,16 +514,16 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 {
                     // TODO: Get the content hash list in a more efficient manner which does not require us to talk to BuildCache.
                     var hashListResult = await ContentHashListAdapter.GetContentHashListAsync(context, CacheNamespace, fingerprint.StrongFingerprint);
-                    if (!hashListResult.Succeeded || hashListResult.Data?.ContentHashListWithDeterminism.ContentHashList == null)
+                    if (!hashListResult.Succeeded || hashListResult.Value?.ContentHashListWithDeterminism.ContentHashList == null)
                     {
                         return new BoolResult(hashListResult, "Failed to get content hash list when attempting to extend its conetnts' lifetimes.");
                     }
 
-                    var expirationDate = new DateTime(Math.Max(hashListResult.Data.GetRawExpirationTimeUtc()?.Ticks ?? 0, fingerprint.ExpirationDateUtc.Ticks), DateTimeKind.Utc);
+                    var expirationDate = new DateTime(Math.Max(hashListResult.Value.GetRawExpirationTimeUtc()?.Ticks ?? 0, fingerprint.ExpirationDateUtc.Ticks), DateTimeKind.Utc);
 
                     var pinResults = await Task.WhenAll(await BackingContentSession.PinAsync(
                         context,
-                        hashListResult.Data.ContentHashListWithDeterminism.ContentHashList.Hashes,
+                        hashListResult.Value.ContentHashListWithDeterminism.ContentHashList.Hashes,
                         expirationDate));
 
                     if (pinResults.Any(r => !r.Succeeded))
@@ -566,12 +572,12 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                     return Result.FromError<Selector[]>(responseResult);
                 }
 
-                if (responseResult.Data == null)
+                if (responseResult.Value == null)
                 {
                     return Result.Success(CollectionUtilities.EmptyArray<Selector>());
                 }
 
-                foreach (var selectorAndPossible in responseResult.Data)
+                foreach (var selectorAndPossible in responseResult.Value)
                 {
                     var selector = selectorAndPossible.Selector;
                     if (selectorAndPossible.ContentHashList != null)
@@ -592,8 +598,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                     }
                 }
 
-                Tracer.MemoizationStoreTracer.GetSelectorsCount(context, weakFingerprint, responseResult.Data.Count());
-                return responseResult.Data.Select(responseData => responseData.Selector).ToArray();
+                Tracer.MemoizationStoreTracer.GetSelectorsCount(context, weakFingerprint, responseResult.Value.Count());
+                return responseResult.Value.Select(responseData => responseData.Selector).ToArray();
             }
             catch (Exception e)
             {
@@ -649,7 +655,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                     }
 
                     // No pre-fetched data. Need to query the server.
-                    ObjectResult<ContentHashListWithCacheMetadata> responseObject =
+                    Result<ContentHashListWithCacheMetadata> responseObject =
                         await ContentHashListAdapter.GetContentHashListAsync(context, CacheNamespace, strongFingerprint).ConfigureAwait(false);
 
                     if (!responseObject.Succeeded)
@@ -657,7 +663,7 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                         return new GetContentHashListResult(responseObject);
                     }
 
-                    ContentHashListWithCacheMetadata response = responseObject.Data;
+                    ContentHashListWithCacheMetadata response = responseObject.Value;
                     if (response.ContentHashListWithDeterminism.ContentHashList == null)
                     {
                         // Miss
@@ -821,16 +827,22 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
 
                 Tracer.Debug(
                             context,
-                    $"Adding contentHashList=[{valueToAdd.ContentHashListWithDeterminism.ContentHashList}] determinism=[{valueToAdd.ContentHashListWithDeterminism.Determinism}] to VSTS with contentAvailabilityGuarantee=[{valueToAdd.ContentGuarantee}] and expirationUtc=[{expirationUtc}]");
+                    $"Adding contentHashList=[{valueToAdd.ContentHashListWithDeterminism.ContentHashList}] determinism=[{valueToAdd.ContentHashListWithDeterminism.Determinism}] to VSTS with contentAvailabilityGuarantee=[{valueToAdd.ContentGuarantee}], expirationUtc=[{expirationUtc}], forceUpdate=[{ForceUpdateOnAddContentHashList}]");
 
-                var contentHashListResponseObject = await ContentHashListAdapter.AddContentHashListAsync(context, CacheNamespace, strongFingerprint, valueToAdd).ConfigureAwait(false);
+                var contentHashListResponseObject =
+                    await ContentHashListAdapter.AddContentHashListAsync(
+                        context,
+                        CacheNamespace,
+                        strongFingerprint,
+                        valueToAdd,
+                        forceUpdate: ForceUpdateOnAddContentHashList).ConfigureAwait(false);
 
                 if (!contentHashListResponseObject.Succeeded)
                 {
                     return new AddOrGetContentHashListResult(contentHashListResponseObject);
                 }
 
-                var contentHashListResponse = contentHashListResponseObject.Data;
+                var contentHashListResponse = contentHashListResponseObject.Value;
                 var inconsistencyErrorMessage = CheckForResponseInconsistency(contentHashListResponse);
                 if (inconsistencyErrorMessage != null)
                 {

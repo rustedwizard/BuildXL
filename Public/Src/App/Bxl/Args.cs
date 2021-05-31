@@ -233,6 +233,9 @@ namespace BuildXL
                             "allowInternalDetoursErrorNotificationFile",
                             sign => sandboxConfiguration.AllowInternalDetoursErrorNotificationFile = sign),
                         OptionHandlerFactory.CreateBoolOption(
+                            "allowMissingSpecs",
+                            opt => frontEndConfiguration.AllowMissingSpecs = opt),
+                        OptionHandlerFactory.CreateBoolOption(
                             "analyzeDependencyViolations",
                             opt => { /* DEPRECATED -- DO NOTHING */ }),
                         OptionHandlerFactory.CreateBoolOption(
@@ -305,6 +308,9 @@ namespace BuildXL
                             "converge",
                             sign => engineConfiguration.Converge = sign),
                         OptionHandlerFactory.CreateOption(
+                            "criticalCommitUtilizationPercentage",
+                            opt => schedulingConfiguration.CriticalCommitUtilizationPercentage = CommandLineUtilities.ParseInt32Option(opt, 0, 100)),
+                        OptionHandlerFactory.CreateOption(
                             "customLog",
                             opt => ParseCustomLogOption(opt, pathTable, loggingConfiguration.CustomLog)),
                         OptionHandlerFactory.CreateBoolOption(
@@ -338,6 +344,15 @@ namespace BuildXL
                             "diagnostic",
                             "diag",
                             opt => loggingConfiguration.Diagnostic |= CommandLineUtilities.ParseEnumOption<DiagnosticLevels>(opt)),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "dumpFailedPips",
+                            opt => loggingConfiguration.DumpFailedPips = opt),
+                        OptionHandlerFactory.CreateOption(
+                            "dumpFailedPipsLogLimit",
+                            opt => loggingConfiguration.DumpFailedPipsLogLimit = CommandLineUtilities.ParseInt32Option(opt, 0, Int32.MaxValue)),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "dumpFailedPipsWithDynamicData",
+                            opt => loggingConfiguration.DumpFailedPipsWithDynamicData = opt),
                         OptionHandlerFactory.CreateBoolOption(
                             "earlyWorkerRelease",
                             sign => distributionConfiguration.EarlyWorkerRelease = sign),
@@ -436,6 +451,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "environment",
                             opt => loggingConfiguration.Environment = CommandLineUtilities.ParseEnumOption<ExecutionEnvironment>(opt)),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "exitOnNewGraph",
+                            sign => engineConfiguration.ExitOnNewGraph = sign),
                         OptionHandlerFactory.CreateOption2(
                             "experiment",
                             "exp",
@@ -601,8 +619,14 @@ namespace BuildXL
                             "launchDebugger",
                             sign => configuration.LaunchDebugger = sign),
                         OptionHandlerFactory.CreateBoolOption(
+                            "logCachedPipOutputs",
+                            sign => loggingConfiguration.LogCachedPipOutputs = sign),
+                        OptionHandlerFactory.CreateBoolOption(
                             "logCounters",
                             sign => loggingConfiguration.LogCounters = sign),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "logDeterminismProbe",
+                            sign => cacheConfiguration.DisableDeterminismProbeLogging = !sign),
                         OptionHandlerFactory.CreateBoolOption(
                             "logExecution",
                             sign => loggingConfiguration.LogExecution = sign),
@@ -660,11 +684,11 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "masterCpuMultiplier",
                             opt =>
-                            schedulingConfiguration.MasterCpuMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 1)),
+                            schedulingConfiguration.OrchestratorCpuMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 1)),
                        OptionHandlerFactory.CreateOption(
                             "masterCacheLookupMultiplier",
                             opt =>
-                            schedulingConfiguration.MasterCacheLookupMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 1)),
+                            schedulingConfiguration.OrchestratorCacheLookupMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 1)),
                         OptionHandlerFactory.CreateOption(
                             "maxCacheLookup",
                             opt => schedulingConfiguration.MaxCacheLookup = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
@@ -746,6 +770,9 @@ namespace BuildXL
                             "minWorkers",
                             opt => distributionConfiguration.MinimumWorkers = CommandLineUtilities.ParseInt32Option(opt, 1, int.MaxValue)),
                         OptionHandlerFactory.CreateOption(
+                            "minWorkersWarn",
+                            opt => distributionConfiguration.LowWorkersWarningThreshold = CommandLineUtilities.ParseInt32Option(opt, 0, int.MaxValue)),
+                        OptionHandlerFactory.CreateOption(
                             "noLog",
                             opt => ParseInt32ListOption(opt, loggingConfiguration.NoLog)),
                         OptionHandlerFactory.CreateOption(
@@ -777,6 +804,14 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "adoTaskLogging",
                             sign => loggingConfiguration.OptimizeVsoAnnotationsForAzureDevOps = sign),
+                        OptionHandlerFactory.CreateOption(
+                            "orchestratorCpuMultiplier",
+                            opt =>
+                            schedulingConfiguration.OrchestratorCpuMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 1)),
+                       OptionHandlerFactory.CreateOption(
+                            "orchestratorCacheLookupMultiplier",
+                            opt =>
+                            schedulingConfiguration.OrchestratorCacheLookupMultiplier = CommandLineUtilities.ParseDoubleOption(opt, 0, 1)),
                         OptionHandlerFactory.CreateOption(
                             "outputFileExtensionsForSequentialScanHandleOnHashing",
                             opt => schedulingConfiguration.OutputFileExtensionsForSequentialScanHandleOnHashing.AddRange(CommandLineUtilities.ParseRepeatingPathAtomOption(opt, pathTable.StringTable, ";"))),
@@ -850,6 +885,9 @@ namespace BuildXL
                         OptionHandlerFactory.CreateOption(
                             "relatedActivityId",
                             opt => loggingConfiguration.RelatedActivityId = CommandLineUtilities.ParseStringOption(opt)),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "remoteAllProcesses",
+                            sign => sandboxConfiguration.RemoteAllProcesses = sign),
                         OptionHandlerFactory.CreateBoolOptionWithValue(
                             "remoteTelemetry",
                             (opt, sign) =>
@@ -1100,6 +1138,10 @@ namespace BuildXL
                             sign => sandboxConfiguration.UnsafeSandboxConfigurationMutable.MonitorNtCreateFile = !sign,
                             isUnsafe: true),
                         OptionHandlerFactory.CreateBoolOption(
+                            "unsafe_IgnorePreserveOutputsPrivatization",
+                            sign => sandboxConfiguration.UnsafeSandboxConfigurationMutable.IgnorePreserveOutputsPrivatization = !sign,
+                            isUnsafe: true),
+                        OptionHandlerFactory.CreateBoolOption(
                             "unsafe_IgnoreProducingSymlinks",
                             sign => { /* DO NOTHING - Flag deprecated  */},
                             isUnsafe: false,
@@ -1268,12 +1310,12 @@ namespace BuildXL
                         OptionHandlerFactory.CreateBoolOption(
                             "verifyCacheLookupPin",
                             sign => schedulingConfiguration.VerifyCacheLookupPin = sign),
+                        OptionHandlerFactory.CreateBoolOption(
+                            "virtualizeUnknownPips",
+                            sign => cacheConfiguration.VirtualizeUnknownPips = sign),
                         OptionHandlerFactory.CreateOption(
                             "vfsCasRoot",
-                            opt =>
-                            {
-                                cacheConfiguration.VfsCasRoot = CommandLineUtilities.ParsePathOption(opt, pathTable);
-                            }),
+                            opt => cacheConfiguration.VfsCasRoot = CommandLineUtilities.ParsePathOption(opt, pathTable)),
                         /* The viewer is currently broken. Leaving the code around so we can dust it off at some point. AB#1609082
                         OptionHandlerFactory.CreateOption(
                             "viewer",
@@ -1511,7 +1553,7 @@ namespace BuildXL
             }
 
             // If RelatedActivityId is populated, use it as a seed for random number generation
-            // so that we can use the same abTesting args for master-workers and different build phases (enlist, meta, product).
+            // so that we can use the same abTesting args for orchestrator-workers and different build phases (enlist, meta, product).
             Random randomGen = null;
             if (string.IsNullOrEmpty(loggingConfiguration.RelatedActivityId))
             {
@@ -2012,9 +2054,6 @@ namespace BuildXL
                     break;
                 case "LAZYSODELETION":
                     scheduleConfiguration.UnsafeLazySODeletion = experimentalOptionAndValue.Item2;
-                    break;
-                case "PROCESSSYMLINKEDACCESSES":
-                    sandboxConfiguration.UnsafeSandboxConfigurationMutable.ProcessSymlinkedAccesses = experimentalOptionAndValue.Item2;
                     break;
                 default:
                     throw CommandLineUtilities.Error(Strings.Args_Experimental_UnsupportedValue, experimentalOptionAndValue.Item1);

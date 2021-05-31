@@ -48,8 +48,8 @@ namespace BuildXL.Cache.MemoizationStore.Stores
             return context.PerformOperationWithTimeoutAsync(
                 Tracer,
                 nestedContext => CompareExchangeCore(nestedContext, strongFingerprint, expectedReplacementToken, expected, replacement),
-                extraStartMessage: $"StrongFingerprint=({strongFingerprint}) expected=[{expected.ToTraceString()}] replacement=[{replacement.ToTraceString()}]",
-                extraEndMessage: _ => $"StrongFingerprint=({strongFingerprint})  expected=[{expected.ToTraceString()}] replacement=[{replacement.ToTraceString()}]",
+                extraStartMessage: $"StrongFingerprint=[{strongFingerprint}] ExpectedReplacementToken=[{expectedReplacementToken}] Expected=[{expected.ToTraceString()}] Replacement=[{replacement.ToTraceString()}]",
+                extraEndMessage: result => $"StrongFingerprint=[{strongFingerprint}] ExpectedReplacementToken=[{expectedReplacementToken}] Expected=[{expected.ToTraceString()}] Replacement=[{replacement.ToTraceString()}] Exchanged=[{result.GetValueOrDefault(false)}]",
                 timeout: _timeout);
         }
 
@@ -64,23 +64,35 @@ namespace BuildXL.Cache.MemoizationStore.Stores
         /// <summary>
         /// Load a ContentHashList and the token used to replace it.
         /// </summary>
-        public Task<Result<(ContentHashListWithDeterminism contentHashListInfo, string replacementToken)>> GetContentHashListAsync(OperationContext context, StrongFingerprint strongFingerprint, bool preferShared)
+        public Task<ContentHashListResult> GetContentHashListAsync(OperationContext context, StrongFingerprint strongFingerprint, bool preferShared)
         {
             return context.PerformOperationWithTimeoutAsync(
                 Tracer,
                 nestedContext => GetContentHashListCoreAsync(nestedContext, strongFingerprint, preferShared),
                 extraStartMessage: $"StrongFingerprint=[{strongFingerprint}], PreferShared=[{preferShared}]",
-                extraEndMessage: result => $"StrongFingerprint=[{strongFingerprint}], PreferShared=[{preferShared}] Result=[{result.GetValueOrDefault().contentHashListInfo.ToTraceString()}] Token=[{result.GetValueOrDefault().replacementToken}]",
+                extraEndMessage: result => getStringResult(result),
                 timeout: _timeout);
+
+            string getStringResult(ContentHashListResult result)
+            {
+                var resultString = $"StrongFingerprint=[{strongFingerprint}], PreferShared=[{preferShared}] Result=[{result.GetValueOrDefault().contentHashListInfo.ToTraceString()}] Token=[{result.GetValueOrDefault().replacementToken}]";
+
+                if (result.Source != ContentHashListSource.Unknown)
+                {
+                    resultString += $", Source=[{result.Source}]";
+                }
+                
+                return resultString;
+            }
         }
 
         /// <nodoc />
-        protected abstract Task<Result<(ContentHashListWithDeterminism contentHashListInfo, string replacementToken)>> GetContentHashListCoreAsync(OperationContext context, StrongFingerprint strongFingerprint, bool preferShared);
+        protected abstract Task<ContentHashListResult> GetContentHashListCoreAsync(OperationContext context, StrongFingerprint strongFingerprint, bool preferShared);
 
         /// <summary>
         /// Enumerates all strong fingerprints
         /// </summary>
-        public abstract Task<IEnumerable<StructResult<StrongFingerprint>>> EnumerateStrongFingerprintsAsync(OperationContext context);
+        public abstract Task<IEnumerable<Result<StrongFingerprint>>> EnumerateStrongFingerprintsAsync(OperationContext context);
 
         /// <summary>
         /// <see cref="ILevelSelectorsProvider.GetLevelSelectorsAsync(Context, Fingerprint, CancellationToken, int)"/>
@@ -90,8 +102,18 @@ namespace BuildXL.Cache.MemoizationStore.Stores
             return context.PerformOperationWithTimeoutAsync(
                 Tracer,
                 nestedContext => GetLevelSelectorsCoreAsync(nestedContext, weakFingerprint, level),
-                extraEndMessage: _ => $"WeakFingerprint=[{weakFingerprint}], Level=[{level}]",
-                traceErrorsOnly: true,
+                extraEndMessage: result =>
+                {
+                    var numSelectors = 0;
+                    bool hasMore = false;
+                    if (result.Succeeded)
+                    {
+                        numSelectors = result.Value.Selectors.Count;
+                        hasMore = result.Value.HasMore;
+                    }
+
+                    return $"WeakFingerprint=[{weakFingerprint}] Level=[{level}] NumSelectors=[{numSelectors}] HasMore=[{hasMore}]";
+                },
                 timeout: _timeout);
         }
 

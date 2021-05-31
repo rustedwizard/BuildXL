@@ -7,10 +7,11 @@ import * as ManagedSdk from "Sdk.Managed";
 
 namespace MonitorTest {
     @@public
-    export const dll = BuildXLSdk.cacheTest({
+    export const dll = !BuildXLSdk.Flags.isMicrosoftInternal ? undefined : BuildXLSdk.cacheTest({
         assemblyName: "BuildXL.Cache.Monitor.Test",
         sources: globR(d`.`, "*.cs"),
         skipTestRun: BuildXLSdk.restrictTestRunToSomeQualifiers,
+        assemblyBindingRedirects: BuildXLSdk.cacheBindingRedirects(),
         references: [
             // Needed to get Fluent Assertions
             ...BuildXLSdk.fluentAssertionsWorkaround,
@@ -38,7 +39,8 @@ namespace MonitorTest {
                         passThroughEnvironmentVariables: [
                             // Used to ensure tests against Azure can run whenever this environment variable is 
                             // available
-                            "CACHE_MONITOR_APPLICATION_KEY"
+                            "CACHE_MONITOR_PROD_APPLICATION_KEY",
+                            "CACHE_MONITOR_TEST_APPLICATION_KEY"
                         ]
                     },
                 }
@@ -46,5 +48,10 @@ namespace MonitorTest {
         },
         skipDocumentationGeneration: true,
         nullable: true,
+        tools: {
+            csc: {
+                keyFile: undefined, // This must be unsigned so it can consume IcM
+            }
+        },
     });
 }

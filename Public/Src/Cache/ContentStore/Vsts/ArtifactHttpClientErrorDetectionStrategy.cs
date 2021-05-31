@@ -9,7 +9,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Logging;
 using BuildXL.Cache.ContentStore.Interfaces.Tracing;
-using Microsoft.Practices.TransientFaultHandling;
+using BuildXL.Cache.ContentStore.Tracing;
+using BuildXL.Cache.ContentStore.Utils;
 
 namespace BuildXL.Cache.ContentStore.Vsts
 {
@@ -21,9 +22,10 @@ namespace BuildXL.Cache.ContentStore.Vsts
     /// Newer versions of Artifact packages have this retry automatically, but the packages deployed with the M119.0 release do not.
     /// Once the next release is completed, these retries can be removed.
     /// </remarks>
-    public class ArtifactHttpClientErrorDetectionStrategy : ITransientErrorDetectionStrategy
+    public class ArtifactHttpClientErrorDetectionStrategy
     {
-        private static readonly Lazy<RetryPolicy> LazyRetryPolicyInstance = new Lazy<RetryPolicy>(() => new RetryPolicy<ArtifactHttpClientErrorDetectionStrategy>(RetryStrategy.DefaultExponential));
+        private static readonly Tracer _tracer = new Tracer(nameof(ArtifactHttpClientErrorDetectionStrategy));
+        private static readonly Lazy<IRetryPolicy> LazyRetryPolicyInstance = new Lazy<IRetryPolicy>(() => RetryPolicyFactory.GetExponentialPolicy(shouldRetry: IsTransient));
 
         // The HTTP request time out is 5-minute
         private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(6);
@@ -40,7 +42,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                     attemptCount++;
                     if (attemptCount > 1)
                     {
-                        context.TraceMessage(Severity.Debug, $"{operationName} attempt #{attemptCount}...");
+                        _tracer.Debug(context, $"{operationName} attempt #{attemptCount}...");
                     }
 
                     return taskFunc();
@@ -59,7 +61,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                     attemptCount++;
                     if (attemptCount > 1)
                     {
-                        context.TraceMessage(Severity.Debug, $"{operationName} attempt #{attemptCount}...");
+                        _tracer.Debug(context, $"{operationName} attempt #{attemptCount}...");
                     }
 
                     return taskFunc();
@@ -69,12 +71,12 @@ namespace BuildXL.Cache.ContentStore.Vsts
         /// <summary>
         /// Repeatedly executes the specified asynchronous task with the ArtifactHttpClientErrorDetectionStrategy, logging attempts beyond the first.
         /// </summary>
-        public static async Task<T> ExecuteWithTimeoutAsync<T>(Context context, string operationName, Func<CancellationToken, Task<T>> taskFunc, CancellationToken ct, TimeSpan? timeout = null)
+        public static Task<T> ExecuteWithTimeoutAsync<T>(Context context, string operationName, Func<CancellationToken, Task<T>> taskFunc, CancellationToken ct, TimeSpan? timeout = null)
         {
             timeout = timeout ?? DefaultOperationTimeout;
 
             int attemptCount = 0;
-            return await LazyRetryPolicyInstance.Value.ExecuteAsync(
+            return LazyRetryPolicyInstance.Value.ExecuteAsync(
                 async () =>
                 {
                     // We need to use a fresh cancellation token in retries; otherwise, the operation will continuously get cancelled after the first timeout. 
@@ -91,7 +93,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                             attemptCount++;
                             if (attemptCount > 1)
                             {
-                                context.TraceMessage(Severity.Info, $"{operationName} attempt #{attemptCount}...");
+                                _tracer.Info(context, $"{operationName} attempt #{attemptCount}...");
                             }
 
                             return await WithTimeoutAsync(taskFunc(innerCancellationSource.Token), timeout.Value, operationName);
@@ -131,8 +133,7 @@ namespace BuildXL.Cache.ContentStore.Vsts
                 timeout);
         }
 
-        /// <inheritdoc />
-        public bool IsTransient(Exception ex)
+        private static bool IsTransient(Exception ex)
         {
             if (ex is TimeoutException)
             {

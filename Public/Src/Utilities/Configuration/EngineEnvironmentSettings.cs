@@ -111,7 +111,7 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<bool> SkipExtraneousPins = CreateSetting("BuildXLSkipExtraneousPins", value => value == "1");
 
         /// <summary>
-        /// Specifies whether remote workers should inline and block waiting for execution log notification messages sent to master to be processed.
+        /// Specifies whether remote workers should inline and block waiting for execution log notification messages sent to orchestrator to be processed.
         /// </summary>
         public static readonly Setting<bool> InlineWorkerXLGHandling = CreateSetting("BuildXLInlineWorkerXLGHandling", value => value == "1");
 
@@ -146,59 +146,37 @@ namespace BuildXL.Utilities.Configuration
         #region Distribution-related timeouts
 
         /// <summary>
-        /// Allows optionally specifying an alternative timeout for workers to wait for attach from master
+        /// Allows optionally specifying an alternative timeout for workers to wait for attach from orchestrator
         /// </summary>
         public static readonly Setting<TimeSpan> WorkerAttachTimeout = CreateSetting("BuildXLWorkerAttachTimeoutMin", value => ParseTimeSpan(value, ts => TimeSpan.FromMinutes(ts)) ??
             TimeSpan.FromMinutes(75));
 
         /// <summary>
-        /// Maximum time to wait while establishing a connection to the remote machine (both master->worker and worker->master)
+        /// Maximum time to wait while establishing a connection to the remote machine (both orchestrator->worker and worker->orchestrator)
         /// </summary>
         public static readonly Setting<TimeSpan> DistributionConnectTimeout = CreateSetting("BuildXLDistribConnectTimeoutSec", value => ParseTimeSpan(value, ts => TimeSpan.FromSeconds(ts)) ??
             TimeSpan.FromMinutes(5));
 
         /// <summary>
-        /// Inactivity timeout
-        ///     - Master - if it cannot send a single heartbeat message to a worker within this interval, declares the worker as dead and stops using it
-        ///     - Worker - if it doesn't receive any call from the master within this interval, decides that the master is dead and exits
-        /// </summary>
-        public static readonly Setting<TimeSpan> DistributionInactiveTimeout = CreateSetting("BuildXLDistribInactiveTimeoutMin", value => ParseTimeSpan(value, ts => TimeSpan.FromMinutes(ts)) ??
-            TimeSpan.FromMinutes(30));
-
-        /// <summary>
-        /// The maximum number of workers allowed to attach concurrently
-        /// </summary>
-        public static readonly Setting<int> MaxConcurrentWorkersAttachLimit = CreateSetting("BuildXLMaxConcurrentWorkersAttachLimit", value => ParseInt32(value) ?? 10);
-
-        /// <summary>
-        /// The number of threads in the grpc thread pool.
+        /// Whether KeepAlive is enabled for grpc. It allows http2 pings between client and server over transport.
         /// </summary>
         /// <remarks>
-        /// Cache layer was using 70 by default, so we set the default limit based on their usage.
+        /// Default enabled
         /// </remarks>
-        public static readonly Setting<int> GrpcThreadPoolSize = CreateSetting("BuildXLGrpcThreadPoolSize", value => ParseInt32(value) ?? 70);
-
-        /// <summary>
-        /// Whether HandlerInlining is enabled for grpc.
-        /// </summary>
-        /// <remarks>
-        /// Default disabled
-        /// </remarks>
-        public static readonly Setting<bool> GrpcHandlerInliningEnabled = CreateSetting("BuildXLGrpcHandlerInliningEnabled", value => string.IsNullOrWhiteSpace(value) ? false : value == "1");
-
-        /// <summary>
-        /// Whether HandlerInlining is enabled for grpc.
-        /// </summary>
-        /// <remarks>
-        /// Default disabled
-        /// </remarks>
-        public static readonly Setting<bool> GrpcKeepAliveEnabled = CreateSetting("BuildXLGrpcKeepAliveEnabled", value => string.IsNullOrWhiteSpace(value) ? false : value == "1");
+        public static readonly Setting<bool> GrpcKeepAliveEnabled = CreateSetting("BuildXLGrpcKeepAliveEnabled", value => string.IsNullOrWhiteSpace(value) ? true : value == "1");
 
         /// <summary>
         /// The amount of concurrency to allow for input/output materialization
         /// </summary>
         public static readonly Setting<int> MaterializationConcurrency = CreateSetting(
             "BuildXL.MaterializationConcurrency",
+            value => ParseInt32(value) ?? Environment.ProcessorCount);
+
+        /// <summary>
+        /// The amount of concurrency to allow for storing outputs
+        /// </summary>
+        public static readonly Setting<int> StoringOutputsToCacheConcurrency = CreateSetting(
+            "BuildXL.StoringOutputsToCacheConcurrency",
             value => ParseInt32(value) ?? Environment.ProcessorCount);
 
         /// <summary>
@@ -253,6 +231,17 @@ namespace BuildXL.Utilities.Configuration
         public static readonly Setting<int?> LargeStringBufferThresholdBytes = CreateSetting("BuildXLLargeStringBufferThresholdBytes", value => ParseInt32(value));
 
         /// <summary>
+        /// Overrides the default overflow buffer count for string tables.
+        /// </summary>
+        public static readonly Setting<int?> StringTableOverflowBufferCount = CreateSetting("BuildXLStringTableOverflowBufferCount", value => ParseInt32(value));
+
+        /// <summary>
+        /// Specifies whether a salt is used for internal VSO:SHA cache mapping for Build Manifest.
+        /// Null or empty salt will be treated as no salt, and will follow default behavior.
+        /// </summary>
+        public static readonly Setting<string> BuildManifestHashCacheSalt = CreateSetting("BuildXLBuildManifestHashCacheSalt", value => value);
+
+        /// <summary>
         /// Sets the variable for consumption by settings
         /// </summary>
         public static void SetVariable(string name, string value)
@@ -305,15 +294,15 @@ namespace BuildXL.Utilities.Configuration
             return "[BuildXLFingerprintSalt:" + saltEnvironmentValue + "]";
         }
 
-        private static TimeSpan? ParseTimeSpan(string timespanString, Func<int, TimeSpan> timespanFactory)
+        private static TimeSpan? ParseTimeSpan(string timespanString, Func<double, TimeSpan> timespanFactory)
         {
             if (string.IsNullOrEmpty(timespanString))
             {
                 return null;
             }
 
-            int timespanUnits;
-            if (int.TryParse(timespanString, out timespanUnits) && timespanUnits != 0)
+            double timespanUnits;
+            if (double.TryParse(timespanString, out timespanUnits) && timespanUnits != 0)
             {
                 return timespanFactory(timespanUnits);
             }
@@ -401,7 +390,7 @@ namespace BuildXL.Utilities.Configuration
         public sealed class Setting<T>
         {
             private int m_version;
-            private bool isExplicitlySet = false;
+            private bool m_isExplicitlySet = false;
             private Optional<T> m_value;
             private Optional<string> m_stringValue;
             private readonly object m_syncLock = new object();
@@ -422,7 +411,7 @@ namespace BuildXL.Utilities.Configuration
                     Update();
 
                     var value = m_stringValue;
-                    if (value.IsValid)
+                    if (value.HasValue)
                     {
                         return value.Value;
                     }
@@ -430,7 +419,7 @@ namespace BuildXL.Utilities.Configuration
                     lock (m_syncLock)
                     {
                         value = m_stringValue;
-                        if (value.IsValid)
+                        if (value.HasValue)
                         {
                             return value.Value;
                         }
@@ -452,7 +441,7 @@ namespace BuildXL.Utilities.Configuration
                     Update();
 
                     var value = m_value;
-                    if (value.IsValid)
+                    if (value.HasValue)
                     {
                         return value.Value;
                     }
@@ -460,7 +449,7 @@ namespace BuildXL.Utilities.Configuration
                     lock (m_syncLock)
                     {
                         value = m_value;
-                        if (value.IsValid)
+                        if (value.HasValue)
                         {
                             return value.Value;
                         }
@@ -477,7 +466,7 @@ namespace BuildXL.Utilities.Configuration
                     lock (m_syncLock)
                     {
                         m_value = value;
-                        isExplicitlySet = true;
+                        m_isExplicitlySet = true;
                     }
                 }
             }
@@ -496,12 +485,12 @@ namespace BuildXL.Utilities.Configuration
 
             private void Update()
             {
-                if (!isExplicitlySet && m_version != SettingsEnvironment.Version)
+                if (!m_isExplicitlySet && m_version != SettingsEnvironment.Version)
                 {
                     lock (m_syncLock)
                     {
-                        m_value = Optional<T>.Invalid;
-                        m_stringValue = Optional<string>.Invalid;
+                        m_value = Optional<T>.Empty;
+                        m_stringValue = Optional<string>.Empty;
                     }
                 }
             }
@@ -511,7 +500,7 @@ namespace BuildXL.Utilities.Configuration
             /// </summary>
             public bool TrySet(T value)
             {
-                if (!string.IsNullOrEmpty(StringValue) || isExplicitlySet)
+                if (!string.IsNullOrEmpty(StringValue) || m_isExplicitlySet)
                 {
                     // Can't set it already has an explicitly set value
                     return false;
@@ -529,7 +518,7 @@ namespace BuildXL.Utilities.Configuration
             /// <returns>true if the environment variable changed since the last access. Otherwise, false.</returns>
             public bool Reset()
             {
-                if (!m_stringValue.IsValid)
+                if (!m_stringValue.HasValue)
                 {
                     return false;
                 }
@@ -540,7 +529,7 @@ namespace BuildXL.Utilities.Configuration
                     lock (m_syncLock)
                     {
                         m_stringValue = newStringValue;
-                        m_value = Optional<T>.Invalid;
+                        m_value = Optional<T>.Empty;
                     }
 
                     return true;

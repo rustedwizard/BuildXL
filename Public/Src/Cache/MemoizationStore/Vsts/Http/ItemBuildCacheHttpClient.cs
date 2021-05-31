@@ -8,6 +8,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Utils;
+using BuildXL.Cache.MemoizationStore.Interfaces.Caches;
 using BuildXL.Cache.MemoizationStore.Interfaces.Sessions;
 using BuildXL.Cache.MemoizationStore.Vsts.Http;
 using BuildXL.Cache.MemoizationStore.VstsInterfaces;
@@ -119,7 +120,8 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
         public Task<ContentHashListResponse> AddContentHashListAsync(
             string cacheNamespace,
             StrongFingerprint strongFingerprint,
-            ContentHashListWithCacheMetadata contentHashList)
+            ContentHashListWithCacheMetadata contentHashList,
+            bool forceUpdate)
         {
             var addContentHashListRequest = new AddContentHashListRequest(contentHashList);
 
@@ -128,13 +130,20 @@ namespace BuildXL.Cache.MemoizationStore.Vsts
                 cacheNamespace,
                 weakFingerprint = strongFingerprint.WeakFingerprint.ToHex(),
                 selectorContentHash = strongFingerprint.Selector.ContentHash.ToHex(),
-                selectorOutput = strongFingerprint.Selector.Output?.ToHex() ?? BuildCacheResourceIds.NoneSelectorOutput
+                selectorOutput = strongFingerprint.Selector.Output?.ToHex() ?? BuildCacheResourceIds.NoneSelectorOutput,
             };
+
+            var queryParameters = new Dictionary<string, string>();
+            if (forceUpdate)
+            {
+                queryParameters["forceUpdate"] = forceUpdate.ToString();
+            }
 
             return PostAsync<AddContentHashListRequest, ContentHashListResponse>(
                 addContentHashListRequest,
                 BuildCacheResourceIds.ContentHashListResourceId,
-                contentHashListParameters);
+                contentHashListParameters,
+                queryParameters: queryParameters);
         }
 
         /// <inheritdoc />

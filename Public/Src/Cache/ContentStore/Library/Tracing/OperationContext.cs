@@ -51,9 +51,16 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
         }
 
         /// <nodoc />
-        public OperationContext CreateNested(Guid id, string componentName, [CallerMemberName]string? caller = null)
+        public OperationContext CreateNested(string id, string componentName, [CallerMemberName]string? caller = null)
         {
             return new OperationContext(new Context(TracingContext, id, componentName, caller), Token);
+        }
+
+        /// <nodoc />
+        public OperationContext CreateNested(CancellationToken linkedCancellationToken, [CallerMemberName] string? caller = null)
+        {
+            var token = CancellationTokenSource.CreateLinkedTokenSource(Token, linkedCancellationToken).Token;
+            return new OperationContext(new Context(TracingContext, caller!), token);
         }
 
         /// <summary>
@@ -62,13 +69,6 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
         public CancellableOperationContext WithCancellationToken(CancellationToken linkedCancellationToken)
         {
             return new CancellableOperationContext(this, linkedCancellationToken);
-        }
-
-        /// <nodoc />
-        public OperationContext CreateNested(CancellationToken linkedCancellationToken, [CallerMemberName]string? caller = null)
-        {
-            var token = CancellationTokenSource.CreateLinkedTokenSource(Token, linkedCancellationToken).Token;
-            return new OperationContext(new Context(TracingContext, caller), token);
         }
 
         /// <nodoc />
@@ -92,30 +92,6 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
         /// Implicit operators may be dangerous, but this conversion is safe and useful.
         /// </remarks>
         public static implicit operator Context(OperationContext context) => context.TracingContext;
-
-        /// <nodoc />
-        public void TraceDebug(string message)
-        {
-            TracingContext.TraceMessage(Severity.Debug, message);
-        }
-
-        /// <nodoc />
-        public void TraceInfo(string message)
-        {
-            TracingContext.TraceMessage(Severity.Info, message);
-        }
-
-        /// <nodoc />
-        public void TraceWarning(string message)
-        {
-            TracingContext.TraceMessage(Severity.Warning, message);
-        }
-
-        /// <nodoc />
-        public void TraceError(string message)
-        {
-            TracingContext.TraceMessage(Severity.Error, message);
-        }
 
         /// <nodoc />
         public Task<T> PerformInitializationAsync<T>(Tracer operationTracer, Func<Task<T>> operation, Counter? counter = default, Func<T, string>? endMessageFactory = null, [CallerMemberName]string? caller = null)
@@ -161,6 +137,7 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
             Func<T, string>? extraEndMessage = null,
             bool isCritical = false,
             TimeSpan? pendingOperationTracingInterval = null,
+            TimeSpan? silentOperationDurationThreshold = null,
             [CallerMemberName]string? caller = null) where T : ResultBase
         {
             return this.CreateOperation(operationTracer, operation)
@@ -173,6 +150,7 @@ namespace BuildXL.Cache.ContentStore.Tracing.Internal
                     extraEndMessage,
                     isCritical: isCritical,
                     pendingOperationTracingInterval: pendingOperationTracingInterval,
+                    silentOperationDurationThreshold: silentOperationDurationThreshold,
                     caller: caller)
                 .RunAsync(caller);
         }

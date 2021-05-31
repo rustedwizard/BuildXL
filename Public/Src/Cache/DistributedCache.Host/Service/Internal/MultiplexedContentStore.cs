@@ -184,7 +184,7 @@ namespace BuildXL.Cache.Host.Service.Internal
         }
 
         /// <inheritdoc />
-        public async Task<StructResult<long>> RemoveFromTrackerAsync(Context context)
+        public async Task<Result<long>> RemoveFromTrackerAsync(Context context)
         {
             using (var operationContext = TrackShutdown(context, CancellationToken.None))
             {
@@ -192,7 +192,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                     Tracer,
                     async () =>
                     {
-                        var removeTaskByStore = new Dictionary<string, Task<StructResult<long>>>();
+                        var removeTaskByStore = new Dictionary<string, Task<Result<long>>>();
 
                         foreach (var kvp in DrivesWithContentStore)
                         {
@@ -211,7 +211,7 @@ namespace BuildXL.Cache.Host.Service.Internal
                             var removeFromTrackerResult = await kvp.Value;
                             if (removeFromTrackerResult.Succeeded)
                             {
-                                filesTrimmed += removeFromTrackerResult.Data;
+                                filesTrimmed += removeFromTrackerResult.Value;
                             }
                             else
                             {
@@ -221,11 +221,11 @@ namespace BuildXL.Cache.Host.Service.Internal
 
                         if (sb.Length > 0)
                         {
-                            return new StructResult<long>(sb.ToString());
+                            return new Result<long>(sb.ToString());
                         }
                         else
                         {
-                            return new StructResult<long>(filesTrimmed);
+                            return new Result<long>(filesTrimmed);
                         }
                     });
             }
@@ -238,23 +238,17 @@ namespace BuildXL.Cache.Host.Service.Internal
         }
 
         /// <inheritdoc />
-        public Task<FileExistenceResult> CheckFileExistsAsync(Context context, ContentHash contentHash)
-        {
-            return PerformStoreOperationAsync<IStreamStore, FileExistenceResult>(store => store.CheckFileExistsAsync(context, contentHash));
-        }
-
-        /// <inheritdoc />
         public Task<BoolResult> HandleCopyFileRequestAsync(Context context, ContentHash hash, CancellationToken token)
         {
             return PerformStoreOperationAsync<ICopyRequestHandler, BoolResult>(store => store.HandleCopyFileRequestAsync(context, hash, token));
         }
 
-        private async Task<TResult> PerformStoreOperationAsync<TStore, TResult>(Func<TStore, Task<TResult>> executeAsync)
+        private async Task<TResult> PerformStoreOperationAsync<TStore, TResult>(Func<TStore, Task<TResult>> executeAsync, AbsolutePath path = null)
             where TResult : ResultBase
         {
             TResult result = null;
 
-            foreach (var store in GetStoresInOrder<TStore>())
+            foreach (var store in GetStoresInOrder<TStore>(path))
             {
                 result = await executeAsync(store);
 
@@ -284,8 +278,20 @@ namespace BuildXL.Cache.Host.Service.Internal
             return result;
         }
 
-        private IEnumerable<TStore> GetStoresInOrder<TStore>()
+        private IEnumerable<TStore> GetStoresInOrder<TStore>(AbsolutePath path = null)
         {
+            var pathPreferredDrive = string.Empty;
+            if (path != null)
+            {
+                pathPreferredDrive = path.GetPathRoot();
+                if (!StringComparer.OrdinalIgnoreCase.Equals(PreferredCacheDrive, pathPreferredDrive)
+                    && DrivesWithContentStore.TryGetValue(pathPreferredDrive, out var pathPreferredStore)
+                    && pathPreferredStore is TStore preferredTStore)
+                {
+                    yield return preferredTStore;
+                }
+            }
+
             if (DrivesWithContentStore[PreferredCacheDrive] is TStore store)
             {
                 yield return store;
@@ -293,7 +299,8 @@ namespace BuildXL.Cache.Host.Service.Internal
 
             foreach (var kvp in DrivesWithContentStore)
             {
-                if (kvp.Key == PreferredCacheDrive)
+                if (StringComparer.OrdinalIgnoreCase.Equals(PreferredCacheDrive, kvp.Key)
+                    || StringComparer.OrdinalIgnoreCase.Equals(pathPreferredDrive, kvp.Key))
                 {
                     // Already yielded the preferred cache
                     continue;
@@ -359,9 +366,17 @@ namespace BuildXL.Cache.Host.Service.Internal
         }
 
         /// <inheritdoc />
-        public Task<PutResult> HandlePushFileAsync(Context context, ContentHash hash, AbsolutePath sourcePath, CancellationToken token)
+        public Task<PutResult> HandlePushFileAsync(Context context, ContentHash hash, FileSource source, CancellationToken token)
         {
-            return PerformStoreOperationAsync<IPushFileHandler, PutResult>(store => store.HandlePushFileAsync(context, hash, sourcePath, token));
+            AbsolutePath preferredPath = null;
+            if (source.FileRealizationMode == FileRealizationMode.Move || source.FileRealizationMode == FileRealizationMode.HardLink)
+            {
+                // If the store is in a different drive than the file source, we should try to put into the same drive
+                // first, given that it's faster than actually copying to a different drive.
+                preferredPath = source.Path;
+            }
+
+            return PerformStoreOperationAsync<IPushFileHandler, PutResult>(store => store.HandlePushFileAsync(context, hash, source, token), preferredPath);
         }
 
         /// <inheritdoc />

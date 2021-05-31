@@ -4,6 +4,7 @@
 /// <reference path="Prelude.Core.dsc"/>
 /// <reference path="Prelude.IO.dsc"/>
 /// <reference path="Prelude.Configuration.dsc"/>
+/// <reference path="Prelude.Transformer.Arguments.dsc"/>
 
 /**
  * Source resolver that uses specified source paths for module resolution.
@@ -20,11 +21,29 @@ interface DScriptResolver extends ResolverBase {
     //@@obsolete
     packages?: File[];
 
-    /** List of modules with respecting path where to look for this module. */
-    modules?: File[];
+    /** List of modules with respecting path where to look for this module or its inlined version. */
+    modules?: (File | InlineModuleDefinition)[];
 
     /** Weather specs under this resolver's root should be evaluated as part of the build. */
     definesBuildExtent?: boolean;
+}
+
+/**
+ * An inline definition of a DScript module which doesn't require a module file to be created
+ */
+interface InlineModuleDefinition {
+
+    /** The module name.
+     * If not provided an internal identified will be assigned. This means the module name will not be known upfront, and
+     * therefore other modules won't be able to reference it
+     */
+    moduleName?: string;
+    
+    /**
+     * The collection of projects that are owned by the module.
+     * If not provided, all the .dsc files in the same folder as the main configuration file will be included
+     */
+    projects?: (Path | File)[];
 }
 
 /**
@@ -98,6 +117,20 @@ interface DownloadSettings {
      * Optional hash of the downloaded file to ensure safe robust builds and correctness. When specified the download is validated against this hash.
      */
     hash?: string,
+
+    /**
+     * The name of the value that points to the downloaded content for other resolvers to consume.
+     * Defaults to 'download' if not specified.
+     * This value will be exposed with type 'File'
+     */
+    downloadedValueName?: string,
+
+    /**
+     * The name of the value that points to the extracted content of the downloaded content for other resolvers to consume.
+     * Defaults to 'extracted' if not specified.
+     * This value will be exposed with type 'StaticDirectory'
+     */
+    extractedValueName?: string,
 }
 
 /** We represent a passthrough environment variable with the value unit */ 
@@ -311,6 +344,23 @@ interface YarnResolver extends JavaScriptResolverWithExecutionSemantics {
 }
 
 /**
+ * Resolver for customized JavaScript repos which are not under any known JavaScript package manager/coordinator.
+ */
+interface CustomJavaScriptResolver extends JavaScriptResolverWithExecutionSemantics {
+    kind: "CustomJavaScript",
+    
+    /** 
+     * A custom project graph that defines the packages and its dependencies.
+     * The user can return a file that is expected to be a JSON following the Yarn workspaces
+     * schema (https://classic.yarnpkg.com/en/docs/cli/workspaces/#toc-yarn-workspaces-info) 
+     * or provide an equivalent map from project names to location and dependencies.
+     * If corresponding package.json files are not in place, this customization plays nicely with
+     * 'customScripts' (a customization option common to all JavaScript resolvers)
+     * */
+    customProjectGraph: File | Map<string, {location: RelativePath, workspaceDependencies: string[]}>
+}
+
+/**
  * Resolver for Lage project-level build execution
  */
 interface LageResolver extends JavaScriptResolver {
@@ -318,8 +368,13 @@ interface LageResolver extends JavaScriptResolver {
 
     /**
      * The script command names to execute.
+     * Individual names can be provided, e.g. ["build", "test"] to indicate what script commands to include in the build. The
+     * dependencies across script commands will honor what Lage specifies.
+     * Script commands can also be grouped, e.g. ["prepare", {commandName:"build-and-postbuild", commands:["build", "postbuild"], "test"}]. This
+     * instructs BuildXL to treat the command group as a single unit of scheduling, which sequentially executes each command. Any other build
+     * script depending on the individual commands of a group will be depending on the group itself
      */
-    execute?: string[];
+    execute?: (string | JavaScriptCommandGroup)[];
 
     /**
      * The location of NPM.  If not provided, BuildXL will try to look for it under PATH.
@@ -395,6 +450,75 @@ interface JavaScriptResolver extends ResolverBase, UntrackingSettings {
      * Defaults to false.
      */
     blockWritesUnderNodeModules?: boolean;
+
+    /**
+     * Policy to apply when a double write occurs. By default double writes are only allowed if the produced content is the same.
+     */
+    doubleWritePolicy?: DoubleWritePolicy;
+
+    /**
+     * When specified, the resolver will give this callback an opportunity to schedule pips based on each project information. The callback
+     * will be executed for every project discovered by this resolver. When the callback is present, the resolver won't schedule the given 
+     * project and the callback is responsible for doing it.
+     * The callback defines the location a function whose expected type is (JavaScriptProject) => TransformerExecuteResult. The
+     * resolver will create an instance of an JavaScriptProject for each discovered project and pass it along.
+     * The callback can decide not to schedule a given project by returning 'undefined', in which case the resolver will schedule it in the
+     * regular way.
+     */
+    customScheduling?: CustomSchedulingCallBack;
+
+    /**
+     * Process names that will break away from the sandbox when spawned by the main process
+     * The accesses of processes that break away from the sandbox won't be observed.
+     * Processes that breakaway can survive the lifespan of the sandbox.
+     * Only add to this list processes that are trusted and whose accesses can be safely predicted
+     * by some other means.
+     */
+    childProcessesToBreakawayFromSandbox?: PathAtom[];
+
+    /**
+     * Users can specify a callback that defines the available scripts for a given package name. The result of the callback
+     * overrides the information on existing package.json files that coordinators may decide to pick up.
+     * The callback can return a JSON file which is expected to follow package.json schema (in particular, BuildXL will load
+     * the 'scripts' section) or an equivalent map of script command name to script content.
+     * The callback can return 'undefined' indicating no particular customization should happen for a given package and that
+     * the regular way of determining a package script commands should occur.
+     */
+    customScripts?: (packageName: string, location: RelativePath) => File | Map<string, FileContent>
+
+    /** 
+     * A custom set of success exit codes that applies to all processes scheduled by this resolver. 
+     * Any other exit code would indicate failure. If unspecified, by default, 0 is the only successful exit code. 
+     * */
+    successExitCodes?: number[];
+
+    /** 
+     * A custom set of exit codes that causes pips to be retried by BuildXL. 
+     * Applies to all processes scheduled by this resolver. 
+     * If an exit code is also in the successExitCode, then the pip is not retried on exiting with that exit code. 
+     * */
+    retryExitCodes?: number[];
+
+    /**
+     * Maximum number of retries for processes.
+     * Applies to all processes scheduled by this resolver. 
+     * A process returning an exit code specified in 'retryExitCodes' will be retried at most the specified number of times.
+     */
+    processRetries?: number;
+}
+
+/**
+ * Specifies the location of a callback used for scheduling a project in a custom way
+ */
+interface CustomSchedulingCallBack {
+    /** Module name where the callback is defined */
+    module: string;
+    
+    /** 
+     * Function name of the callback. The name can be a dotted identifier specifying a function name nested in namespaces. 
+     * The type of the defined function is expected to be (JavaScriptProject) => TransformerExecuteResult
+     * */
+    schedulingFunction: string;
 }
 
 /**
@@ -414,7 +538,7 @@ interface JavaScriptResolverWithExecutionSemantics extends JavaScriptResolver
      * If not provided, ["build"] is used.
      * Any command specified here that doesn't have a corresponding script is ignored.
      */
-    execute?: (string | JavaScriptCommand)[];   
+    execute?: (string | JavaScriptCommand | JavaScriptCommandGroupWithDependencies)[];   
 }
 
 /**
@@ -426,6 +550,25 @@ interface JavaScriptResolverWithExecutionSemantics extends JavaScriptResolver
 interface JavaScriptExport {
     symbolName: string;
     content: JavaScriptProjectOutputSelector[];
+}
+
+/**
+ * A JavaScript project as it was discovered by the resolver. An instance of this interface is passed to the custom scheduling
+ * callback.
+ * Some information comes directly from the data provided by the corresponding JS coordinator, such as name, script command etc. Some other
+ * information (such as inputs, outputs, environment variables, etc.) is computed by the resolver as if the project is going to be
+ * scheduled in its usual way, but instead provided to the custom scheduler to be able to make decisions based on it.
+ */
+interface JavaScriptProject {
+    name: string;
+    scriptCommandName: string;
+    scriptCommand: string;
+    projectFolder: Directory;
+    inputs: (File | StaticDirectory)[];
+    outputs: (Path | Directory)[];
+    environmentVariables: {name: string, value: string}[];
+    passThroughEnvironmentVariables: string[];
+    tempDirectory?: Directory;
 }
 
 /**
@@ -469,6 +612,23 @@ type JavaScriptArgument = string | PathAtom | RelativePath | Path;
  */
 interface JavaScriptCommand {
     command: string;
+    dependsOn: JavaScriptCommandDependency[];
+}
+
+/**
+ * A sequence of commands that will be executed as a single unit. The execution order will honor the sequence specified of commands
+ * specified. A command in the sequence will be executed if the previous one succeeded.
+ * The commandName can be used for specifying dependencies as if it was a regular command.
+ */
+interface JavaScriptCommandGroup {
+    commandName: string;
+    commands: string[];
+}
+
+/**
+ * The version of a command group for resolvers extending JavaScriptResolverWithExecutionSemantics
+ */
+interface JavaScriptCommandGroupWithDependencies extends JavaScriptCommandGroup {
     dependsOn: JavaScriptCommandDependency[];
 }
 
@@ -625,6 +785,15 @@ interface UntrackingSettings {
      * The relative path is interepreted relative to each available project
      */
     untrackedGlobalDirectoryScopes?: RelativePath[];
+
+    /**
+     * Process names that will break away from the sandbox when spawned by the main process
+     * The accesses of processes that break away from the sandbox won't be observed.
+     * Processes that breakaway can survive the lifespan of the sandbox.
+     * Only add to this list processes that are trusted and whose accesses can be safely predicted
+     * by some other means.
+     */
+    childProcessesToBreakawayFromSandbox?: PathAtom[];
 }
 
 interface NuGetConfiguration extends ToolConfiguration {
@@ -643,4 +812,4 @@ interface MsBuildResolverDefaults {
 
 }
 
-type Resolver = DScriptResolver | NuGetResolver | DownloadResolver | MsBuildResolver | NinjaResolver | CMakeResolver | RushResolver | YarnResolver | LageResolver;
+type Resolver = DScriptResolver | NuGetResolver | DownloadResolver | MsBuildResolver | NinjaResolver | CMakeResolver | RushResolver | YarnResolver | LageResolver | CustomJavaScriptResolver;

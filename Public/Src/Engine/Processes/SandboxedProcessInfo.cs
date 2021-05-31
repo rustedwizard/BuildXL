@@ -15,6 +15,7 @@ using BuildXL.Utilities.Configuration;
 using BuildXL.Utilities.Instrumentation.Common;
 using CanBeNullAttribute = JetBrains.Annotations.CanBeNullAttribute;
 using static BuildXL.Utilities.BuildParameters;
+using BuildXL.Processes.Remoting;
 
 namespace BuildXL.Processes
 {
@@ -26,13 +27,22 @@ namespace BuildXL.Processes
         private const int BufSize = 4096;
 
         /// <summary>
-        /// Windows-imposed limit on command-line length
+        /// OS-imposed limit on command-line length
         /// </summary>
         /// <remarks>
-        /// http://msdn.microsoft.com/en-us/library/windows/desktop/ms682425(v=vs.85).aspx
-        /// The maximum length of this string is 32,768 characters, including the Unicode terminating null character.
+        /// Windows:
+        ///   http://msdn.microsoft.com/en-us/library/windows/desktop/ms682425(v=vs.85).aspx
+        ///   The maximum length of this string is 32,768 characters, including the Unicode terminating null character.
+        /// 
+        /// MacOS:
+        ///   256K (can be obtained by executing `getconf ARG_MAX`)
+        /// 
+        /// Linux:
+        ///   typically 2M (can be obtained by executing `xargs --show-limits`)
         /// </remarks>
-        public const int MaxCommandLineLength = short.MaxValue;
+        public static readonly int MaxCommandLineLength = 
+            OperatingSystemHelper.IsLinuxOS ? 2 * 1024 * 1024 :
+            OperatingSystemHelper.IsMacOS   ?      256 * 1024 : short.MaxValue;
 
         /// <summary>
         /// Make sure we always wait for a moment after the main process exits by default.
@@ -72,6 +82,11 @@ namespace BuildXL.Processes
         /// An optional shared opaque output logger to use to record file writes under shared opaque directories as soon as they happen.
         /// </summary>
         public SidebandWriter SidebandWriter { get; }
+
+        /// <summary>
+        /// An optional file system view to report outputs as soon as they are produced
+        /// </summary>
+        public ISandboxFileSystemView FileSystemView { get; }
 
         /// <summary>
         /// Whether the process creating a <see cref="SandboxedProcess"/> gets added to a job object 
@@ -132,7 +147,8 @@ namespace BuildXL.Processes
             IDetoursEventListener detoursEventListener = null,
             ISandboxConnection sandboxConnection = null,
             SidebandWriter sidebandWriter = null,
-            bool createJobObjectForCurrentProcess = true)
+            bool createJobObjectForCurrentProcess = true,
+            ISandboxFileSystemView fileSystemView = null)
         {
             Contract.RequiresNotNull(pathTable);
             Contract.RequiresNotNull(fileName);
@@ -153,6 +169,7 @@ namespace BuildXL.Processes
             ContainerConfiguration = containerConfiguration;
             SidebandWriter = sidebandWriter;
             CreateJobObjectForCurrentProcess = createJobObjectForCurrentProcess;
+            FileSystemView = fileSystemView;
         }
 
         /// <summary>
@@ -289,6 +306,11 @@ namespace BuildXL.Processes
         public Action<string> StandardErrorObserver { get; set; }
 
         /// <summary>
+        /// Data needed for remote execution.
+        /// </summary>
+        public RemoteSandboxedProcessData RemoteSandboxedProcessData { get; set; }
+
+        /// <summary>
         /// Allowed surviving child processes.
         /// </summary>
         public string[] AllowedSurvivingChildProcessNames { get; set; }
@@ -405,6 +427,11 @@ namespace BuildXL.Processes
         public string TimeoutDumpDirectory { get; set; }
 
         /// <summary>
+        /// Root directory where surviving child process dumps should be saved
+        /// </summary>
+        public string SurvivingPipProcessChildrenDumpDirectory { get; set; }
+
+        /// <summary>
         /// The kind of sandboxing to use.
         /// </summary>
         public SandboxKind SandboxKind { get; set; }
@@ -481,6 +508,7 @@ namespace BuildXL.Processes
                 writer.Write(NestedProcessTerminationTimeout);
                 writer.Write(PipSemiStableHash);
                 writer.WriteNullableString(TimeoutDumpDirectory);
+                writer.WriteNullableString(SurvivingPipProcessChildrenDumpDirectory);
                 writer.Write((byte)SandboxKind);
                 writer.WriteNullableString(PipDescription);
 
@@ -509,6 +537,7 @@ namespace BuildXL.Processes
                 writer.Write(SidebandWriter, (w, v) => v.Serialize(w));
                 writer.Write(CreateJobObjectForCurrentProcess);
                 writer.WriteNullableString(DetoursFailureFile);
+                writer.Write(RemoteSandboxedProcessData, (w, v) => v.Serialize(w));
 
                 // File access manifest should be serialized the last.
                 writer.Write(FileAccessManifest, (w, v) => FileAccessManifest.Serialize(stream));
@@ -542,6 +571,7 @@ namespace BuildXL.Processes
                 TimeSpan nestedProcessTerminationTimeout = reader.ReadTimeSpan();
                 long pipSemiStableHash = reader.ReadInt64();
                 string timeoutDumpDirectory = reader.ReadNullableString();
+                string survivingPipProcessChildrenDumpDirectory = reader.ReadNullableString();
                 SandboxKind sandboxKind = (SandboxKind)reader.ReadByte();
                 string pipDescription = reader.ReadNullableString();
                 SandboxedProcessStandardFiles sandboxedProcessStandardFiles = SandboxedProcessStandardFiles.Deserialize(reader);
@@ -552,6 +582,8 @@ namespace BuildXL.Processes
                 var sidebandWritter = reader.ReadNullable(r => SidebandWriter.Deserialize(r));
                 var createJobObjectForCurrentProcess = reader.ReadBoolean();
                 var detoursFailureFile = reader.ReadNullableString();
+                var remoteSandboxedProcessData = reader.ReadNullable(r => RemoteSandboxedProcessData.Deserialize(r));
+
                 var fam = reader.ReadNullable(r => FileAccessManifest.Deserialize(stream));
 
                 return new SandboxedProcessInfo(
@@ -581,13 +613,15 @@ namespace BuildXL.Processes
                     NestedProcessTerminationTimeout = nestedProcessTerminationTimeout,
                     PipSemiStableHash = pipSemiStableHash,
                     TimeoutDumpDirectory = timeoutDumpDirectory,
+                    SurvivingPipProcessChildrenDumpDirectory = survivingPipProcessChildrenDumpDirectory,
                     SandboxKind = sandboxKind,
                     PipDescription = pipDescription,
                     SandboxedProcessStandardFiles = sandboxedProcessStandardFiles,
                     StandardInputSourceInfo = standardInputSourceInfo,
                     StandardObserverDescriptor = standardObserverDescriptor,
                     RedirectedTempFolders = redirectedTempFolder,
-                    DetoursFailureFile = detoursFailureFile
+                    DetoursFailureFile = detoursFailureFile,
+                    RemoteSandboxedProcessData = remoteSandboxedProcessData
                 };
             }
         }

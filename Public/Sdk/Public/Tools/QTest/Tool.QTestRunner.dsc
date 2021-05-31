@@ -24,10 +24,7 @@ export const qTestTool: Transformer.ToolDefinition = {
         d`${Context.getMount("ProgramFilesX86").path}`,
         d`${Context.getMount("ProgramFiles").path}`,
         d`${Context.getMount("AppData").path}`,
-        d`${Context.getMount("LocalAppData").path}`,
-        // To ensure that dmps are generated during crashes, QTest now includes procdmp.exe
-        // However, this tool reads dbghelp.dll located in the following directory in CloudBuild machines
-        d`C:/Debuggers`
+        d`${Context.getMount("LocalAppData").path}`
     ]),
     dependsOnWindowsDirectories: true,
     dependsOnAppDataDirectory: true,
@@ -79,17 +76,19 @@ function getCodeCoverageOption(args: QTestArguments): CoverageOptions {
     return CoverageOptions.None;
 }
 
-function qTestTypeToString(args: QTestArguments) {
+function qTestTypeToString(args: QTestArguments) : string {
     switch (args.qTestType) {
         case QTestType.msTest_latest:
             return args.useVsTest150 ? "MsTest_150" : "MsTest_Latest";
         case QTestType.Gradle:
             return "Gradle";
+        case QTestType.Console:
+            return "Console";
         default:
             Contract.fail("Invalid value specified for macro QTestType");
     };
 }
-function qTestPlatformToString(qTestPlatform: QTestPlatform) {
+function qTestPlatformToString(qTestPlatform: QTestPlatform) : string {
     switch (qTestPlatform) {
         case QTestPlatform.x86:
             return "X86";
@@ -102,7 +101,7 @@ function qTestPlatformToString(qTestPlatform: QTestPlatform) {
             return "Unspecified";
     };
 }
-function qTestDotNetFrameworkToString(qTestDotNetFramework: QTestDotNetFramework) {
+function qTestDotNetFrameworkToString(qTestDotNetFramework: QTestDotNetFramework) : string {
     switch (qTestDotNetFramework) {
         case QTestDotNetFramework.framework40:
             return "Framework40";
@@ -149,7 +148,7 @@ function findFlakyFile(): File {
 /**
  * Create a Manifest of input files for QTest to populate the test sandbox.
  */
-function createInputsManifest(args: QTestArguments) {
+function createInputsManifest(args: QTestArguments) : File {
     let inputsArray: Array<Path | RelativePath | PathAtom> = undefined;
     if (args.qTestInputs) {
         inputsArray = args.qTestInputs.mapMany(f => [f.path, f.name]);
@@ -212,38 +211,21 @@ export function runQTest(args: QTestArguments): Result {
 
     let logDir = args.qTestLogs || Context.getNewOutputDirectory("qtestlogs");
     let consolePath = p`${logDir}/qtest.stdout`;
-    let qtestRunTempDirectory = Context.getTempDirectory("qtestRunTemp");
-    // When invoked to run multiple attempts, QTest makes copies of sandbox
-    // for each run. To ensure the sandbox does not throw access violations,
-    // actual sandbox is designed to be a folder inside sandboxDir
-    let sandboxDir = Context.getNewOutputDirectory("sandbox");
-    let qtestSandboxInternal = p`${sandboxDir}/qtest`;
-
-    // Files passed through qTestDirToDeploy or qTestInputs argument are recorded in
-    // a manifest file that QTest will then use to generate fresh sandboxes for new runs.
-    let inputsFile = createInputsManifest(args);
 
     // If QTestArguments does not provide the Flaky Suppression File,
     // attempt to find the file at the source root.
     let flakyFile = args.qTestFlakySuppressionFile ? args.qTestFlakySuppressionFile : findFlakyFile();
 
     let qTestContextInfoFile = getContextInfoFile(args);
-
-    let codeCoverageOption = getCodeCoverageOption(args);
-    let changeAffectedInputListWrittenFile = undefined;
+    let jsProject = args.javaScriptProject;
+    let isJSProject = jsProject !== undefined;
     let changeAffectedInputListWrittenFileArg = {};
-    if (codeCoverageOption === CoverageOptions.DynamicChangeList) {
-        const parentDir = d`${logDir}`.parent;
-        const leafDir = d`${logDir}`.nameWithoutExtension;
-        const dir = d`${parentDir}/changeAffectedInput/${leafDir}`;
-        changeAffectedInputListWrittenFile = p`${dir}/fileWithImpactedTargets.txt`;
-        changeAffectedInputListWrittenFileArg = {changeAffectedInputListWrittenFile : changeAffectedInputListWrittenFile};
-    }
 
-    let qCodeCoverageEnumType = (codeCoverageOption === CoverageOptions.DynamicChangeList || codeCoverageOption === CoverageOptions.DynamicFull) ? dynamicCodeCovString :  CoverageOptions.None.toString();
+    let sandboxDir = isJSProject
+        ? jsProject.projectFolder
+        : Context.getNewOutputDirectory("sandbox");
 
-    // Keep this for dev build. Office has a requirement to run code coverage for dev build and open the result with VS.
-    qCodeCoverageEnumType = Environment.hasVariable("[Sdk.BuildXL]qCodeCoverageEnumType") ? Environment.getStringValue("[Sdk.BuildXL]qCodeCoverageEnumType") : qCodeCoverageEnumType;
+    let qCodeCoverageEnumType = CoverageOptions.None.toString();
 
     let commandLineArgs: Argument[] = [
         Cmd.option("--testBinary ", args.testAssembly),
@@ -252,21 +234,10 @@ export function runQTest(args: QTestArguments): Result {
             qTestTypeToString(args)
         ),
         Cmd.option(
-            "--sandbox ",
-            Artifact.none(qtestSandboxInternal)
-        ),
-        Cmd.option(
-            "--qTestInputsManifestFile ",
-            Artifact.input(inputsFile)
-        ),
-        Cmd.option(
-            "--copyToSandbox ",
-            // Use CopyToSandbox in case qTestDirToDeploy is passed but does not have any contents.
-            Artifact.input(inputsFile ? undefined : args.qTestDirToDeploy)
-        ),
-        Cmd.option(
             "--qTestLogsDir ",
-            Artifact.output(logDir)
+            isJSProject
+            ? Artifact.none(logDir)
+            : Artifact.output(logDir)
         ),
         Cmd.option(
             "--qtestAdapterPath ",
@@ -288,20 +259,14 @@ export function runQTest(args: QTestArguments): Result {
             "--qTestRetryOnFailureMode ",
             args.qTestRetryOnFailureMode !== undefined
             ? args.qTestRetryOnFailureMode
-            : args.qTestRetryOnFailure ? "Full" : undefined),
+            : args.qTestRetryOnFailure ? "Full" : undefined
+        ),
         Cmd.option("--qTestAttemptCount ", args.qTestAttemptCount),
         Cmd.option("--qTestTimeoutSec ", args.qTestTimeoutSec),
-        Cmd.option(
-            "--vstestSettingsFile ",
-            qCodeCoverageEnumType === dynamicCodeCovString && args.vstestSettingsFileForCoverage !== undefined
-                ? Artifact.input(args.vstestSettingsFileForCoverage)
-                : Artifact.input(args.vstestSettingsFile)
-        ),
         Cmd.option(
             "--qTestRawArgFile ",
             Artifact.input(args.qTestRawArgFile)
         ),
-        Cmd.option("--qCodeCoverageEnumType ", qCodeCoverageEnumType),
         Cmd.flag("--zipSandbox", Environment.hasVariable("BUILDXL_IS_IN_CLOUDBUILD")),
         Cmd.flag("--debug", Environment.hasVariable("[Sdk.BuildXL]debugQTest")),
         Cmd.flag("--qTestIgnoreQTestSkip", args.qTestIgnoreQTestSkip),
@@ -310,11 +275,76 @@ export function runQTest(args: QTestArguments): Result {
         Cmd.option("--qTestBuildType ", args.qTestBuildType || "unset"),
         Cmd.option("--testSourceDir ", args.testSourceDir),
         Cmd.option("--buildSystem ", "BuildXL"),
-        Cmd.option("--QTestCcTargetsFile  ", changeAffectedInputListWrittenFile),
         Cmd.option("--qTestExcludeCcTargetsFile ", Artifact.input(args.qTestExcludeCcTargetsFile)),
         Cmd.option("--QTestFlakyTestManagementSuppressionFile ", Artifact.none(flakyFile)),
-        Cmd.flag("--doNotFailForZeroTestCases", args.qTestUnsafeArguments && args.qTestUnsafeArguments.doNotFailForZeroTestCases)
+        Cmd.flag("--doNotFailForZeroTestCases", args.qTestUnsafeArguments && args.qTestUnsafeArguments.doNotFailForZeroTestCases),
+        Cmd.flag("--qTestHonorTrxResultSummary", args.qTestHonorTrxResultSummary),
+        Cmd.option("--qTestParserType ", args.qTestParserType),
+        Cmd.option("--AzureDevOpsLogUploadMode ", args.qTestAzureDevOpsLogUploadMode)
     ];
+
+    if (isJSProject) {
+        let jsProjectArguments: Argument[] = [
+            Cmd.option(
+                "--sandbox ",
+                Artifact.none(sandboxDir)
+            ),
+            Cmd.flag("--inPlaceTestExecution", true),
+            Cmd.flag("--isManaged", false),
+        ];
+
+        commandLineArgs = commandLineArgs.concat(jsProjectArguments);
+    } else {
+        // When invoked to run multiple attempts, QTest makes copies of sandbox
+        // for each run. To ensure the sandbox does not throw access violations,
+        // actual sandbox is designed to be a folder inside sandboxDir
+        let qtestSandboxInternal = p`${sandboxDir}/qtest`;
+
+        // Files passed through qTestDirToDeploy or qTestInputs argument are recorded in
+        // a manifest file that QTest will then use to generate fresh sandboxes for new runs.
+        let inputsFile = createInputsManifest(args);
+
+        let codeCoverageOption = getCodeCoverageOption(args);
+        let changeAffectedInputListWrittenFile = undefined;
+        if (codeCoverageOption === CoverageOptions.DynamicChangeList) {
+            const parentDir = d`${logDir}`.parent;
+            const leafDir = d`${logDir}`.nameWithoutExtension;
+            const dir = d`${parentDir}/changeAffectedInput/${leafDir}`;
+            changeAffectedInputListWrittenFile = p`${dir}/fileWithImpactedTargets.txt`;
+            changeAffectedInputListWrittenFileArg = {changeAffectedInputListWrittenFile : changeAffectedInputListWrittenFile};
+        }
+    
+        qCodeCoverageEnumType = (codeCoverageOption === CoverageOptions.DynamicChangeList || codeCoverageOption === CoverageOptions.DynamicFull) ? dynamicCodeCovString :  CoverageOptions.None.toString();
+    
+        // Keep this for dev build. Office has a requirement to run code coverage for dev build and open the result with VS.
+        qCodeCoverageEnumType = Environment.hasVariable("[Sdk.BuildXL]qCodeCoverageEnumType") ? Environment.getStringValue("[Sdk.BuildXL]qCodeCoverageEnumType") : qCodeCoverageEnumType;
+
+        let dotnetProjectArguments: Argument[] = [
+            Cmd.option(
+                "--sandbox ",
+                Artifact.none(qtestSandboxInternal)
+            ),
+            Cmd.option(
+                "--qTestInputsManifestFile ",
+                Artifact.input(inputsFile)
+            ),
+            Cmd.option(
+                "--copyToSandbox ",
+                // Use CopyToSandbox in case qTestDirToDeploy is passed but does not have any contents.
+                Artifact.input(inputsFile ? undefined : args.qTestDirToDeploy)
+            ),
+            Cmd.option(
+                "--vstestSettingsFile ",
+                qCodeCoverageEnumType === dynamicCodeCovString && args.vstestSettingsFileForCoverage !== undefined
+                    ? Artifact.input(args.vstestSettingsFileForCoverage)
+                    : Artifact.input(args.vstestSettingsFile)
+            ),
+            Cmd.option("--qCodeCoverageEnumType ", qCodeCoverageEnumType),
+            Cmd.option("--QTestCcTargetsFile  ", changeAffectedInputListWrittenFile),
+        ];
+
+        commandLineArgs = commandLineArgs.concat(dotnetProjectArguments);
+    }
 
     let unsafeOptions = {
         hasUntrackedChildProcesses: args.qTestUnsafeArguments && args.qTestUnsafeArguments.doNotTrackDependencies,
@@ -327,15 +357,32 @@ export function runQTest(args: QTestArguments): Result {
             // Untracking Recyclebin here to primarily unblock user scenarios that
             // deal with soft-delete and restoration of files from recycle bin.
             d`${sandboxDir.pathRoot}/$Recycle.Bin`,
-            ...(args.qTestUntrackedScopes || [])
+            ...(args.qTestUntrackedScopes || []),
+            // Untrack logDir to keep logs intact between multiple retries.
+            // This also means that logDir will not be cached between build sessions.
+            ...addIf(isJSProject, logDir),
+            // To ensure that dmps are generated during crashes, QTest now includes procdmp.exe
+            // However, this tool reads dbghelp.dll located in the following directory in CloudBuild machines
+            // This should technically be part of the tool definition, but we want to make sure
+            // that this scope does not get overridden when customers override qtesttool.
+            d`C:/Debuggers`
         ],
-        requireGlobalDependencies: true
+        requireGlobalDependencies: true,
+        passThroughEnvironmentVariables: isJSProject ? jsProject.passThroughEnvironmentVariables : undefined,
     };
 
     let envVars = [
         ...(args.qTestEnvironmentVariables || []),
         ...(Environment.hasVariable("__CLOUDBUILD_DOTNETCORE_DEPLOYMENT_PATH__") ? [{name: "__CLOUDBUILD_DOTNETCORE_DEPLOYMENT_PATH__", value: Environment.getStringValue("__CLOUDBUILD_DOTNETCORE_DEPLOYMENT_PATH__")}] : [])
     ];
+
+    let outputs = undefined;
+    if (isJSProject)
+    {
+        //TODO: Frontend should be filtering the TEMP variables. We can remove this filter after or in that PR.
+        envVars = envVars.concat(jsProject.environmentVariables.filter(o => o.name !== "TEMP" && o.name !== "TMP"));
+        outputs = jsProject.outputs.map(o => typeof o === "Directory" ? {directory: o, kind: "shared"} : {artifact: o, existence: "optional"});
+    }
 
     let result = Transformer.execute(
         Object.merge<Transformer.ExecuteArguments>(
@@ -347,22 +394,27 @@ export function runQTest(args: QTestArguments): Result {
                 arguments: commandLineArgs,
                 consoleOutput: consolePath,
                 workingDirectory: sandboxDir,
-                tempDirectory: qtestRunTempDirectory,
+                tempDirectory: isJSProject ? jsProject.tempDirectory : Context.getTempDirectory("qtestRunTemp"),
                 weight: args.weight,
                 environmentVariables: envVars,
                 disableCacheLookup: Environment.getFlag("[Sdk.BuildXL]qTestForceTest"),
-                additionalTempDirectories : [sandboxDir],
+                additionalTempDirectories : isJSProject ? [] : [sandboxDir],
                 privilegeLevel: args.privilegeLevel,
                 dependencies: [
                     //When there are test failures, and PDBs are looked up to generate the stack traces,
                     //the original location of PDBs is used instead of PDBs in test sandbox. This is
                     //a temporary solution until a permanent fix regarding the lookup is identified
-                    ...(args.qTestInputs || args.qTestDirToDeploy.contents),
+                    ...(args.qTestInputs || (args.qTestDirToDeploy ? args.qTestDirToDeploy.contents : [])),
                     ...(args.qTestRuntimeDependencies || []),
+                    ...(isJSProject ? jsProject.inputs : []),
                 ],
                 unsafe: unsafeOptions,
-                retryExitCodes: [2],
+                retryExitCodes: [2, 42],
                 acquireSemaphores: args.qTestAcquireSemaphores,
+                retryAttemptEnvironmentVariable: "QTEST_RETRIES_EXECUTED",
+                processRetries: (args.qTestAttemptCount ? args.qTestAttemptCount : 0) + 3,
+                allowUndeclaredSourceReads: isJSProject,
+                outputs: outputs,
             },
             changeAffectedInputListWrittenFileArg
         )
@@ -371,7 +423,8 @@ export function runQTest(args: QTestArguments): Result {
     const qTestLogsDir: StaticDirectory = result.getOutputDirectory(logDir);
 
     // If code coverage is enabled, schedule a pip that will perform coverage file upload.
-    if (qCodeCoverageEnumType === dynamicCodeCovString) {
+    // Code Coverage file upload is currently only supported for non-JavaScript targets.
+    if (qCodeCoverageEnumType === dynamicCodeCovString && !isJSProject) {
         const parentDir = d`${logDir}`.parent;
         const leafDir = d`${logDir}`.nameWithoutExtension;
         const coverageLogDir = d`${parentDir}/CoverageLogs/${leafDir}`;
@@ -407,6 +460,7 @@ export function runQTest(args: QTestArguments): Result {
     return <Result>{
         console: result.getOutputFile(consolePath),
         qTestLogs: qTestLogsDir,
+        executeResult: result
     };
 }
 
@@ -419,7 +473,9 @@ export const enum QTestType {
     @@Tool.option("--runner MsTest_Latest")
     msTest_latest = 1,
     @@Tool.option("--runner Gradle")
-    Gradle = 2
+    Gradle = 2,
+    @@Tool.option("--runner Console")
+    Console = 3
 }
 
 /**
@@ -539,7 +595,14 @@ export interface QTestArguments extends Transformer.RunnerArguments {
     qTestUntrackedPaths?: (File | Directory)[];
     /** Directories and their recursive content that are out of scope of the build or test project where unsafe file access needs to be permitted */
     qTestUntrackedScopes?: Directory[];
-
+    /** Specifies whether to fail if vstest platform reports a failure in the trx in the absence of failed test cases. */
+    qTestHonorTrxResultSummary?: boolean;
+    /** Encapsulates execution details needed to run tests for JavaScript based projects. */
+    javaScriptProject?: JavaScriptProject;
+    /** Specifies what parser to use to parse QTest results */
+    qTestParserType?: string;
+    /** Specifies the upload behavior to Azure DevOps for QTest logs. Default mode is OnlyFailedTargets.*/
+    qTestAzureDevOpsLogUploadMode?: "AllTargets" | "OnlyFailedTargets" | "None"; 
     /** Nested tool options */
     tools?: {
         /** 
@@ -568,4 +631,6 @@ export interface Result {
     console: DerivedFile;
     /** Location of the QTestLogs directory to consume any other outputs of QTest */
     qTestLogs: StaticDirectory;
+    /** Transformer.ExecuteResult object itself. */
+    executeResult: Transformer.ExecuteResult;
 }

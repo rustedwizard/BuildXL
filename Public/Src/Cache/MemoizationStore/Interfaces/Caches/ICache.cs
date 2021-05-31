@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using BuildXL.Cache.ContentStore.Interfaces.Results;
 using BuildXL.Cache.ContentStore.Interfaces.Stores;
@@ -42,6 +43,15 @@ namespace BuildXL.Cache.MemoizationStore.Interfaces.Caches
         /// <summary>
         ///     Asynchronously enumerates the known strong fingerprints.
         /// </summary>
-        System.Collections.Generic.IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context);
+        IAsyncEnumerable<StructResult<StrongFingerprint>> EnumerateStrongFingerprints(Context context);
+    }
+
+    /// <nodoc />
+    public interface IPublishingCache : ICache
+    {
+        /// <summary>
+        ///     Create a writeable session that also publishes content hash lists to the remote.
+        /// </summary>
+        CreateSessionResult<ICacheSession> CreatePublishingSession(Context context, string name, ImplicitPin implicitPin, PublishingCacheConfiguration publishingConfig, string pat);
     }
 }

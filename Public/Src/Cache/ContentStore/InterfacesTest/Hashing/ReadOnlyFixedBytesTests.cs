@@ -255,8 +255,6 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest.Hashing
             Assert.Equal(v1, v2);
         }
 
-#if NET_COREAPP
-
         [Fact]
         public void BufferRoundtripViaSpan()
         {
@@ -267,8 +265,6 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest.Hashing
             var v2 = new ReadOnlyFixedBytes(sb);
             Assert.Equal(v1, v2);
         }
-
-#endif
 
         [Fact]
         public void BufferPositiveOffsetRoundtrip()
@@ -290,6 +286,48 @@ namespace BuildXL.Cache.ContentStore.InterfacesTest.Hashing
                 {
                     var v1 = ReadOnlyFixedBytes.Random();
                     v1.Serialize(writer);
+                    ms.Position = 0;
+
+                    using (var reader = new BinaryReader(ms))
+                    {
+                        var v2 = ReadOnlyFixedBytes.ReadFrom(reader);
+                        Assert.Equal(v1, v2);
+                    }
+                }
+            }
+        }
+
+        [Fact]
+        public void BinaryRoundtripWithBuffer()
+        {
+            using (var ms = new MemoryStream())
+            {
+                using (var writer = new BinaryWriter(ms))
+                {
+                    var buffer = new byte[100];
+                    var v1 = ReadOnlyFixedBytes.Random();
+                    v1.Serialize(writer, buffer);
+                    ms.Position = 0;
+
+                    using (var reader = new BinaryReader(ms))
+                    {
+                        var v2 = ReadOnlyFixedBytes.ReadFrom(reader);
+                        Assert.Equal(v1, v2);
+                    }
+                }
+            }
+        }
+
+        [Fact]
+        public void BinaryRoundtripWithSerializeFast()
+        {
+            using (var ms = new MemoryStream())
+            {
+                using (var writer = new BinaryWriter(ms))
+                {
+                    var buffer = new byte[100];
+                    var v1 = ReadOnlyFixedBytes.Random();
+                    v1.Serialize(writer, buffer);
                     ms.Position = 0;
 
                     using (var reader = new BinaryReader(ms))

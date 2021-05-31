@@ -2,13 +2,16 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 namespace Library {
+    export declare const qualifier : BuildXLSdk.DefaultQualifierWithNet472AndNetStandard20;
+    
     @@public
     export const dll = BuildXLSdk.library({
         assemblyName: "BuildXL.Cache.MemoizationStore",
         sources: globR(d`.`,"*.cs"),
         references: [
             ...addIf(BuildXLSdk.isFullFramework,
-                NetFx.System.Data.dll
+                NetFx.System.Data.dll,
+                NetFx.System.Runtime.Serialization.dll
             ),
             ContentStore.Distributed.dll,
             ContentStore.UtilitiesCore.dll,
@@ -19,11 +22,11 @@ namespace Library {
             Interfaces.dll,
             
             importFrom("BuildXL.Utilities").dll,
+            importFrom("BuildXL.Utilities").Collections.dll,
 
             ...BuildXLSdk.bclAsyncPackages,
             
             ...importFrom("BuildXL.Cache.ContentStore").getGrpcPackages(true),
-            BuildXLSdk.Factory.createBinary(importFrom("TransientFaultHandling.Core").pkg.contents, r`lib/NET4/Microsoft.Practices.TransientFaultHandling.Core.dll`),
         ],
         allowUnsafeBlocks: true,
         internalsVisibleTo: [
